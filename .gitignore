@@ -44,6 +44,9 @@ Thumbs.db
 .env.*
 !.env.example
 
+# Local design notes — not published
+/docs/
+
 # Coverage / benches
 coverage/
 lcov.info
