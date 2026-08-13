@@ -9,4 +9,5 @@ description = "Shared frame stream plus GIF/video/audio encoder boundaries"
 [dependencies]
 asterism-core.workspace = true
 gif = "0.13"
+image.workspace = true
 thiserror.workspace = true

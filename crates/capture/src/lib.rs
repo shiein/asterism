@@ -8,6 +8,6 @@ pub mod overlay;
 pub mod scroll;
 
 pub use annotation::{Annotation, AnnotationKind, AnnotationScene, export_png};
-pub use backend::{CaptureError, CapturedFrame, MonitorInfo, XcapBackend};
+pub use backend::{CaptureError, CapturedFrame, MonitorInfo, WindowInfo, XcapBackend};
 pub use overlay::{FastOverlay, OverlayEvent, OverlaySession, Selection, select_region};
 pub use scroll::{ScrollCaptureEngine, StitchFrame};

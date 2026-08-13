@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use xcap::Monitor;
+use xcap::{Monitor, Window};
 
 #[derive(Debug, Error)]
 pub enum CaptureError {
@@ -31,10 +31,20 @@ pub struct CapturedFrame {
     pub monitor: MonitorInfo,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WindowInfo {
+    pub id: u32,
+    pub title: String,
+    pub app: String,
+    pub size: (u32, u32),
+}
+
 pub trait CaptureBackend: Send + Sync {
     fn permission_preflight(&self) -> Result<(), CaptureError>;
     fn list_monitors(&self) -> Result<Vec<MonitorInfo>, CaptureError>;
     fn capture_display(&self, monitor: &MonitorInfo) -> Result<CapturedFrame, CaptureError>;
+    fn list_windows(&self) -> Result<Vec<WindowInfo>, CaptureError>;
+    fn capture_window(&self, id: u32) -> Result<CapturedFrame, CaptureError>;
 }
 
 #[derive(Default)]
@@ -75,6 +85,49 @@ impl CaptureBackend for XcapBackend {
             dst[3] = src[3];
         }
         Ok(CapturedFrame { width, height, bgra, monitor: monitor.clone() })
+    }
+
+    fn list_windows(&self) -> Result<Vec<WindowInfo>, CaptureError> {
+        let windows = Window::all().map_err(|e| CaptureError::Failed(e.to_string()))?;
+        Ok(windows
+            .iter()
+            .filter_map(|w| {
+                Some(WindowInfo {
+                    id: w.id().ok()?,
+                    title: w.title().unwrap_or_default(),
+                    app: w.app_name().unwrap_or_default(),
+                    size: (w.width().unwrap_or(0), w.height().unwrap_or(0)),
+                })
+            })
+            .collect())
+    }
+
+    fn capture_window(&self, id: u32) -> Result<CapturedFrame, CaptureError> {
+        let found = Window::all()
+            .map_err(|e| CaptureError::Failed(e.to_string()))?
+            .into_iter()
+            .find(|w| w.id().ok() == Some(id))
+            .ok_or(CaptureError::Unavailable)?;
+        let img = found.capture_image().map_err(|e| CaptureError::Failed(e.to_string()))?;
+        let monitor = self.list_monitors()?.into_iter().next().unwrap_or(MonitorInfo {
+            id: 0,
+            name: "window".into(),
+            origin_physical: (0, 0),
+            origin_logical: (0.0, 0.0),
+            scale_factor: 1.0,
+            capture_size: (img.width(), img.height()),
+        });
+        let width = img.width();
+        let height = img.height();
+        let rgba = img.into_raw();
+        let mut bgra = vec![0u8; rgba.len()];
+        for (src, dst) in rgba.chunks_exact(4).zip(bgra.chunks_exact_mut(4)) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = src[3];
+        }
+        Ok(CapturedFrame { width, height, bgra, monitor })
     }
 }
 

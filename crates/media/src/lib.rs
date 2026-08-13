@@ -1,6 +1,7 @@
 //! Capture 层共用 FrameStream；Encoder 分离。
 
 pub mod audio;
+pub mod avi;
 pub mod gifenc;
 pub mod video;
 

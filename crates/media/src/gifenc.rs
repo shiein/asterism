@@ -46,6 +46,10 @@ impl GifSession {
     }
 }
 
+pub fn bgra_to_rgba_pub(bgra: &[u8]) -> Vec<u8> {
+    bgra_to_rgba(bgra)
+}
+
 fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
     let mut out = bgra.to_vec();
     for px in out.chunks_exact_mut(4) {
