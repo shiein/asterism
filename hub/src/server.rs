@@ -54,7 +54,9 @@ pub async fn run(config: HubConfig) -> Result<()> {
             let hyper_service = hyper::service::service_fn(move |request: Request<Incoming>| {
                 app.clone().call(request)
             });
-            if let Err(err) = Builder::new(TokioExecutor::new()).serve_connection(io, hyper_service).await {
+            if let Err(err) =
+                Builder::new(TokioExecutor::new()).serve_connection(io, hyper_service).await
+            {
                 tracing::debug!(error = %err, %peer, "connection error");
             }
         });
@@ -73,7 +75,10 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/history", get(api::not_implemented))
         .route("/api/v1/history/{id}", delete(api::not_implemented))
         .route("/api/v1/blobs", post(api::not_implemented))
-        .route("/api/v1/blobs/{id}/chunks/{index}", put(api::not_implemented).get(api::not_implemented))
+        .route(
+            "/api/v1/blobs/{id}/chunks/{index}",
+            put(api::not_implemented).get(api::not_implemented),
+        )
         .route("/api/v1/blobs/{id}/commit", post(api::not_implemented))
         .route("/ws/v1/device", get(api::not_implemented))
         .fallback(web::index)

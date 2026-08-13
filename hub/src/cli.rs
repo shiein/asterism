@@ -147,6 +147,29 @@ fn config_path_hint(explicit: Option<&Path>) -> PathBuf {
     explicit.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("./data/config.toml"))
 }
 
+fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &to)?;
+        } else {
+            fs::copy(entry.path(), to)?;
+        }
+    }
+    Ok(())
+}
+
+impl HubConfig {
+    fn to_toml(&self) -> Result<String> {
+        toml::to_string_pretty(self).context("serialize config")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,28 +190,5 @@ mod tests {
         let dest = dir.path().join("backup");
         backup(BackupArgs { config, dest: dest.clone() }).unwrap();
         assert!(dest.join("hub.db").exists());
-    }
-}
-
-fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
-    if !src.exists() {
-        return Ok(());
-    }
-    fs::create_dir_all(dest)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let to = dest.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &to)?;
-        } else {
-            fs::copy(entry.path(), to)?;
-        }
-    }
-    Ok(())
-}
-
-impl HubConfig {
-    fn to_toml(&self) -> Result<String> {
-        Ok(toml::to_string_pretty(self).context("serialize config")?)
     }
 }

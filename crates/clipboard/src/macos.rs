@@ -37,7 +37,15 @@ pub fn read() -> Result<Option<CapturedClipboard>> {
     let image = read_image(&pb);
     let files = read_files(&pb);
 
-    Ok(Some(CapturedClipboard { change_token, source_app, formats: types, text, image, files, sensitive }))
+    Ok(Some(CapturedClipboard {
+        change_token,
+        source_app,
+        formats: types,
+        text,
+        image,
+        files,
+        sensitive,
+    }))
 }
 
 pub fn write(content: &NormalizedContent) -> Result<()> {

@@ -19,5 +19,6 @@ pub use device::{Device, DeviceCapabilities, DevicePlatform};
 pub use error::CoreError;
 pub use id::{AccountId, BlobId, ContentId, DeviceId, ManifestId};
 pub use policy::{
-    AppExclusion, CapturePolicy, RemoteLimits, RemotePolicy, SensitiveDecision, UniversalClipboardMode,
+    AppExclusion, CapturePolicy, RemoteLimits, RemotePolicy, SensitiveDecision,
+    UniversalClipboardMode,
 };

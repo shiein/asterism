@@ -21,7 +21,11 @@ impl HistoryQuery {
     }
 }
 
-pub fn insert_item(conn: &Connection, item: &ContentItem, manifest: Option<&FileManifest>) -> Result<()> {
+pub fn insert_item(
+    conn: &Connection,
+    item: &ContentItem,
+    manifest: Option<&FileManifest>,
+) -> Result<()> {
     let (payload_kind, payload_inline, blob_id, manifest_id) = match &item.payload_ref {
         PayloadRef::Inline { bytes } => ("inline", Some(bytes.as_ref()), None, None),
         PayloadRef::Blob { blob_id } => ("blob", None, Some(blob_id.as_str().to_string()), None),
@@ -257,12 +261,16 @@ fn map_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContentItem> {
     }
 
     let payload_ref = match payload_kind.as_str() {
-        "inline" => PayloadRef::Inline {
-            bytes: bytes::Bytes::from(payload_inline.unwrap_or_default()),
-        },
+        "inline" => {
+            PayloadRef::Inline { bytes: bytes::Bytes::from(payload_inline.unwrap_or_default()) }
+        }
         "blob" => PayloadRef::Blob {
             blob_id: BlobId::from_hex(blob_id.unwrap_or_default()).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(e))
+                rusqlite::Error::FromSqlConversionFailure(
+                    12,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
             })?,
         },
         _ => {

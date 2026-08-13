@@ -1,7 +1,7 @@
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CryptoError, Result};
@@ -25,7 +25,12 @@ fn aad(blob_id: &[u8; 32], chunk_index: u32) -> [u8; 36] {
     out
 }
 
-pub fn encrypt_chunk(item_key: &ItemKey, blob_id: [u8; 32], chunk_index: u32, plaintext: &[u8]) -> Result<EncryptedChunk> {
+pub fn encrypt_chunk(
+    item_key: &ItemKey,
+    blob_id: [u8; 32],
+    chunk_index: u32,
+    plaintext: &[u8],
+) -> Result<EncryptedChunk> {
     if plaintext.len() > CHUNK_SIZE {
         return Err(CryptoError::InvalidChunk);
     }
@@ -50,7 +55,11 @@ pub fn decrypt_chunk(item_key: &ItemKey, chunk: &EncryptedChunk) -> Result<Vec<u
 }
 
 /// 小文本可直接作为单个加密 payload。
-pub fn encrypt_small(item_key: &ItemKey, blob_id: [u8; 32], plaintext: &[u8]) -> Result<EncryptedChunk> {
+pub fn encrypt_small(
+    item_key: &ItemKey,
+    blob_id: [u8; 32],
+    plaintext: &[u8],
+) -> Result<EncryptedChunk> {
     encrypt_chunk(item_key, blob_id, 0, plaintext)
 }
 

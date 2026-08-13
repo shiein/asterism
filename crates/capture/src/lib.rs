@@ -77,5 +77,3 @@ pub trait ScrollCaptureEngine: Send {
     fn start(&mut self) -> Result<(), CaptureError>;
     fn stop_auto_preserve(&mut self) -> Result<CapturedFrame, CaptureError>;
 }
-
-

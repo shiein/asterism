@@ -8,7 +8,9 @@ pub const WIN_NO_HISTORY: &str = "CanIncludeInClipboardHistory";
 pub const WIN_NO_CLOUD: &str = "CanUploadToCloudClipboard";
 
 pub fn decide(captured: &CapturedClipboard, policy: &CapturePolicy) -> SensitiveDecision {
-    if policy.respect_sensitive_flags && (captured.sensitive || has_sensitive_format(&captured.formats)) {
+    if policy.respect_sensitive_flags
+        && (captured.sensitive || has_sensitive_format(&captured.formats))
+    {
         return SensitiveDecision::MarkedSensitive;
     }
     let app = captured.source_app.as_deref();
@@ -43,6 +45,9 @@ mod tests {
             files: vec![],
             sensitive: false,
         };
-        assert_eq!(decide(&captured, &CapturePolicy::default()), SensitiveDecision::MarkedSensitive);
+        assert_eq!(
+            decide(&captured, &CapturePolicy::default()),
+            SensitiveDecision::MarkedSensitive
+        );
     }
 }

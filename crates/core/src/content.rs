@@ -161,6 +161,8 @@ pub struct ItemMetadata {
     pub text_preview: Option<String>,
     pub image: Option<ImageMeta>,
     pub files: Option<FileManifestSummary>,
+    /// 本地文件缓存相对 `cache/items/<id>`；跨设备同步时不得当作源路径。
+    pub local_cache_rel: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,8 +192,10 @@ pub struct FileManifest {
 
 impl FileManifest {
     pub fn summary(&self) -> FileManifestSummary {
-        let file_count = self.entries.iter().filter(|e| e.kind == FileEntryKind::File).count() as u64;
-        let dir_count = self.entries.iter().filter(|e| e.kind == FileEntryKind::Directory).count() as u64;
+        let file_count =
+            self.entries.iter().filter(|e| e.kind == FileEntryKind::File).count() as u64;
+        let dir_count =
+            self.entries.iter().filter(|e| e.kind == FileEntryKind::Directory).count() as u64;
         let total_logical_size = self.entries.iter().map(|e| e.size).sum();
         FileManifestSummary {
             root_name: self.root_name.clone(),

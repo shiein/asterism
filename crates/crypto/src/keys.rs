@@ -1,8 +1,8 @@
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
@@ -91,7 +91,8 @@ pub fn wrap_item_key(avk: &AccountVaultKey, item: &ItemKey) -> Result<WrappedIte
     let mut nonce_bytes = [0u8; 24];
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = XNonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher.encrypt(nonce, item.as_bytes().as_slice()).map_err(|_| CryptoError::Decrypt)?;
+    let ciphertext =
+        cipher.encrypt(nonce, item.as_bytes().as_slice()).map_err(|_| CryptoError::Decrypt)?;
     Ok(WrappedItemKey { nonce: nonce_bytes, ciphertext })
 }
 
@@ -106,7 +107,8 @@ pub fn unwrap_item_key(avk: &AccountVaultKey, wrapped: &WrappedItemKey) -> Resul
     wrap_key.zeroize();
 
     let nonce = XNonce::from_slice(&wrapped.nonce);
-    let plain = cipher.decrypt(nonce, wrapped.ciphertext.as_ref()).map_err(|_| CryptoError::Decrypt)?;
+    let plain =
+        cipher.decrypt(nonce, wrapped.ciphertext.as_ref()).map_err(|_| CryptoError::Decrypt)?;
     if plain.len() != 32 {
         return Err(CryptoError::InvalidKeyLength);
     }
@@ -194,7 +196,8 @@ fn decode_hex32(s: &str) -> Result<[u8; 32]> {
     }
     let mut out = [0u8; 32];
     for i in 0..32 {
-        let byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| CryptoError::InvalidKeyLength)?;
+        let byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+            .map_err(|_| CryptoError::InvalidKeyLength)?;
         out[i] = byte;
     }
     Ok(out)
@@ -233,7 +236,8 @@ mod tests {
     #[test]
     fn recovery_hex_roundtrip() {
         let avk = AccountVaultKey::generate();
-        let encoded = RecoveryKey::from_avk(AccountVaultKey::from_bytes(*avk.as_bytes())).encode_hex();
+        let encoded =
+            RecoveryKey::from_avk(AccountVaultKey::from_bytes(*avk.as_bytes())).encode_hex();
         let decoded = RecoveryKey::decode_hex(&encoded).unwrap();
         assert_eq!(decoded.avk().as_bytes(), avk.as_bytes());
     }

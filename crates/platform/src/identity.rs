@@ -31,13 +31,17 @@ impl LocalIdentity {
 }
 
 fn default_device_name() -> String {
-    hostname::get().ok().and_then(|h| h.into_string().ok()).filter(|s| !s.is_empty()).unwrap_or_else(|| {
-        if cfg!(target_os = "macos") {
-            "Mac".into()
-        } else if cfg!(windows) {
-            "Windows PC".into()
-        } else {
-            "Asterism".into()
-        }
-    })
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "Mac".into()
+            } else if cfg!(windows) {
+                "Windows PC".into()
+            } else {
+                "Asterism".into()
+            }
+        })
 }

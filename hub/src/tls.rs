@@ -8,8 +8,9 @@ use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 pub fn write_self_signed(cert_path: &Path, key_path: &Path) -> Result<()> {
-    let certified = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
-        .context("generate self-signed certificate")?;
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
+            .context("generate self-signed certificate")?;
     fs::write(cert_path, certified.cert.pem())?;
     fs::write(key_path, certified.key_pair.serialize_pem())?;
     Ok(())
@@ -42,6 +43,7 @@ fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     let keys: Vec<PrivatePkcs8KeyDer<'static>> = rustls_pemfile::pkcs8_private_keys(&mut reader)
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("parse private key")?;
-    let key = keys.into_iter().next().with_context(|| format!("no PKCS8 key in {}", path.display()))?;
+    let key =
+        keys.into_iter().next().with_context(|| format!("no PKCS8 key in {}", path.display()))?;
     Ok(PrivateKeyDer::Pkcs8(key))
 }

@@ -45,7 +45,8 @@ impl BlobStore {
 
     pub fn get(&self, id: &BlobId) -> Result<Vec<u8>> {
         let path = blob_path(&self.root, id);
-        let mut file = fs::File::open(&path).map_err(|_| StorageError::MissingBlob(id.to_string()))?;
+        let mut file =
+            fs::File::open(&path).map_err(|_| StorageError::MissingBlob(id.to_string()))?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
         Ok(buf)

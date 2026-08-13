@@ -48,15 +48,17 @@ impl NormalizedContent {
 
     pub fn dedup_tag(&self) -> [u8; 32] {
         match self {
-            Self::Text { dedup_tag, .. } | Self::Image { dedup_tag, .. } | Self::Files { dedup_tag, .. } => {
-                *dedup_tag
-            }
+            Self::Text { dedup_tag, .. }
+            | Self::Image { dedup_tag, .. }
+            | Self::Files { dedup_tag, .. } => *dedup_tag,
         }
     }
 
     pub fn flags(&self) -> ContentFlags {
         match self {
-            Self::Text { flags, .. } | Self::Image { flags, .. } | Self::Files { flags, .. } => *flags,
+            Self::Text { flags, .. } | Self::Image { flags, .. } | Self::Files { flags, .. } => {
+                *flags
+            }
         }
     }
 
@@ -142,7 +144,10 @@ impl NormalizedContent {
 
 /// 优先级：敏感标志 > 应用排除 > 文件 > 图片 > 文本。
 /// HTML/RTF/私有格式在同时存在通用格式时被降级忽略。
-pub fn normalize(captured: &CapturedClipboard, policy: &CapturePolicy) -> Result<Option<NormalizedContent>> {
+pub fn normalize(
+    captured: &CapturedClipboard,
+    policy: &CapturePolicy,
+) -> Result<Option<NormalizedContent>> {
     let decision = decide(captured, policy);
     if decision.should_ignore() {
         tracing::info!(?decision, "clipboard ignored by policy");

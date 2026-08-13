@@ -16,6 +16,7 @@ pub mod windows;
 
 pub use capture::{CapturedClipboard, ClipboardBackend, NativeClipboard};
 pub use error::ClipboardError;
+pub use files::{materialize_to_cache, preflight_paths};
 pub use guard::SelfWriteGuard;
 pub use normalize::NormalizedContent;
 pub use watcher::{ClipboardEvent, WatcherConfig, spawn_watcher};

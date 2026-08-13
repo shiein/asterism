@@ -83,7 +83,12 @@ pub struct RemotePolicy {
 
 impl Default for RemotePolicy {
     fn default() -> Self {
-        Self { allow_text: true, allow_image: true, allow_file: true, limits: RemoteLimits::default() }
+        Self {
+            allow_text: true,
+            allow_image: true,
+            allow_file: true,
+            limits: RemoteLimits::default(),
+        }
     }
 }
 
@@ -98,7 +103,12 @@ impl RemotePolicy {
         }
     }
 
-    pub fn check_preflight(&self, kind: ContentKind, file_count: u64, logical_size: u64) -> Result<()> {
+    pub fn check_preflight(
+        &self,
+        kind: ContentKind,
+        file_count: u64,
+        logical_size: u64,
+    ) -> Result<()> {
         if !self.allows_kind(kind) {
             return Err(CoreError::PolicyRejected("kind disabled for remote"));
         }

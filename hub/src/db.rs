@@ -104,5 +104,3 @@ pub fn backup(src: &Path, dest: &Path) -> Result<()> {
     backup.run_to_completion(64, std::time::Duration::from_millis(16), None)?;
     Ok(())
 }
-
-

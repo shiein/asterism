@@ -19,8 +19,8 @@ const READER_COUNT: usize = 3;
 
 enum WriteOp {
     Insert {
-        item: ContentItem,
-        manifest: Option<FileManifest>,
+        item: Box<ContentItem>,
+        manifest: Option<Box<FileManifest>>,
         reply: SyncSender<Result<ContentId>>,
     },
     Favorite {
@@ -102,7 +102,11 @@ impl Store {
                 "sensitive or transient items must not enter history",
             )));
         }
-        self.call(|reply| WriteOp::Insert { item, manifest, reply })
+        self.call(|reply| WriteOp::Insert {
+            item: Box::new(item),
+            manifest: manifest.map(Box::new),
+            reply,
+        })
     }
 
     pub fn get(&self, id: ContentId) -> Result<ContentItem> {
@@ -168,21 +172,17 @@ fn writer_loop(db: PathBuf, rx: Receiver<WriteOp>) {
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(WriteOp::Insert { item, manifest, reply }) => {
                 let id = item.id;
-                let result = conn
-                    .unchecked_transaction()
-                    .map_err(StorageError::from)
-                    .and_then(|tx| {
-                        repo::insert_item(&tx, &item, manifest.as_ref())?;
+                let result =
+                    conn.unchecked_transaction().map_err(StorageError::from).and_then(|tx| {
+                        repo::insert_item(&tx, &item, manifest.as_deref())?;
                         tx.commit()?;
                         Ok(id)
                     });
                 let _ = reply.send(result);
             }
             Ok(WriteOp::Favorite { id, favorite, reply }) => {
-                let result = conn
-                    .unchecked_transaction()
-                    .map_err(StorageError::from)
-                    .and_then(|tx| {
+                let result =
+                    conn.unchecked_transaction().map_err(StorageError::from).and_then(|tx| {
                         repo::set_favorite(&tx, id, favorite)?;
                         tx.commit()?;
                         Ok(())
@@ -190,10 +190,8 @@ fn writer_loop(db: PathBuf, rx: Receiver<WriteOp>) {
                 let _ = reply.send(result);
             }
             Ok(WriteOp::Delete { id, reply }) => {
-                let result = conn
-                    .unchecked_transaction()
-                    .map_err(StorageError::from)
-                    .and_then(|tx| {
+                let result =
+                    conn.unchecked_transaction().map_err(StorageError::from).and_then(|tx| {
                         let blob = repo::delete_item(&tx, id)?;
                         tx.commit()?;
                         Ok(blob)
@@ -266,16 +264,26 @@ mod tests {
         assert_eq!(loaded.kind, ContentKind::Text);
 
         let listed = store
-            .history(HistoryQuery { query: Some("世界".into()), limit: 10, ..HistoryQuery::default() })
+            .history(HistoryQuery {
+                query: Some("世界".into()),
+                limit: 10,
+                ..HistoryQuery::default()
+            })
             .unwrap();
         assert_eq!(listed.len(), 1);
         let listed_fts = store
-            .history(HistoryQuery { query: Some("asterism".into()), limit: 10, ..HistoryQuery::default() })
+            .history(HistoryQuery {
+                query: Some("asterism".into()),
+                limit: 10,
+                ..HistoryQuery::default()
+            })
             .unwrap();
         assert_eq!(listed_fts.len(), 1);
 
         store.set_favorite(id, true).unwrap();
-        let fav = store.history(HistoryQuery { favorite_only: true, limit: 10, ..HistoryQuery::default() }).unwrap();
+        let fav = store
+            .history(HistoryQuery { favorite_only: true, limit: 10, ..HistoryQuery::default() })
+            .unwrap();
         assert_eq!(fav.len(), 1);
         assert!(fav[0].flags.contains(ContentFlags::FAVORITE));
 

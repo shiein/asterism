@@ -33,7 +33,11 @@ impl AppPaths {
             };
         }
         let fallback = std::env::temp_dir().join("asterism");
-        Self { data_dir: fallback.clone(), cache_dir: fallback.join("cache"), config_dir: fallback.join("config") }
+        Self {
+            data_dir: fallback.clone(),
+            cache_dir: fallback.join("cache"),
+            config_dir: fallback.join("config"),
+        }
     }
 
     pub fn ensure(&self) -> std::io::Result<()> {

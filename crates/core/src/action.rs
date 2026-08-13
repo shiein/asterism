@@ -49,7 +49,11 @@ pub enum ActionError {
 pub trait ContentAction: Send + Sync {
     fn id(&self) -> ActionId;
     fn supports(&self, item: &ContentItem) -> bool;
-    async fn execute(&self, ctx: &ActionContext, item: &ContentItem) -> Result<ActionResult, ActionError>;
+    async fn execute(
+        &self,
+        ctx: &ActionContext,
+        item: &ContentItem,
+    ) -> Result<ActionResult, ActionError>;
 }
 
 /// 截图 Toolbar 与 History 右键菜单共用。

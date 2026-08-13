@@ -32,10 +32,10 @@ impl SelfWriteGuard {
         let mut inner = self.inner.lock();
         let now = Instant::now();
         inner.gc(now, self.window);
-        if let Some(id) = id {
-            if inner.by_id.contains_key(&id) {
-                return true;
-            }
+        if let Some(id) = id
+            && inner.by_id.contains_key(&id)
+        {
+            return true;
         }
         inner.by_tag.contains_key(dedup_tag)
     }
