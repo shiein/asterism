@@ -1,0 +1,39 @@
+[package]
+name = "asterism-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Asterism self-hosted hub: auth, relay, history, blobs, embedded web"
+
+[[bin]]
+name = "asterism-hub"
+path = "src/main.rs"
+
+[dependencies]
+asterism-core.workspace = true
+asterism-crypto.workspace = true
+asterism-storage.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+clap.workspace = true
+hyper = { version = "1.6", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1"] }
+rcgen.workspace = true
+rusqlite.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+toml.workspace = true
+tower = { version = "0.5", features = ["util"] }
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3.20"

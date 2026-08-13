@@ -1,0 +1,19 @@
+[Unit]
+Description=Asterism Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=asterism
+ExecStart=/opt/asterism/asterism-hub serve --config /opt/asterism/data/config.toml
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/asterism/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
