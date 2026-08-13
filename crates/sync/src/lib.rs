@@ -27,7 +27,10 @@ pub use error::SyncError;
 pub use hub_client::HubClient;
 pub use lan::DiscoveredPeer;
 pub use pairing::{PairingFinish, PairingOffer};
-pub use payload::{SyncPackage, decode_package, encode_package, pack, unpack_body, unpack_meta};
+pub use payload::{
+    SyncPackage, decode_package, decrypt_blob_chunks, encode_package, encrypt_blob_chunks, pack,
+    unpack_body, unpack_meta,
+};
 pub use protocol::{Envelope, MessageBody, PROTOCOL_VERSION};
 pub use session::SyncSession;
 pub use transport::{DirectTransport, HubTransport, Route, TransportError};

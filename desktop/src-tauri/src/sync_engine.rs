@@ -17,8 +17,8 @@ use asterism_sync::lan::{self, DiscoveredPeer};
 use asterism_sync::pairing::PairingFinish;
 use asterism_sync::protocol::{Envelope, ItemOffer, ItemReady, LanItem, MessageBody};
 use asterism_sync::{
-    DeviceCert, decode_package, encode_package, pack, pack_tree, unpack_body, unpack_meta,
-    unpack_tree,
+    DeviceCert, decode_package, decrypt_blob_chunks, encode_package, encrypt_blob_chunks, pack,
+    pack_tree, unpack_body, unpack_meta, unpack_tree,
 };
 use mdns_sd::ServiceEvent;
 use parking_lot::Mutex;
@@ -398,23 +398,20 @@ async fn publish(
     }
     let payload = load_payload(item, store, paths)?;
     let meta = serde_json::to_vec(&item.metadata)?;
-    let pkg = pack(vault, &meta, payload.as_deref())?;
+    let mut pkg = pack(vault, &meta, payload.as_deref())?;
     let client = client(&snap).await?;
     let mut blob_id = None;
     if pkg.body.is_none()
         && let Some(bytes) = payload
     {
         let id = client.begin_blob().await?;
-        // 大文件按 1MB 切块上传密文
-        let enc = asterism_crypto::encrypt_metadata(vault, &bytes)?;
-        let packed = serde_json::to_vec(&enc)?;
-        const PART: usize = 1024 * 1024;
-        let mut idx = 0u32;
-        for chunk in packed.chunks(PART) {
-            client.put_chunk(&id, idx, chunk.to_vec()).await?;
-            idx += 1;
+        let chunks = encrypt_blob_chunks(vault, &bytes)?;
+        let count = u32::try_from(chunks.len())?;
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            client.put_chunk(&id, u32::try_from(index)?, chunk).await?;
         }
-        client.commit_blob(&id, idx).await?;
+        client.commit_blob(&id, count).await?;
+        pkg.chunk_count = count;
         blob_id = Some(id);
     }
     let dto = HistoryDto {
@@ -496,15 +493,24 @@ async fn apply_remote(
     if payload.is_none()
         && let Some(blob) = &dto.blob_id
     {
-        let mut packed = Vec::new();
-        for i in 0..512 {
-            match client.get_chunk(blob, i).await {
-                Ok(part) => packed.extend(part),
-                Err(_) => break,
+        if pkg.chunk_count > 0 {
+            let mut chunks = Vec::with_capacity(pkg.chunk_count as usize);
+            for index in 0..pkg.chunk_count {
+                chunks.push(client.get_chunk(blob, index).await?);
             }
-        }
-        if let Ok(enc) = serde_json::from_slice::<asterism_crypto::EncryptedPayload>(&packed) {
-            payload = Some(asterism_crypto::decrypt_metadata(vault, &enc)?);
+            payload = Some(decrypt_blob_chunks(vault, &chunks)?);
+        } else {
+            // 兼容修复前已经上传的单 AEAD 包。
+            let mut packed = Vec::new();
+            for i in 0..512 {
+                match client.get_chunk(blob, i).await {
+                    Ok(part) => packed.extend(part),
+                    Err(_) => break,
+                }
+            }
+            if let Ok(enc) = serde_json::from_slice::<asterism_crypto::EncryptedPayload>(&packed) {
+                payload = Some(asterism_crypto::decrypt_metadata(vault, &enc)?);
+            }
         }
     }
     let Some(bytes) = payload else {
@@ -605,6 +611,12 @@ pub fn unwrap_pairing_avk(code: &str, wrapped_hex: &str) -> anyhow::Result<Accou
     Ok(AccountVaultKey::from_bytes(raw))
 }
 
+pub async fn start_pairing_code(settings: &SyncSettings) -> anyhow::Result<String> {
+    let url = settings.hub_url.clone().ok_or_else(|| anyhow::anyhow!("set hub url first"))?;
+    let client = HubClient::new(url)?;
+    Ok(client.pairing_start().await?.code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,10 +631,4 @@ mod tests {
         let actual = unwrap_pairing_avk(code, &encoded).unwrap();
         assert_eq!(actual.as_bytes(), expected.as_bytes());
     }
-}
-
-pub async fn start_pairing_code(settings: &SyncSettings) -> anyhow::Result<String> {
-    let url = settings.hub_url.clone().ok_or_else(|| anyhow::anyhow!("set hub url first"))?;
-    let client = HubClient::new(url)?;
-    Ok(client.pairing_start().await?.code)
 }

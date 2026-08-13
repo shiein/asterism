@@ -1,4 +1,8 @@
-use asterism_crypto::{AccountVaultKey, EncryptedPayload, decrypt_metadata, encrypt_metadata};
+use asterism_crypto::{
+    AccountVaultKey, CHUNK_SIZE, EncryptedChunk, EncryptedPayload, ItemKey, WrappedItemKey,
+    blake3_bytes, decrypt_chunk, decrypt_metadata, encrypt_chunk, encrypt_metadata,
+    unwrap_item_key, wrap_item_key,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SyncError};
@@ -50,6 +54,101 @@ pub fn decode_package(hex_str: &str) -> Result<SyncPackage> {
     serde_json::from_slice(&bytes).map_err(|e| SyncError::Protocol(e.to_string()))
 }
 
+const BLOB_CHUNK_MAGIC: &[u8; 4] = b"ASB1";
+const BLOB_CHUNK_HEADER: usize = 4 + 24 + 48 + 32 + 4 + 24 + 4;
+
+pub fn encrypt_blob_chunks(avk: &AccountVaultKey, plaintext: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let item_key = ItemKey::generate();
+    let wrapped = wrap_item_key(avk, &item_key).map_err(crypto_failed)?;
+    let blob_id = blake3_bytes(plaintext);
+    plaintext
+        .chunks(CHUNK_SIZE)
+        .enumerate()
+        .map(|(index, bytes)| {
+            let index = u32::try_from(index)
+                .map_err(|_| SyncError::Protocol("blob has too many chunks".into()))?;
+            let chunk = encrypt_chunk(&item_key, blob_id, index, bytes).map_err(crypto_failed)?;
+            encode_blob_chunk(&wrapped, &chunk)
+        })
+        .collect()
+}
+
+pub fn decrypt_blob_chunks(avk: &AccountVaultKey, encoded: &[Vec<u8>]) -> Result<Vec<u8>> {
+    if encoded.is_empty() {
+        return Err(SyncError::Protocol("encrypted blob has no chunks".into()));
+    }
+    let mut plaintext = Vec::new();
+    let mut expected_blob_id = None;
+    for (expected_index, bytes) in encoded.iter().enumerate() {
+        let (wrapped, chunk) = decode_blob_chunk(bytes)?;
+        let expected_index = u32::try_from(expected_index)
+            .map_err(|_| SyncError::Protocol("blob has too many chunks".into()))?;
+        if chunk.chunk_index != expected_index {
+            return Err(SyncError::Protocol("blob chunk index is not contiguous".into()));
+        }
+        if expected_blob_id.is_some_and(|id| id != chunk.blob_id) {
+            return Err(SyncError::Protocol("blob id changed between chunks".into()));
+        }
+        expected_blob_id = Some(chunk.blob_id);
+        let item_key = unwrap_item_key(avk, &wrapped).map_err(crypto_failed)?;
+        plaintext.extend(decrypt_chunk(&item_key, &chunk).map_err(crypto_failed)?);
+    }
+    if expected_blob_id != Some(blake3_bytes(&plaintext)) {
+        return Err(SyncError::Failed("blob plaintext hash mismatch".into()));
+    }
+    Ok(plaintext)
+}
+
+fn encode_blob_chunk(wrapped: &WrappedItemKey, chunk: &EncryptedChunk) -> Result<Vec<u8>> {
+    if wrapped.ciphertext.len() != 48 {
+        return Err(SyncError::Protocol("unexpected wrapped item key length".into()));
+    }
+    let ciphertext_len = u32::try_from(chunk.ciphertext.len())
+        .map_err(|_| SyncError::Protocol("encrypted chunk is too large".into()))?;
+    let mut out = Vec::with_capacity(BLOB_CHUNK_HEADER + chunk.ciphertext.len());
+    out.extend_from_slice(BLOB_CHUNK_MAGIC);
+    out.extend_from_slice(&wrapped.nonce);
+    out.extend_from_slice(&wrapped.ciphertext);
+    out.extend_from_slice(&chunk.blob_id);
+    out.extend_from_slice(&chunk.chunk_index.to_le_bytes());
+    out.extend_from_slice(&chunk.nonce);
+    out.extend_from_slice(&ciphertext_len.to_le_bytes());
+    out.extend_from_slice(&chunk.ciphertext);
+    Ok(out)
+}
+
+fn decode_blob_chunk(bytes: &[u8]) -> Result<(WrappedItemKey, EncryptedChunk)> {
+    if bytes.len() < BLOB_CHUNK_HEADER || &bytes[..4] != BLOB_CHUNK_MAGIC {
+        return Err(SyncError::Protocol("invalid encrypted blob chunk".into()));
+    }
+    let mut wrapped_nonce = [0u8; 24];
+    wrapped_nonce.copy_from_slice(&bytes[4..28]);
+    let wrapped_ciphertext = bytes[28..76].to_vec();
+    let mut blob_id = [0u8; 32];
+    blob_id.copy_from_slice(&bytes[76..108]);
+    let chunk_index = u32::from_le_bytes(bytes[108..112].try_into().expect("fixed slice"));
+    let mut nonce = [0u8; 24];
+    nonce.copy_from_slice(&bytes[112..136]);
+    let ciphertext_len =
+        u32::from_le_bytes(bytes[136..140].try_into().expect("fixed slice")) as usize;
+    if bytes.len() != BLOB_CHUNK_HEADER + ciphertext_len {
+        return Err(SyncError::Protocol("encrypted blob chunk length mismatch".into()));
+    }
+    Ok((
+        WrappedItemKey { nonce: wrapped_nonce, ciphertext: wrapped_ciphertext },
+        EncryptedChunk {
+            blob_id,
+            chunk_index,
+            nonce,
+            ciphertext: bytes[BLOB_CHUNK_HEADER..].to_vec(),
+        },
+    ))
+}
+
+fn crypto_failed(err: impl std::fmt::Display) -> SyncError {
+    SyncError::Failed(err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +162,27 @@ mod tests {
         let back = decode_package(&hex).unwrap();
         assert_eq!(unpack_meta(&avk, &back).unwrap(), br#"{"k":1}"#);
         assert_eq!(unpack_body(&avk, &back).unwrap().unwrap(), b"hello");
+    }
+
+    #[test]
+    fn multi_megabyte_blob_roundtrip_uses_bounded_chunks() {
+        let avk = AccountVaultKey::generate();
+        let plaintext = vec![0x5a; CHUNK_SIZE * 2 + 17];
+
+        let chunks = encrypt_blob_chunks(&avk, &plaintext).unwrap();
+
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= CHUNK_SIZE + BLOB_CHUNK_HEADER + 16));
+        assert_eq!(decrypt_blob_chunks(&avk, &chunks).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn blob_rejects_reordered_chunks() {
+        let avk = AccountVaultKey::generate();
+        let plaintext = vec![0x3c; CHUNK_SIZE + 1];
+        let mut chunks = encrypt_blob_chunks(&avk, &plaintext).unwrap();
+        chunks.swap(0, 1);
+
+        assert!(decrypt_blob_chunks(&avk, &chunks).is_err());
     }
 }
