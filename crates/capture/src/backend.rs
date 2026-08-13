@@ -65,7 +65,8 @@ impl CaptureBackend for XcapBackend {
     }
 
     fn list_monitors(&self) -> Result<Vec<MonitorInfo>, CaptureError> {
-        let monitors = Monitor::all().map_err(|e| CaptureError::Failed(e.to_string()))?;
+        let mut monitors = Monitor::all().map_err(|e| CaptureError::Failed(e.to_string()))?;
+        monitors.sort_by_key(|monitor| !monitor.is_primary().unwrap_or(false));
         Ok(monitors.iter().map(to_info).collect())
     }
 

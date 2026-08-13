@@ -13,7 +13,7 @@ use crate::backend::{CaptureError, CapturedFrame};
 /// Native Fast Overlay：冻结帧、选区、多屏、DPI。不承担复杂标注。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Selection {
-    /// 图片逻辑坐标，不是 CSS。
+    /// 捕获帧的物理像素坐标，不是 Overlay 窗口坐标或 CSS 坐标。
     pub x: f64,
     pub y: f64,
     pub width: f64,
@@ -91,7 +91,7 @@ impl ApplicationHandler for OverlayApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let attrs = Window::default_attributes()
             .with_title("Asterism")
-            .with_fullscreen(Some(Fullscreen::Borderless(None)))
+            .with_fullscreen(Some(Fullscreen::Borderless(event_loop.primary_monitor())))
             .with_decorations(false);
         let window = Arc::new(event_loop.create_window(attrs).expect("overlay window"));
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer");
@@ -130,7 +130,14 @@ impl ApplicationHandler for OverlayApp {
                         ElementState::Released => {
                             self.dragging = false;
                             if let (Some(a), Some(b)) = (self.start, self.current) {
-                                self.result = Some(norm_sel(a, b));
+                                let size =
+                                    self.window.as_ref().expect("overlay window").inner_size();
+                                self.result = selection_in_frame(
+                                    a,
+                                    b,
+                                    (size.width, size.height),
+                                    (self.frame.width, self.frame.height),
+                                );
                                 self.done = true;
                                 event_loop.exit();
                             }
@@ -169,10 +176,22 @@ impl OverlayApp {
     }
 }
 
-fn norm_sel(a: (f64, f64), b: (f64, f64)) -> Selection {
-    let x = a.0.min(b.0);
-    let y = a.1.min(b.1);
-    Selection { x, y, width: (a.0 - b.0).abs().max(1.0), height: (a.1 - b.1).abs().max(1.0) }
+fn selection_in_frame(
+    a: (f64, f64),
+    b: (f64, f64),
+    window_size: (u32, u32),
+    frame_size: (u32, u32),
+) -> Option<Selection> {
+    if window_size.0 == 0 || window_size.1 == 0 || frame_size.0 == 0 || frame_size.1 == 0 {
+        return None;
+    }
+    let sx = frame_size.0 as f64 / window_size.0 as f64;
+    let sy = frame_size.1 as f64 / window_size.1 as f64;
+    let x0 = (a.0.min(b.0) * sx).floor().clamp(0.0, frame_size.0.saturating_sub(1) as f64);
+    let y0 = (a.1.min(b.1) * sy).floor().clamp(0.0, frame_size.1.saturating_sub(1) as f64);
+    let x1 = (a.0.max(b.0) * sx).ceil().clamp(x0 + 1.0, frame_size.0 as f64);
+    let y1 = (a.1.max(b.1) * sy).ceil().clamp(y0 + 1.0, frame_size.1 as f64);
+    Some(Selection { x: x0, y: y0, width: x1 - x0, height: y1 - y0 })
 }
 
 fn blit_dimmed(frame: &CapturedFrame, buf: &mut [u32], dw: u32, dh: u32) {
@@ -212,5 +231,30 @@ fn put(buf: &mut [u32], dw: u32, x: u32, y: u32, color: u32) {
     let i = (y * dw + x) as usize;
     if i < buf.len() {
         buf[i] = color;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_overlay_coordinates_to_capture_pixels() {
+        let selection =
+            selection_in_frame((10.25, 20.5), (110.0, 70.0), (200, 100), (400, 300)).unwrap();
+        assert_eq!(selection.x, 20.0);
+        assert_eq!(selection.y, 61.0);
+        assert_eq!(selection.width, 200.0);
+        assert_eq!(selection.height, 149.0);
+    }
+
+    #[test]
+    fn clamps_selection_to_frame_edges() {
+        let selection =
+            selection_in_frame((-10.0, -5.0), (250.0, 150.0), (200, 100), (400, 300)).unwrap();
+        assert_eq!(selection.x, 0.0);
+        assert_eq!(selection.y, 0.0);
+        assert_eq!(selection.width, 400.0);
+        assert_eq!(selection.height, 300.0);
     }
 }
