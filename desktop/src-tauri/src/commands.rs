@@ -311,15 +311,11 @@ fn persist_and_activate_vault(
     state: &DesktopState,
     vault: asterism_crypto::AccountVaultKey,
 ) -> Result<(), CmdError> {
-    let recovery = asterism_crypto::RecoveryKey::from_avk(
-        asterism_crypto::AccountVaultKey::from_bytes(*vault.as_bytes()),
-    );
-    let file = serde_json::json!({ "recovery_hex": recovery.encode_hex() });
-    std::fs::write(state.paths.config_dir.join("vault.json"), file.to_string())
-        .map_err(|e| CmdError::Any(e.to_string()))?;
-    *state.vault.write() = asterism_platform::LocalVault {
+    let local_vault = asterism_platform::LocalVault {
         avk: asterism_crypto::AccountVaultKey::from_bytes(*vault.as_bytes()),
     };
+    local_vault.save(&state.paths.config_dir).map_err(|e| CmdError::Any(e.to_string()))?;
+    *state.vault.write() = local_vault;
     state.sync.replace_vault(vault);
     Ok(())
 }
