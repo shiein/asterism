@@ -279,6 +279,7 @@ dependencies = [
  "asterism-platform",
  "asterism-storage",
  "asterism-sync",
+ "base64 0.22.1",
  "bytes",
  "hex",
  "image",

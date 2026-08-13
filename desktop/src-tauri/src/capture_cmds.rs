@@ -8,10 +8,34 @@ use asterism_media::avi::AviMjpeg;
 use asterism_media::gifenc::GifSession;
 #[cfg(target_os = "macos")]
 use asterism_media::macos::MacOsRecording;
+use base64::Engine;
 use tauri::State;
 
 use crate::commands::{CmdError, insert_screenshot};
 use crate::runtime::DesktopState;
+
+#[derive(serde::Serialize)]
+pub struct AnnotationSource {
+    data_url: String,
+    width: u32,
+    height: u32,
+}
+
+#[tauri::command]
+pub fn annotation_source(
+    state: State<'_, DesktopState>,
+    item_id: String,
+) -> Result<AnnotationSource, CmdError> {
+    let (_, png, width, height) = load_image_item(&state, &item_id)?;
+    Ok(AnnotationSource {
+        data_url: format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png)
+        ),
+        width,
+        height,
+    })
+}
 
 #[tauri::command]
 pub fn list_windows() -> Result<Vec<asterism_capture::WindowInfo>, CmdError> {
@@ -32,6 +56,24 @@ pub fn export_annotated(
     item_id: String,
     scene: AnnotationScene,
 ) -> Result<String, CmdError> {
+    let (_, png, width, height) = load_image_item(&state, &item_id)?;
+    let img = image::load_from_memory(&png).map_err(|e| CmdError::Any(e.to_string()))?;
+    let rgba = img.to_rgba8();
+    let mut bgra = vec![0u8; rgba.len()];
+    for (src, dst) in rgba.chunks_exact(4).zip(bgra.chunks_exact_mut(4)) {
+        dst[0] = src[2];
+        dst[1] = src[1];
+        dst[2] = src[0];
+        dst[3] = src[3];
+    }
+    let out = export_png(width, height, &bgra, &scene).map_err(CmdError::Any)?;
+    insert_screenshot(&state, out, width, height)
+}
+
+fn load_image_item(
+    state: &DesktopState,
+    item_id: &str,
+) -> Result<(asterism_core::ContentId, Vec<u8>, u32, u32), CmdError> {
     let id = item_id.parse().map_err(|e: asterism_core::CoreError| CmdError::Any(e.to_string()))?;
     let item = state.store.get(id).map_err(|e| CmdError::Any(e.to_string()))?;
     let png = match item.payload_ref {
@@ -42,16 +84,7 @@ pub fn export_annotated(
         _ => return Err(CmdError::Any("not an image".into())),
     };
     let img = image::load_from_memory(&png).map_err(|e| CmdError::Any(e.to_string()))?;
-    let rgba = img.to_rgba8();
-    let mut bgra = vec![0u8; rgba.len()];
-    for (src, dst) in rgba.chunks_exact(4).zip(bgra.chunks_exact_mut(4)) {
-        dst[0] = src[2];
-        dst[1] = src[1];
-        dst[2] = src[0];
-        dst[3] = src[3];
-    }
-    let out = export_png(img.width(), img.height(), &bgra, &scene).map_err(CmdError::Any)?;
-    insert_screenshot(&state, out, img.width(), img.height())
+    Ok((id, png, img.width(), img.height()))
 }
 
 #[tauri::command]

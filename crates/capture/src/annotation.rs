@@ -85,9 +85,7 @@ fn draw(pixmap: &mut Pixmap, ann: &Annotation) {
             let stroke = Stroke { width: 3.0, ..Stroke::default() };
             pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
         }
-        AnnotationKind::Line | AnnotationKind::Arrow | AnnotationKind::Brush
-            if ann.geometry.len() >= 4 =>
-        {
+        AnnotationKind::Line | AnnotationKind::Brush if ann.geometry.len() >= 4 => {
             let mut pb = PathBuilder::new();
             pb.move_to(ann.geometry[0] as f32, ann.geometry[1] as f32);
             let mut rest = &ann.geometry[2..];
@@ -95,6 +93,28 @@ fn draw(pixmap: &mut Pixmap, ann: &Annotation) {
                 pb.line_to(rest[0] as f32, rest[1] as f32);
                 rest = &rest[2..];
             }
+            if let Some(path) = pb.finish() {
+                let stroke = Stroke { width: 3.0, ..Stroke::default() };
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+        AnnotationKind::Arrow if ann.geometry.len() >= 4 => {
+            let (x0, y0, x1, y1) = (
+                ann.geometry[0] as f32,
+                ann.geometry[1] as f32,
+                ann.geometry[2] as f32,
+                ann.geometry[3] as f32,
+            );
+            let angle = (y1 - y0).atan2(x1 - x0);
+            let head = 14.0f32;
+            let spread = std::f32::consts::FRAC_PI_6;
+            let mut pb = PathBuilder::new();
+            pb.move_to(x0, y0);
+            pb.line_to(x1, y1);
+            pb.move_to(x1, y1);
+            pb.line_to(x1 - head * (angle - spread).cos(), y1 - head * (angle - spread).sin());
+            pb.move_to(x1, y1);
+            pb.line_to(x1 - head * (angle + spread).cos(), y1 - head * (angle + spread).sin());
             if let Some(path) = pb.finish() {
                 let stroke = Stroke { width: 3.0, ..Stroke::default() };
                 pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
