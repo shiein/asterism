@@ -338,6 +338,7 @@ name = "asterism-media"
 version = "0.1.0"
 dependencies = [
  "asterism-core",
+ "cc",
  "gif 0.13.3",
  "image",
  "thiserror 2.0.20",
