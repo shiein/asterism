@@ -210,6 +210,41 @@ pub fn set_favorite(conn: &Connection, id: ContentId, favorite: bool) -> Result<
     Ok(())
 }
 
+pub fn set_status(conn: &Connection, id: ContentId, status: ContentStatus) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE content_items SET status = ?1 WHERE id = ?2",
+        params![status.as_str(), id.as_bytes().as_slice()],
+    )?;
+    if changed == 0 {
+        return Err(StorageError::NotFound);
+    }
+    Ok(())
+}
+
+pub fn list_pending_sync(conn: &Connection, limit: u32) -> Result<Vec<ContentItem>> {
+    let limit = if limit == 0 { 50 } else { limit.min(200) } as i64;
+    let excluded = (ContentFlags::SENSITIVE | ContentFlags::LOCAL_ONLY | ContentFlags::TRANSIENT)
+        .bits() as i64;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, origin_device_id, kind, created_at_ms, logical_size, payload_size,
+               dedup_tag, flags, status, metadata_json, payload_kind, payload_inline,
+               blob_id, manifest_id
+        FROM content_items
+        WHERE status IN ('LOCAL', 'UPLOADING', 'FAILED')
+          AND (flags & ?1) != 0
+          AND (flags & ?2) = 0
+        ORDER BY created_at_ms ASC, id ASC
+        LIMIT ?3
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![ContentFlags::REMOTE_ALLOWED.bits() as i64, excluded, limit],
+        map_item,
+    )?;
+    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(StorageError::from)
+}
+
 pub fn delete_item(conn: &Connection, id: ContentId) -> Result<Option<BlobId>> {
     let item = get_item(conn, id)?;
     conn.execute("DELETE FROM content_items WHERE id = ?1", params![id.as_bytes().as_slice()])?;

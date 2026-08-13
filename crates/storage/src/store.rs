@@ -4,7 +4,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::Duration;
 
-use asterism_core::content::{ContentItem, FileManifest};
+use asterism_core::content::{ContentItem, ContentStatus, FileManifest};
 use asterism_core::id::{BlobId, ContentId};
 use parking_lot::Mutex;
 use rusqlite::Connection;
@@ -26,6 +26,11 @@ enum WriteOp {
     Favorite {
         id: ContentId,
         favorite: bool,
+        reply: SyncSender<Result<()>>,
+    },
+    Status {
+        id: ContentId,
+        status: ContentStatus,
         reply: SyncSender<Result<()>>,
     },
     Delete {
@@ -125,6 +130,14 @@ impl Store {
         self.call(|reply| WriteOp::Favorite { id, favorite, reply })
     }
 
+    pub fn set_status(&self, id: ContentId, status: ContentStatus) -> Result<()> {
+        self.call(|reply| WriteOp::Status { id, status, reply })
+    }
+
+    pub fn pending_sync(&self, limit: u32) -> Result<Vec<ContentItem>> {
+        self.readers.with(|conn| repo::list_pending_sync(conn, limit))
+    }
+
     pub fn delete(&self, id: ContentId) -> Result<()> {
         let blob = self.call(|reply| WriteOp::Delete { id, reply })?;
         // Blob 文件删除由 GC 负责；这里只降 ref_count。
@@ -184,6 +197,15 @@ fn writer_loop(db: PathBuf, rx: Receiver<WriteOp>) {
                 let result =
                     conn.unchecked_transaction().map_err(StorageError::from).and_then(|tx| {
                         repo::set_favorite(&tx, id, favorite)?;
+                        tx.commit()?;
+                        Ok(())
+                    });
+                let _ = reply.send(result);
+            }
+            Ok(WriteOp::Status { id, status, reply }) => {
+                let result =
+                    conn.unchecked_transaction().map_err(StorageError::from).and_then(|tx| {
+                        repo::set_status(&tx, id, status)?;
                         tx.commit()?;
                         Ok(())
                     });
@@ -298,6 +320,22 @@ mod tests {
         let mut item = sample("secret");
         item.flags = ContentFlags::SENSITIVE;
         assert!(store.insert(item, None).is_err());
+    }
+
+    #[test]
+    fn pending_sync_survives_status_transitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let item = sample("retry me");
+        let id = store.insert(item, None).unwrap();
+
+        assert_eq!(store.pending_sync(10).unwrap()[0].id, id);
+        store.set_status(id, ContentStatus::Uploading).unwrap();
+        assert_eq!(store.pending_sync(10).unwrap()[0].status, ContentStatus::Uploading);
+        store.set_status(id, ContentStatus::Failed).unwrap();
+        assert_eq!(store.pending_sync(10).unwrap()[0].status, ContentStatus::Failed);
+        store.set_status(id, ContentStatus::SyncedToHub).unwrap();
+        assert!(store.pending_sync(10).unwrap().is_empty());
     }
 
     #[test]

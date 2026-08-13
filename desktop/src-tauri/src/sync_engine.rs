@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use asterism_clipboard::{ClipboardBackend, NativeClipboard, SelfWriteGuard};
 use asterism_core::content::{
-    ContentFlags, ContentItem, ContentKind, FileManifest, ItemMetadata, PayloadRef,
+    ContentFlags, ContentItem, ContentKind, ContentStatus, FileManifest, ItemMetadata, PayloadRef,
 };
 use asterism_crypto::AccountVaultKey;
 use asterism_platform::{AppPaths, LocalIdentity};
@@ -145,7 +145,7 @@ async fn run_loop(
                 match cmd {
                     SyncCmd::LocalItem(item) => {
                         let _ = push_lan(&cert, &peers, identity.device_id, item.as_ref(), &store, &paths).await;
-                        if let Err(err) = publish(&identity, &vault, &store, &paths, &settings, item.as_ref()).await {
+                        if let Err(err) = publish_one(&identity, &vault, &store, &paths, &settings, item.as_ref(), &on_change).await {
                             tracing::warn!(error = %err, "hub publish failed");
                         }
                     }
@@ -155,6 +155,7 @@ async fn run_loop(
                     }
                     SyncCmd::Reload => {
                         exchange_candidates(&identity, &settings, &peers).await;
+                        retry_pending(&identity, &vault, &store, &paths, &settings, &on_change).await;
                         if let Err(err) = pull_hub(&vault, &store, &paths, &guard, &settings, &mut last_cursor, &on_change).await {
                             tracing::warn!(error = %err, "hub pull failed");
                         }
@@ -163,12 +164,60 @@ async fn run_loop(
             }
             _ = tokio::time::sleep(Duration::from_secs(8)) => {
                 exchange_candidates(&identity, &settings, &peers).await;
+                retry_pending(&identity, &vault, &store, &paths, &settings, &on_change).await;
                 if let Err(err) = pull_hub(&vault, &store, &paths, &guard, &settings, &mut last_cursor, &on_change).await {
                     tracing::debug!(error = %err, "hub pull");
                 }
             }
         }
     }
+}
+
+async fn retry_pending(
+    identity: &LocalIdentity,
+    vault: &AccountVaultKey,
+    store: &Store,
+    paths: &AppPaths,
+    settings: &Arc<Mutex<SyncSettings>>,
+    on_change: &impl Fn(),
+) {
+    if !settings.lock().hub_ready() {
+        return;
+    }
+    let pending = match store.pending_sync(200) {
+        Ok(items) => items,
+        Err(err) => {
+            tracing::warn!(error = %err, "load sync outbox failed");
+            return;
+        }
+    };
+    for item in pending {
+        if let Err(err) =
+            publish_one(identity, vault, store, paths, settings, &item, on_change).await
+        {
+            tracing::warn!(item_id = %item.id, error = %err, "hub retry failed");
+        }
+    }
+}
+
+async fn publish_one(
+    identity: &LocalIdentity,
+    vault: &AccountVaultKey,
+    store: &Store,
+    paths: &AppPaths,
+    settings: &Arc<Mutex<SyncSettings>>,
+    item: &ContentItem,
+    on_change: &impl Fn(),
+) -> anyhow::Result<()> {
+    if !settings.lock().hub_ready() || !item.may_sync_remote() {
+        return Ok(());
+    }
+    store.set_status(item.id, ContentStatus::Uploading)?;
+    let result = publish(identity, vault, store, paths, settings, item).await;
+    let status = if result.is_ok() { ContentStatus::SyncedToHub } else { ContentStatus::Failed };
+    store.set_status(item.id, status)?;
+    on_change();
+    result
 }
 
 async fn accept_opt(
