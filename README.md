@@ -1,10 +1,22 @@
 # Asterism
 
-Windows / macOS 跨设备剪贴板、截图与自托管 Hub。
+[English](README.md) · [简体中文](README.zh-CN.md)
 
-开发基线：[docs/design/windows_macos_clipboard_capture_hub_final_design.md](docs/design/windows_macos_clipboard_capture_hub_final_design.md)
+Windows / macOS clipboard sync, screenshot, and a self-hosted Linux Hub.
 
-## 组成
+Design baseline: [docs/design/windows_macos_clipboard_capture_hub_final_design.md](docs/design/windows_macos_clipboard_capture_hub_final_design.md)
+
+## What it is
+
+Asterism is a personal productivity stack:
+
+| Piece | Role |
+|---|---|
+| **Desktop** | Windows / macOS client: clipboard sync, screenshot / recording, local history |
+| **Hub** | Single Linux binary: relay, encrypted history, blobs, devices, embedded Web |
+| **Web** | History center only. It does **not** watch the system clipboard |
+
+LAN is preferred. Remote traffic goes through your Hub. The Hub stores ciphertext by default; search runs on the client.
 
 ```text
 Windows Desktop  ◄── LAN TLS ──►  macOS Desktop
@@ -12,50 +24,114 @@ Windows Desktop  ◄── LAN TLS ──►  macOS Desktop
         └──────── HTTPS / WSS ─────────┘
                         │
                    Linux Hub
-                   (单二进制)
+                   (single binary)
                         │
-                   Web 历史中心
+                   Web history
 ```
 
-- **Desktop**：Tauri 2 + React，系统能力全部在 Rust。
-- **Hub**：`asterism-hub`，Axum + rustls + SQLite + 本地文件系统，不依赖 Docker。
-- **Web**：只做历史浏览 / 搜索 / 下载，不监听系统剪贴板。
+## V1 scope
 
-## 当前进度
+**Does**
 
-代码层已按基线阶段接通主路径（现场验收仍需你在真实双机上跑）：
+- Text, generic images, files / folders between Windows and macOS
+- LAN Direct (mDNS + Hub-assisted candidates), with fallback to Hub
+- E2EE remote payloads (AVK / item keys). Hub does not see plaintext
+- Sensitive clipboard is ignored by default (no history, no sync, no upload)
+- Region / window / fullscreen screenshot, annotation, scroll capture, GIF, video
+- Embedded Web history with local search after vault unlock
 
-1. Core / 本地历史 / Windows+macOS 剪贴板 / 敏感策略 / Desktop UI  
-2. 设备证书、mDNS、LAN TCP+TLS、文件分块流、Hub client  
-3. Hub 配对/会话/设备/密文历史/Blob/WSS 中继；LAN Direct 真传；文件归档跨端；AVK 经配对码包装传递  
-4. 窗口/选区截图、标注 Undo/导出、滚动拼接  
-5. GIF / Motion-JPEG AVI 录制入口  
-6. 崩溃锁、缓存淘汰、Hub 安装脚本、macOS 开机启动
+**Does not (V1)**
 
-## 开发
+- Linux desktop client, mobile apps, browser clipboard extension
+- NAT traversal / WebRTC
+- Shipping OCR / AI / remote desktop (interfaces only)
+- Docker as a required dependency
+- Extra infra (PostgreSQL, Redis, object storage, …)
 
-需要 Rust stable（见 `rust-toolchain.toml`）和 Node 22+ / pnpm。
+## Repository
+
+Cargo workspace + pnpm workspace.
+
+| Path | Responsibility |
+|---|---|
+| `crates/core` | Content / Action / Device / Policy |
+| `crates/crypto` | Hash, E2EE, key wrap (shared with future WASM) |
+| `crates/storage` | SQLite WAL + single writer queue + local blobs |
+| `crates/clipboard` | System clipboard, watcher, normalize / dedup / policy |
+| `crates/capture` | Overlay, screenshot, scroll |
+| `crates/media` | GIF / video / audio |
+| `crates/sync` | Protocol, LAN TLS, Hub client |
+| `hub` | `asterism-hub` single binary |
+| `desktop` | Tauri 2 + React |
+| `web` | Embedded Web history UI |
+| `deploy/systemd` | Official unit. No Docker tree |
+
+## Requirements
+
+- Rust stable (`rust-toolchain.toml`; rust-version **1.88**)
+- Node **22+** and **pnpm 10**
+- Desktop: Windows 10+ or macOS 13+
+- Hub: Linux x86_64 (or build from source)
+
+## Develop
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-
-cargo test --workspace
-cargo run -p asterism-hub -- --help
-
 pnpm install
-pnpm desktop:dev
+
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-Hub 本地初始化：
+### Hub (local)
 
 ```bash
 cargo run -p asterism-hub -- init --data-dir ./data
 cargo run -p asterism-hub -- serve --config ./data/config.toml
 ```
 
-## 部署（Hub）
+`init` prints a **bootstrap secret** once and writes `data/bootstrap.secret`. Save it. The first Desktop uses that secret; later devices use a pairing code from an already-registered Desktop.
 
-发布物是单一 Linux 二进制，配合 `deploy/systemd/asterism-hub.service`。
+Default TLS is a self-signed cert for `localhost` / `127.0.0.1`. The Desktop **TOFU-pins** the Hub certificate fingerprint on first successful handshake (`hub_cert_sha256` in `sync.toml`). If you rotate the cert, clear that field and pair again. Do not enable “accept any certificate”.
+
+Useful commands:
+
+```bash
+cargo run -p asterism-hub -- migrate --config ./data/config.toml
+cargo run -p asterism-hub -- doctor --config ./data/config.toml
+cargo run -p asterism-hub -- backup --config ./data/config.toml --dest ./backup.db
+```
+
+### Desktop
+
+```bash
+pnpm desktop:dev
+# or, from desktop/
+pnpm tauri dev
+```
+
+In Settings:
+
+1. Set Hub URL, e.g. `https://127.0.0.1:8787`
+2. First device: paste the bootstrap secret → **Connect and register this machine**
+3. Later device: generate a pairing code on the first machine, attach AVK to the code, then connect with that code
+
+Keep the Recovery Key offline. It is the AVK backup.
+
+### Web
+
+The Hub serves the built React app. For UI-only work:
+
+```bash
+pnpm web:dev
+```
+
+Web never listens to the OS clipboard. Unlock the vault with the Recovery Key before search / copy / download.
+
+## Deploy Hub (Linux)
+
+Release artifact is one binary plus a data directory. Docker is not required.
 
 ```text
 /opt/asterism/
@@ -63,5 +139,35 @@ cargo run -p asterism-hub -- serve --config ./data/config.toml
 └── data/
     ├── hub.db
     ├── blobs/
-    └── config.toml
+    ├── config.toml
+    ├── tls.cert
+    └── tls.key
 ```
+
+```bash
+cargo build -p asterism-hub --release
+./deploy/install-hub.sh
+# copy deploy/systemd/asterism-hub.service, then:
+# systemctl enable --now asterism-hub
+```
+
+Upgrade: stop the unit, replace the binary atomically, start. `serve` / `migrate` run controlled SQLite migrations.
+
+## Security baseline (short)
+
+- Hub is HTTPS / WSS only
+- Remote payloads are E2EE; filenames are metadata, never server paths
+- Pairing codes are one-shot and expire (10 minutes)
+- Device identity can be revoked; LAN trust is dropped on revoke
+- Receive paths reject traversal and do not follow symlink / junction
+- Logs must never contain clipboard body, file bytes, or keys
+
+## Status
+
+Phases 1–5 of the design baseline are wired (clipboard, LAN, Hub + Web + E2EE, screenshot, scroll / GIF / video). Phase 6 hardening (signed installers, soak, formal perf gates) is not done.
+
+LAN / Hub dual-machine behavior needs to be checked on your own Windows + macOS pair.
+
+## License
+
+[MIT](LICENSE)

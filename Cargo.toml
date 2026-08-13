@@ -31,7 +31,7 @@ edition = "2024"
 license = "MIT"
 rust-version = "1.88"
 authors = ["Asterism Contributors"]
-repository = "https://github.com/asterism-app/asterism"
+repository = "https://github.com/shiein/asterism"
 description = "Cross-device clipboard, screenshot, and self-hosted hub"
 
 [workspace.dependencies]
