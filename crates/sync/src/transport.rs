@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::error::SyncError;
 use crate::protocol::Envelope;
 
 #[derive(Debug, Error)]
@@ -12,6 +13,17 @@ pub enum TransportError {
     Timeout,
     #[error("{0}")]
     Failed(String),
+}
+
+impl From<SyncError> for TransportError {
+    fn from(err: SyncError) -> Self {
+        match err {
+            SyncError::NotConnected => Self::NotConnected,
+            SyncError::Timeout => Self::Timeout,
+            SyncError::Handshake(_) => Self::Handshake,
+            other => Self::Failed(other.to_string()),
+        }
+    }
 }
 
 /// LAN：TCP + TLS。Direct 必须再次验证设备身份和证书指纹。
