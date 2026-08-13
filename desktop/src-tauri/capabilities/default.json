@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main window can call Phase 1 history commands",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default"
+  ]
+}

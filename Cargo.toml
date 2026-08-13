@@ -10,6 +10,7 @@ members = [
     "crates/media",
     "crates/sync",
     "hub",
+    "desktop/src-tauri",
 ]
 default-members = [
     "crates/core",

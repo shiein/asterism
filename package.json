@@ -1,0 +1,14 @@
+{
+  "name": "asterism",
+  "private": true,
+  "packageManager": "pnpm@10.13.1",
+  "scripts": {
+    "desktop:dev": "pnpm --filter @asterism/desktop dev",
+    "desktop:build": "pnpm --filter @asterism/desktop build",
+    "web:dev": "pnpm --filter @asterism/web dev",
+    "web:build": "pnpm --filter @asterism/web build"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}

@@ -1,0 +1,10 @@
+:root {
+  color-scheme: light dark;
+  font-family: "Iowan Old Style", Palatino, "Songti SC", serif;
+  background: #11140f;
+  color: #edf0e8;
+}
+body { margin: 0; }
+.page { max-width: 640px; margin: 12vh auto; padding: 0 24px; }
+h1 { font-weight: 600; letter-spacing: -0.03em; }
+.muted { color: #9aa394; }
