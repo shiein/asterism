@@ -131,7 +131,7 @@ pub fn execute_action(
 
 #[tauri::command]
 pub fn recovery_key(state: State<'_, DesktopState>) -> String {
-    state.vault.recovery_hex()
+    state.vault.read().recovery_hex()
 }
 
 #[tauri::command]
@@ -220,15 +220,27 @@ pub fn save_sync_settings(
 }
 
 #[tauri::command]
-pub async fn connect_hub(state: State<'_, DesktopState>, url: String) -> Result<String, CmdError> {
+pub async fn connect_hub(
+    state: State<'_, DesktopState>,
+    url: String,
+    pairing_code: Option<String>,
+) -> Result<String, CmdError> {
     let mut settings = state.sync.settings.lock().clone();
-    let code =
-        sync_engine::bootstrap_hub(&mut settings, &state.identity, &state.paths.config_dir, url)
-            .await
-            .map_err(|e| CmdError::Any(e.to_string()))?;
+    let bootstrap = sync_engine::bootstrap_hub(
+        &mut settings,
+        &state.identity,
+        &state.paths.config_dir,
+        url,
+        pairing_code,
+    )
+    .await
+    .map_err(|e| CmdError::Any(e.to_string()))?;
+    if let Some(vault) = bootstrap.vault {
+        persist_and_activate_vault(&state, vault)?;
+    }
     *state.sync.settings.lock() = settings;
     state.sync.reload();
-    Ok(code)
+    Ok(bootstrap.code)
 }
 
 #[tauri::command]
@@ -254,10 +266,8 @@ pub async fn hub_devices(
 pub fn import_recovery(state: State<'_, DesktopState>, hex_key: String) -> Result<(), CmdError> {
     let key = asterism_crypto::RecoveryKey::decode_hex(&hex_key)
         .map_err(|e| CmdError::Any(e.to_string()))?;
-    let file = serde_json::json!({ "recovery_hex": key.encode_hex() });
-    std::fs::write(state.paths.config_dir.join("vault.json"), file.to_string())
-        .map_err(|e| CmdError::Any(e.to_string()))?;
-    Ok(())
+    let vault = asterism_crypto::AccountVaultKey::from_bytes(*key.avk().as_bytes());
+    persist_and_activate_vault(&state, vault)
 }
 
 #[tauri::command]
@@ -278,8 +288,11 @@ pub async fn publish_pairing_avk(
     let token = settings.token.ok_or_else(|| CmdError::Any("no token".into()))?;
     let wrap_key =
         asterism_crypto::AccountVaultKey::from_bytes(asterism_sync::pairing::hash_code(&code));
-    let wrapped = asterism_crypto::encrypt_metadata(&wrap_key, state.vault.avk.as_bytes())
-        .map_err(|e| CmdError::Any(e.to_string()))?;
+    let wrapped = {
+        let vault = state.vault.read();
+        asterism_crypto::encrypt_metadata(&wrap_key, vault.avk.as_bytes())
+            .map_err(|e| CmdError::Any(e.to_string()))?
+    };
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{url}/api/v1/pairing/avk"))
@@ -292,6 +305,23 @@ pub async fn publish_pairing_avk(
         .await
         .map_err(|e| CmdError::Any(e.to_string()))?;
     if res.status().is_success() { Ok(()) } else { Err(CmdError::Any(res.status().to_string())) }
+}
+
+fn persist_and_activate_vault(
+    state: &DesktopState,
+    vault: asterism_crypto::AccountVaultKey,
+) -> Result<(), CmdError> {
+    let recovery = asterism_crypto::RecoveryKey::from_avk(
+        asterism_crypto::AccountVaultKey::from_bytes(*vault.as_bytes()),
+    );
+    let file = serde_json::json!({ "recovery_hex": recovery.encode_hex() });
+    std::fs::write(state.paths.config_dir.join("vault.json"), file.to_string())
+        .map_err(|e| CmdError::Any(e.to_string()))?;
+    *state.vault.write() = asterism_platform::LocalVault {
+        avk: asterism_crypto::AccountVaultKey::from_bytes(*vault.as_bytes()),
+    };
+    state.sync.replace_vault(vault);
+    Ok(())
 }
 
 fn to_dto(item: asterism_core::ContentItem) -> HistoryItemDto {

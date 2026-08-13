@@ -23,6 +23,7 @@ pub struct SessionResponse {
     pub token: String,
     pub account_id: AccountId,
     pub device_id: DeviceId,
+    pub avk_wrapped_hex: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

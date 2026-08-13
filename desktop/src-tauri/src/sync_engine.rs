@@ -29,6 +29,7 @@ use crate::settings::SyncSettings;
 
 pub enum SyncCmd {
     LocalItem(Box<ContentItem>),
+    ReplaceVault(AccountVaultKey),
     Reload,
 }
 
@@ -47,6 +48,10 @@ impl SyncHandle {
 
     pub fn reload(&self) {
         let _ = self.tx.send(SyncCmd::Reload);
+    }
+
+    pub fn replace_vault(&self, vault: AccountVaultKey) {
+        let _ = self.tx.send(SyncCmd::ReplaceVault(vault));
     }
 }
 
@@ -80,7 +85,7 @@ pub fn spawn(
 
 async fn run_loop(
     identity: LocalIdentity,
-    vault: AccountVaultKey,
+    mut vault: AccountVaultKey,
     store: Arc<Store>,
     paths: AppPaths,
     guard: Arc<SelfWriteGuard>,
@@ -143,6 +148,10 @@ async fn run_loop(
                         if let Err(err) = publish(&identity, &vault, &store, &paths, &settings, item.as_ref()).await {
                             tracing::warn!(error = %err, "hub publish failed");
                         }
+                    }
+                    SyncCmd::ReplaceVault(next) => {
+                        vault = next;
+                        last_cursor = None;
                     }
                     SyncCmd::Reload => {
                         exchange_candidates(&identity, &settings, &peers).await;
@@ -550,17 +559,26 @@ fn load_payload(
     }
 }
 
+pub struct HubBootstrap {
+    pub code: String,
+    pub vault: Option<AccountVaultKey>,
+}
+
 pub async fn bootstrap_hub(
     settings: &mut SyncSettings,
     identity: &LocalIdentity,
     config_dir: &std::path::Path,
     hub_url: String,
-) -> anyhow::Result<String> {
+    pairing_code: Option<String>,
+) -> anyhow::Result<HubBootstrap> {
     settings.hub_url = Some(hub_url.trim_end_matches('/').to_string());
     let client = HubClient::new(settings.hub_url.clone().unwrap())?;
-    let offer = client.pairing_start().await?;
+    let code = match pairing_code {
+        Some(code) if !code.trim().is_empty() => code.trim().to_ascii_uppercase(),
+        _ => client.pairing_start().await?.code,
+    };
     let finish = PairingFinish {
-        code: offer.code.clone(),
+        code: code.clone(),
         device_id: identity.device_id,
         device_name: identity.device_name.clone(),
         platform: asterism_core::DevicePlatform::current().as_str().to_string(),
@@ -569,7 +587,38 @@ pub async fn bootstrap_hub(
     let session = client.pairing_finish(&finish).await?;
     settings.token = Some(session.token.clone());
     settings.save(config_dir)?;
-    Ok(offer.code)
+    let vault = session
+        .avk_wrapped_hex
+        .as_deref()
+        .map(|wrapped| unwrap_pairing_avk(&code, wrapped))
+        .transpose()?;
+    Ok(HubBootstrap { code, vault })
+}
+
+pub fn unwrap_pairing_avk(code: &str, wrapped_hex: &str) -> anyhow::Result<AccountVaultKey> {
+    let bytes = hex::decode(wrapped_hex)?;
+    let payload: asterism_crypto::EncryptedPayload = serde_json::from_slice(&bytes)?;
+    let wrap_key = AccountVaultKey::from_bytes(asterism_sync::pairing::hash_code(code));
+    let plain = asterism_crypto::decrypt_metadata(&wrap_key, &payload)?;
+    let raw: [u8; 32] =
+        plain.try_into().map_err(|_| anyhow::anyhow!("paired AVK must be 32 bytes"))?;
+    Ok(AccountVaultKey::from_bytes(raw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pairing_wrap_recovers_avk() {
+        let code = "ABCDEFGH";
+        let expected = AccountVaultKey::generate();
+        let wrap_key = AccountVaultKey::from_bytes(asterism_sync::pairing::hash_code(code));
+        let wrapped = asterism_crypto::encrypt_metadata(&wrap_key, expected.as_bytes()).unwrap();
+        let encoded = hex::encode(serde_json::to_vec(&wrapped).unwrap());
+        let actual = unwrap_pairing_avk(code, &encoded).unwrap();
+        assert_eq!(actual.as_bytes(), expected.as_bytes());
+    }
 }
 
 pub async fn start_pairing_code(settings: &SyncSettings) -> anyhow::Result<String> {

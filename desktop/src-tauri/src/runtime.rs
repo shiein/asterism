@@ -21,7 +21,7 @@ pub struct DesktopState {
     pub identity: LocalIdentity,
     pub paths: AppPaths,
     pub clipboard: NativeClipboard,
-    pub vault: LocalVault,
+    pub vault: parking_lot::RwLock<LocalVault>,
     pub sync: SyncHandle,
     _crash: CrashGuard,
 }
@@ -92,7 +92,7 @@ impl DesktopState {
             identity,
             paths,
             clipboard: NativeClipboard,
-            vault,
+            vault: parking_lot::RwLock::new(vault),
             sync,
             _crash: crash,
         })

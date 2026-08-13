@@ -34,7 +34,8 @@ export function SettingsPage() {
     onSuccess: () => qc.invalidateQueries(),
   });
   const connect = useMutation({
-    mutationFn: (url: string) => invoke<string>("connect_hub", { url }),
+    mutationFn: ({ url, pairingCode }: { url: string; pairingCode: string | null }) =>
+      invoke<string>("connect_hub", { url, pairingCode }),
     onSuccess: () => qc.invalidateQueries(),
   });
   const pair = useMutation({ mutationFn: () => invoke<string>("hub_pairing_code") });
@@ -53,11 +54,18 @@ export function SettingsPage() {
           placeholder="https://hub.example:8787"
         />
       </label>
+      <label className="search">
+        已有桌面端配对码（新设备加入时填写）
+        <input id="desktop-pairing-code" placeholder="留空则注册为首台设备" />
+      </label>
       <div className="actions">
         <button
           onClick={() => {
             const url = (document.getElementById("hub-url") as HTMLInputElement).value;
-            void connect.mutate(url);
+            const pairingCode = (
+              document.getElementById("desktop-pairing-code") as HTMLInputElement
+            ).value.trim();
+            void connect.mutate({ url, pairingCode: pairingCode || null });
           }}
         >
           连接并注册本机
