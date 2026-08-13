@@ -13,16 +13,8 @@ fn avk(hex_key: &str) -> Result<AccountVaultKey, JsValue> {
 }
 
 fn decode_hex32(s: &str) -> Result<[u8; 32], JsValue> {
-    let s = s.trim();
-    if s.len() != 64 {
-        return Err(JsValue::from_str("recovery key must be 64 hex chars"));
-    }
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
-            .map_err(|_| JsValue::from_str("invalid hex"))?;
-    }
-    Ok(out)
+    let raw = hex::decode(s.trim()).map_err(|_| JsValue::from_str("invalid hex"))?;
+    raw.try_into().map_err(|_| JsValue::from_str("recovery key must be 64 hex chars"))
 }
 
 fn parse_pkg(package_hex: &str) -> Result<SyncPackage, JsValue> {

@@ -46,8 +46,20 @@ impl AviMjpeg {
             idx.extend_from_slice(&off.to_le_bytes());
             idx.extend_from_slice(&(jpeg.len() as u32).to_le_bytes());
         }
+        let max_frame = self.frames.iter().map(Vec::len).max().unwrap_or(0) as u32;
         let mut hdrl = Vec::new();
         write_avih(&mut hdrl, self.width, self.height, self.fps, self.frames.len() as u32);
+        let mut strl = Vec::new();
+        write_strh(&mut strl, self.width, self.height, self.fps, self.frames.len() as u32, max_frame);
+        write_strf(&mut strl, self.width, self.height);
+        write_list(&mut hdrl, b"strl", &strl);
+        // idx1 offsets are relative to the 'movi' FourCC (offset 4 inside the LIST payload).
+        for chunk in idx.chunks_mut(16) {
+            if chunk.len() == 16 {
+                let off = u32::from_le_bytes(chunk[8..12].try_into().unwrap_or([0; 4]));
+                chunk[8..12].copy_from_slice(&(off + 4).to_le_bytes());
+            }
+        }
         let mut out = Vec::new();
         out.extend_from_slice(b"RIFF");
         let riff_size_at = out.len();
@@ -84,4 +96,35 @@ fn write_avih(out: &mut Vec<u8>, w: u32, h: u32, fps: u32, frames: u32) {
     b[44..48].copy_from_slice(&h.to_le_bytes());
     out.extend_from_slice(&b);
     let _ = Write::flush(&mut std::io::sink());
+}
+
+fn write_strh(out: &mut Vec<u8>, w: u32, h: u32, fps: u32, frames: u32, buf: u32) {
+    out.extend_from_slice(b"strh");
+    out.extend_from_slice(&56u32.to_le_bytes());
+    let mut b = vec![0u8; 56];
+    b[0..4].copy_from_slice(b"vids");
+    b[4..8].copy_from_slice(b"MJPG");
+    b[20..24].copy_from_slice(&1u32.to_le_bytes());
+    b[24..28].copy_from_slice(&fps.max(1).to_le_bytes());
+    b[32..36].copy_from_slice(&frames.to_le_bytes());
+    b[36..40].copy_from_slice(&buf.to_le_bytes());
+    b[40..44].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    b[48..50].copy_from_slice(&0u16.to_le_bytes());
+    b[50..52].copy_from_slice(&0u16.to_le_bytes());
+    b[52..54].copy_from_slice(&(w as u16).to_le_bytes());
+    b[54..56].copy_from_slice(&(h as u16).to_le_bytes());
+    out.extend_from_slice(&b);
+}
+
+fn write_strf(out: &mut Vec<u8>, w: u32, h: u32) {
+    out.extend_from_slice(b"strf");
+    out.extend_from_slice(&40u32.to_le_bytes());
+    let mut b = vec![0u8; 40];
+    b[0..4].copy_from_slice(&40u32.to_le_bytes());
+    b[4..8].copy_from_slice(&w.to_le_bytes());
+    b[8..12].copy_from_slice(&h.to_le_bytes());
+    b[12..14].copy_from_slice(&1u16.to_le_bytes());
+    b[14..16].copy_from_slice(&24u16.to_le_bytes());
+    b[16..20].copy_from_slice(b"MJPG");
+    out.extend_from_slice(&b);
 }

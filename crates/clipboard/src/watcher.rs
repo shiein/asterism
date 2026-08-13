@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use asterism_core::id::DeviceId;
-use asterism_core::policy::CapturePolicy;
+use asterism_core::policy::{CapturePolicy, RemotePolicy};
 
 use crate::capture::{ClipboardBackend, NativeClipboard};
 use crate::error::Result;
@@ -15,6 +15,7 @@ use crate::normalize::{self, NormalizedContent};
 pub struct WatcherConfig {
     pub poll_interval: Duration,
     pub policy: CapturePolicy,
+    pub remote: RemotePolicy,
     pub device_id: DeviceId,
 }
 
@@ -22,8 +23,10 @@ impl Default for WatcherConfig {
     fn default() -> Self {
         Self {
             // macOS changeCount 低频检查；Windows 实现仍走事件，此间隔仅作兜底。
-            poll_interval: Duration::from_millis(350),
+            // Windows 主路径是 WM_CLIPBOARDUPDATE；超时只用于退出与漏事件兜底，不要做成 350ms 轮询。
+            poll_interval: Duration::from_millis(1500),
             policy: CapturePolicy::default(),
+            remote: RemotePolicy::default(),
             device_id: DeviceId::new(),
         }
     }
@@ -96,7 +99,7 @@ fn run_loop<B: ClipboardBackend>(
         }
         last = token;
         match backend.read() {
-            Ok(Some(captured)) => match normalize::normalize(&captured, &config.policy) {
+            Ok(Some(captured)) => match normalize::normalize(&captured, &config.policy, &config.remote) {
                 Ok(Some(content)) => {
                     if guard.is_self_write(None, &content.dedup_tag()) {
                         on_event(ClipboardEvent::Ignored);
@@ -114,6 +117,8 @@ fn run_loop<B: ClipboardBackend>(
     Ok(())
 }
 
+/// RAII 句柄：丢弃即停止监听线程。调用方必须持有到进程退出。
+#[must_use = "dropping WatcherHandle stops the clipboard watcher immediately"]
 pub struct WatcherHandle {
     running: Arc<AtomicBool>,
 }

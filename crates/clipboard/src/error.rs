@@ -16,6 +16,8 @@ pub enum ClipboardError {
     Platform(String),
     #[error("enumeration aborted: too many entries")]
     TooManyEntries,
+    #[error("clipboard payload exceeds local size limit")]
+    TooLarge,
 }
 
 pub type Result<T> = std::result::Result<T, ClipboardError>;

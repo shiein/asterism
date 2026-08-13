@@ -63,4 +63,34 @@ impl BlobStore {
         }
         Ok(())
     }
+
+    pub fn remove_orphans(&self, referenced: &std::collections::HashSet<String>) -> Result<u64> {
+        let root = self.root.join("blobs");
+        if !root.exists() {
+            return Ok(0);
+        }
+        let mut removed = 0u64;
+        visit_blob_files(&root, &mut |path, name| {
+            if !referenced.contains(name) {
+                let _ = fs::remove_file(path);
+                removed += 1;
+            }
+        })?;
+        Ok(removed)
+    }
+}
+
+fn visit_blob_files(dir: &Path, on_file: &mut impl FnMut(&Path, &str)) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            visit_blob_files(&path, on_file)?;
+        } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if !name.ends_with(".tmp") {
+                on_file(&path, name);
+            }
+        }
+    }
+    Ok(())
 }

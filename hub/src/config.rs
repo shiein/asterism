@@ -8,6 +8,8 @@ pub struct HubConfig {
     pub bind: String,
     pub data_dir: PathBuf,
     pub tls: TlsConfig,
+    #[serde(default)]
+    pub bootstrap_secret_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

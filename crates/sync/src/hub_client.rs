@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use asterism_core::id::{AccountId, DeviceId};
 
@@ -15,6 +16,7 @@ use crate::protocol::Envelope;
 pub struct HubClient {
     pub base: String,
     pub token: Option<String>,
+    pub bootstrap: Option<String>,
     http: reqwest::Client,
 }
 
@@ -24,6 +26,18 @@ pub struct SessionResponse {
     pub account_id: AccountId,
     pub device_id: DeviceId,
     pub avk_wrapped_hex: Option<String>,
+    #[serde(default)]
+    pub kdf_salt_hex: Option<String>,
+    #[serde(default)]
+    pub trusted_devices: Vec<TrustedDeviceDto>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrustedDeviceDto {
+    pub device_id: DeviceId,
+    pub name: String,
+    #[serde(default)]
+    pub cert_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -33,6 +47,8 @@ pub struct DeviceDto {
     pub platform: String,
     pub last_seen_at_ms: i64,
     pub revoked: bool,
+    #[serde(default)]
+    pub cert_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,11 +72,21 @@ impl HubClient {
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| SyncError::Failed(e.to_string()))?;
-        Ok(Self { base: base.into().trim_end_matches('/').to_string(), token: None, http })
+        Ok(Self {
+            base: base.into().trim_end_matches('/').to_string(),
+            token: None,
+            bootstrap: None,
+            http,
+        })
     }
 
     pub fn with_token(mut self, token: String) -> Self {
         self.token = Some(token);
+        self
+    }
+
+    pub fn with_bootstrap(mut self, secret: String) -> Self {
+        self.bootstrap = Some(secret);
         self
     }
 
@@ -157,9 +183,19 @@ impl HubClient {
             Url::parse(&self.base.replace("https://", "wss://").replace("http://", "ws://"))
                 .map_err(|e| SyncError::Failed(e.to_string()))?;
         url.set_path("/ws/v1/device");
-        url.query_pairs_mut().append_pair("token", token);
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .map_err(|e| SyncError::Failed(e.to_string()))?;
+        let value = format!("Bearer {token}");
+        request.headers_mut().insert(
+            tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+            value.parse().map_err(|e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
+                SyncError::Failed(e.to_string())
+            })?,
+        );
         let (stream, _) =
-            connect_async(url.as_str()).await.map_err(|e| SyncError::Failed(e.to_string()))?;
+            connect_async(request).await.map_err(|e| SyncError::Failed(e.to_string()))?;
         Ok(stream)
     }
 
@@ -194,6 +230,9 @@ impl HubClient {
         let mut b = self.http.request(method, url);
         if let Some(token) = &self.token {
             b = b.bearer_auth(token);
+        }
+        if let Some(secret) = &self.bootstrap {
+            b = b.header("x-asterism-bootstrap", secret);
         }
         b
     }

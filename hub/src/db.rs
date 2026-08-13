@@ -78,11 +78,27 @@ pub fn migrate(db_path: &Path) -> Result<()> {
         "#,
     )?;
     let _ = conn.execute("ALTER TABLE pairings ADD COLUMN avk_wrap TEXT", []);
-    conn.execute(
-        "INSERT OR REPLACE INTO sqlite_sequence(name, seq) SELECT 'schema', 1 WHERE 0",
+    let _ = conn.execute("ALTER TABLE pairings ADD COLUMN kdf_salt BLOB", []);
+    let _ = conn.execute(
+        "ALTER TABLE pairings ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0",
         [],
-    )
-    .ok();
+    );
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN cert_fingerprint BLOB", []);
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS schema_meta (
+            version INTEGER PRIMARY KEY
+        );
+        INSERT OR IGNORE INTO schema_meta(version) VALUES (2);
+        "#,
+    )?;
+    let stored: i64 = conn
+        .query_row("SELECT MAX(version) FROM schema_meta", [], |r| r.get(0))
+        .unwrap_or(2);
+    const SCHEMA_VERSION: i64 = 2;
+    if stored > SCHEMA_VERSION {
+        anyhow::bail!("hub schema {stored} is newer than supported {SCHEMA_VERSION}");
+    }
     let _ = schema_ready(&conn)?;
     Ok(())
 }

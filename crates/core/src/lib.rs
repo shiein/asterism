@@ -14,7 +14,7 @@ pub mod policy;
 pub use action::{ActionContext, ActionError, ActionId, ActionResult, ContentAction};
 pub use content::{
     ContentFlags, ContentItem, ContentKind, ContentStatus, FileEntry, FileEntryKind, FileManifest,
-    ImageMeta, ItemMetadata, PayloadRef, UnsupportedEntry, UnsupportedReason,
+    FileManifestSummary, ImageMeta, ItemMetadata, PayloadRef, UnsupportedEntry, UnsupportedReason,
 };
 pub use device::{Device, DeviceCapabilities, DevicePlatform};
 pub use error::CoreError;

@@ -15,6 +15,7 @@ pub struct HubState {
     pub config: Arc<HubConfig>,
     pub db: Mutex<Connection>,
     pub sockets: Mutex<HashMap<DeviceId, Outbox>>,
+    pub pairing_fails: Mutex<Vec<i64>>,
 }
 
 impl HubState {
@@ -23,6 +24,7 @@ impl HubState {
             config: Arc::new(config),
             db: Mutex::new(conn),
             sockets: Mutex::new(HashMap::new()),
+            pairing_fails: Mutex::new(Vec::new()),
         })
     }
 

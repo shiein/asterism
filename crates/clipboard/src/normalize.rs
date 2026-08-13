@@ -2,7 +2,7 @@ use asterism_core::content::{
     ContentFlags, ContentItem, ContentKind, ContentStatus, ItemMetadata, PayloadRef,
 };
 use asterism_core::id::{ContentId, DeviceId};
-use asterism_core::policy::CapturePolicy;
+use asterism_core::policy::{CapturePolicy, RemotePolicy};
 use asterism_crypto::local_dedup_tag;
 use bytes::Bytes;
 
@@ -147,16 +147,22 @@ impl NormalizedContent {
 pub fn normalize(
     captured: &CapturedClipboard,
     policy: &CapturePolicy,
+    remote: &RemotePolicy,
 ) -> Result<Option<NormalizedContent>> {
     let decision = decide(captured, policy);
     if decision.should_ignore() {
         tracing::info!(?decision, "clipboard ignored by policy");
         return Ok(None);
     }
-    let flags = decision.flags() | ContentFlags::REMOTE_ALLOWED;
 
     if !captured.files.is_empty() {
         let manifest = preflight_paths(&captured.files)?;
+        let file_count = manifest.entries.iter().filter(|e| e.kind.is_file()).count() as u64;
+        let logical_size: u64 = manifest.entries.iter().map(|e| e.size).sum();
+        if logical_size > asterism_core::policy::LOCAL_MAX_MATERIALIZE_BYTES {
+            return Err(ClipboardError::TooLarge);
+        }
+        let flags = remote_flags(decision.flags(), remote, ContentKind::Files, file_count, logical_size);
         let fingerprint = manifest_fingerprint(&manifest);
         return Ok(Some(NormalizedContent::Files {
             paths: captured.files.clone(),
@@ -169,6 +175,13 @@ pub fn normalize(
 
     if let Some(image) = &captured.image {
         let png = normalize_png(image)?;
+        let flags = remote_flags(
+            decision.flags(),
+            remote,
+            ContentKind::Image,
+            0,
+            png.bytes.len() as u64,
+        );
         let tag = local_dedup_tag(&png.bytes);
         return Ok(Some(NormalizedContent::Image {
             png: png.bytes,
@@ -184,6 +197,13 @@ pub fn normalize(
         if text.is_empty() {
             return Err(ClipboardError::Empty);
         }
+        let flags = remote_flags(
+            decision.flags(),
+            remote,
+            ContentKind::Text,
+            0,
+            text.len() as u64,
+        );
         return Ok(Some(NormalizedContent::Text {
             dedup_tag: local_dedup_tag(text.as_bytes()),
             text: text.clone(),
@@ -193,6 +213,20 @@ pub fn normalize(
     }
 
     Err(ClipboardError::Unsupported)
+}
+
+fn remote_flags(
+    base: ContentFlags,
+    remote: &RemotePolicy,
+    kind: ContentKind,
+    file_count: u64,
+    logical_size: u64,
+) -> ContentFlags {
+    if remote.check_preflight(kind, file_count, logical_size).is_ok() {
+        base | ContentFlags::REMOTE_ALLOWED
+    } else {
+        base
+    }
 }
 
 fn manifest_fingerprint(manifest: &asterism_core::FileManifest) -> Vec<u8> {
@@ -222,7 +256,9 @@ mod tests {
             files: vec![std::env::temp_dir()],
             sensitive: false,
         };
-        let out = normalize(&captured, &CapturePolicy::default()).unwrap().unwrap();
+        let out = normalize(&captured, &CapturePolicy::default(), &RemotePolicy::default())
+            .unwrap()
+            .unwrap();
         assert_eq!(out.kind(), ContentKind::Files);
     }
 
@@ -237,6 +273,10 @@ mod tests {
             files: vec![],
             sensitive: true,
         };
-        assert!(normalize(&captured, &CapturePolicy::default()).unwrap().is_none());
+        assert!(
+            normalize(&captured, &CapturePolicy::default(), &RemotePolicy::default())
+                .unwrap()
+                .is_none()
+        );
     }
 }

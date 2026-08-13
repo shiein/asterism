@@ -170,7 +170,7 @@ impl RecoveryKey {
     }
 
     pub fn decode_hex(s: &str) -> Result<Self> {
-        let raw = decode_hex32(s)?;
+        let raw = decode_hex32(s.trim())?;
         Ok(Self(AccountVaultKey::from_bytes(raw)))
     }
 
@@ -180,27 +180,13 @@ impl RecoveryKey {
 }
 
 fn hex_lower(bytes: &[u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(64);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
+    hex::encode(bytes)
 }
 
 fn decode_hex32(s: &str) -> Result<[u8; 32]> {
-    let s = s.trim();
-    if s.len() != 64 {
-        return Err(CryptoError::InvalidKeyLength);
-    }
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        let byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
-            .map_err(|_| CryptoError::InvalidKeyLength)?;
-        out[i] = byte;
-    }
-    Ok(out)
+    let raw = hex::decode(s).map_err(|_| CryptoError::InvalidKeyLength)?;
+    let raw: [u8; 32] = raw.try_into().map_err(|_| CryptoError::InvalidKeyLength)?;
+    Ok(raw)
 }
 
 #[cfg(test)]
@@ -240,5 +226,11 @@ mod tests {
             RecoveryKey::from_avk(AccountVaultKey::from_bytes(*avk.as_bytes())).encode_hex();
         let decoded = RecoveryKey::decode_hex(&encoded).unwrap();
         assert_eq!(decoded.avk().as_bytes(), avk.as_bytes());
+    }
+
+    #[test]
+    fn recovery_hex_rejects_signed_or_multibyte() {
+        assert!(RecoveryKey::decode_hex(&"+f".repeat(32)).is_err());
+        assert!(RecoveryKey::decode_hex("not-hex").is_err());
     }
 }

@@ -10,7 +10,7 @@ use asterism_core::content::{
     ContentFlags, ContentItem, ContentKind, ContentStatus, FileManifest, ItemMetadata, PayloadRef,
 };
 use asterism_crypto::AccountVaultKey;
-use asterism_platform::{AppPaths, LocalIdentity};
+use asterism_platform::{AppPaths, LocalIdentity, TrustStore};
 use asterism_storage::Store;
 use asterism_sync::hub_client::{HistoryDto, HubClient};
 use asterism_sync::lan::{self, DiscoveredPeer};
@@ -121,17 +121,27 @@ async fn run_loop(
         }
     }
 
+    let trust = Arc::new(Mutex::new(match TrustStore::load(&paths.config_dir) {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::error!(error = %err, "trust store");
+            return;
+        }
+    }));
     let listener = lan::listen(cert.clone(), port).await.ok();
     let mut last_cursor: Option<String> = None;
+    let mut failed_remote: Vec<asterism_sync::hub_client::HistoryDto> = Vec::new();
     let mut maintenance = tokio::time::interval(Duration::from_secs(60 * 60));
 
     loop {
         tokio::select! {
-            accepted = accept_opt(listener.as_ref(), &cert) => {
+            accepted = accept_opt(listener.as_ref(), &cert, &trust) => {
                 if let Ok((mut stream, _)) = accepted {
-                    match asterism_sync::lan_item::recv_lan_item(&mut stream, identity.device_id).await {
+                    match asterism_sync::lan_item::recv_lan_item(&mut stream, identity.device_id, true).await {
                         Ok((from, lan_item, payload)) => {
-                            if let Err(err) = apply_lan(&store, &paths, &guard, from, lan_item, payload) {
+                            if !trust.lock().contains_device(from) {
+                                tracing::warn!(%from, "rejected lan item from untrusted device");
+                            } else if let Err(err) = apply_lan(&store, &paths, &guard, from, lan_item, payload, settings.lock().auto_receive) {
                                 tracing::warn!(error = %err, "lan apply");
                             } else {
                                 on_change();
@@ -145,7 +155,7 @@ async fn run_loop(
                 let Some(cmd) = cmd else { break };
                 match cmd {
                     SyncCmd::LocalItem(item) => {
-                        let _ = push_lan(&cert, &peers, identity.device_id, item.as_ref(), &store, &paths).await;
+                        let _ = push_lan(&cert, &peers, &trust, identity.device_id, item.as_ref(), &store, &paths).await;
                         if let Err(err) = publish_one(&identity, &vault, &store, &paths, &settings, item.as_ref(), &on_change).await {
                             tracing::warn!(error = %err, "hub publish failed");
                         }
@@ -155,24 +165,37 @@ async fn run_loop(
                         last_cursor = None;
                     }
                     SyncCmd::Reload => {
+                        refresh_trust(&identity, &settings, &trust).await;
                         exchange_candidates(&identity, &settings, &peers).await;
                         retry_pending(&identity, &vault, &store, &paths, &settings, &on_change).await;
-                        if let Err(err) = pull_hub(&vault, &store, &paths, &guard, &settings, &mut last_cursor, &on_change).await {
+                        if let Err(err) = pull_hub(&identity, &vault, &store, &paths, &guard, &settings, &mut last_cursor, &mut failed_remote, &on_change).await {
                             tracing::warn!(error = %err, "hub pull failed");
                         }
                     }
                 }
             }
             _ = tokio::time::sleep(Duration::from_secs(8)) => {
+                refresh_trust(&identity, &settings, &trust).await;
                 exchange_candidates(&identity, &settings, &peers).await;
                 retry_pending(&identity, &vault, &store, &paths, &settings, &on_change).await;
-                if let Err(err) = pull_hub(&vault, &store, &paths, &guard, &settings, &mut last_cursor, &on_change).await {
+                if let Err(err) = pull_hub(&identity, &vault, &store, &paths, &guard, &settings, &mut last_cursor, &mut failed_remote, &on_change).await {
                     tracing::debug!(error = %err, "hub pull");
                 }
             }
             _ = maintenance.tick() => {
                 if let Err(err) = store.gc_blobs(Duration::from_secs(24 * 60 * 60)) {
                     tracing::warn!(error = %err, "local blob GC failed");
+                }
+                if let Err(err) = store.sweep_orphan_blobs() {
+                    tracing::warn!(error = %err, "local orphan blob sweep failed");
+                }
+                if let Err(err) = asterism_storage::cleanup::evict_item_cache(
+                    &paths.cache_dir,
+                    Duration::from_secs(7 * 24 * 60 * 60),
+                    2 * 1024 * 1024 * 1024,
+                    &[],
+                ) {
+                    tracing::warn!(error = %err, "item cache evict failed");
                 }
             }
         }
@@ -229,17 +252,46 @@ async fn publish_one(
 async fn accept_opt(
     listener: Option<&tokio::net::TcpListener>,
     cert: &DeviceCert,
+    trust: &Arc<Mutex<TrustStore>>,
 ) -> anyhow::Result<(tokio_rustls::server::TlsStream<tokio::net::TcpStream>, std::net::SocketAddr)>
 {
     match listener {
-        Some(listener) => lan::accept_direct(listener, cert).await.map_err(|e| anyhow::anyhow!(e)),
+        Some(listener) => {
+            let fps = trust.lock().fingerprints();
+            lan::accept_direct(listener, cert, &fps).await.map_err(|e| anyhow::anyhow!(e))
+        }
         None => std::future::pending().await,
+    }
+}
+
+async fn refresh_trust(
+    identity: &LocalIdentity,
+    settings: &Arc<Mutex<SyncSettings>>,
+    trust: &Arc<Mutex<TrustStore>>,
+) {
+    let snap = settings.lock().clone();
+    if !snap.hub_ready() {
+        return;
+    }
+    let Ok(client) = client(&snap).await else { return };
+    let Ok(devices) = client.devices().await else { return };
+    let mut store = trust.lock();
+    for device in devices {
+        if device.id == identity.device_id || device.revoked {
+            continue;
+        }
+        if let Some(fp) = device.cert_fingerprint {
+            if let Err(err) = store.add(device.id, fp, device.name) {
+                tracing::warn!(error = %err, "persist trusted peer");
+            }
+        }
     }
 }
 
 async fn push_lan(
     cert: &DeviceCert,
     peers: &Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
+    trust: &Arc<Mutex<TrustStore>>,
     local: asterism_core::DeviceId,
     item: &ContentItem,
     store: &Store,
@@ -270,6 +322,9 @@ async fn push_lan(
     );
     for peer in snapshot {
         let Some(fp) = peer.fingerprint else { continue };
+        if !trust.lock().is_trusted(peer.device_id, fp) {
+            continue;
+        }
         for ep in &peer.addresses {
             match lan::connect_direct(ep, fp, cert, lan::lan_timeout()).await {
                 Ok(mut stream) => {
@@ -327,6 +382,7 @@ fn apply_lan(
     from: asterism_core::DeviceId,
     lan_item: LanItem,
     payload: Vec<u8>,
+    auto_receive: bool,
 ) -> anyhow::Result<()> {
     let mut tag = [0u8; 32];
     if lan_item.offer.dedup_tag.len() == 32 {
@@ -350,7 +406,7 @@ fn apply_lan(
         true,
     )?;
     persist_item(store, item.clone(), manifest)?;
-    if let Ok(content) = item_to_clipboard(&item, store, paths) {
+    if auto_receive && let Ok(content) = item_to_clipboard(&item, store, paths) {
         guard.remember(item.id, content.dedup_tag());
         let _ = NativeClipboard.write(&content);
     }
@@ -525,12 +581,14 @@ async fn publish(
 }
 
 async fn pull_hub(
+    identity: &LocalIdentity,
     vault: &AccountVaultKey,
     store: &Store,
     paths: &AppPaths,
     guard: &SelfWriteGuard,
     settings: &Arc<Mutex<SyncSettings>>,
     last_cursor: &mut Option<String>,
+    failed_remote: &mut Vec<asterism_sync::hub_client::HistoryDto>,
     on_change: &impl Fn(),
 ) -> anyhow::Result<()> {
     let snap = settings.lock().clone();
@@ -538,12 +596,44 @@ async fn pull_hub(
         return Ok(());
     }
     let client = client(&snap).await?;
+    let mut retry = std::mem::take(failed_remote);
+    let mut newest: Option<ContentItem> = None;
+    for dto in retry.drain(..) {
+        match apply_remote(vault, store, paths, guard, &client, dto.clone(), false).await {
+            Ok(Some(item)) => newest = Some(item),
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(id = %dto.id, error = %err, "retry remote item failed");
+                failed_remote.push(dto);
+            }
+        }
+    }
     let items = client.history(last_cursor.as_deref(), 50).await?;
     for dto in items {
         let next_cursor = format!("{}:{}", dto.created_at_ms, dto.id);
-        apply_remote(vault, store, paths, guard, &client, dto).await?;
-        *last_cursor = Some(next_cursor);
-        on_change();
+        match apply_remote(vault, store, paths, guard, &client, dto.clone(), false).await {
+            Ok(Some(item)) => {
+                newest = Some(item);
+                *last_cursor = Some(next_cursor);
+                on_change();
+            }
+            Ok(None) => {
+                *last_cursor = Some(next_cursor);
+            }
+            Err(err) => {
+                tracing::warn!(id = %dto.id, error = %err, "remote item failed; will retry");
+                failed_remote.push(dto);
+                *last_cursor = Some(next_cursor);
+            }
+        }
+    }
+    if snap.auto_receive
+        && let Some(item) = newest
+        && item.origin_device_id != identity.device_id
+        && let Ok(content) = item_to_clipboard(&item, store, paths)
+    {
+        guard.remember(item.id, content.dedup_tag());
+        let _ = NativeClipboard.write(&content);
     }
     Ok(())
 }
@@ -552,10 +642,11 @@ async fn apply_remote(
     vault: &AccountVaultKey,
     store: &Store,
     paths: &AppPaths,
-    guard: &SelfWriteGuard,
+    _guard: &SelfWriteGuard,
     client: &HubClient,
     dto: HistoryDto,
-) -> anyhow::Result<()> {
+    write_clipboard: bool,
+) -> anyhow::Result<Option<ContentItem>> {
     let pkg = decode_package(&dto.encrypted_metadata)?;
     let meta_bytes = unpack_meta(vault, &pkg)?;
     let metadata: ItemMetadata = serde_json::from_slice(&meta_bytes).unwrap_or_default();
@@ -584,7 +675,7 @@ async fn apply_remote(
         }
     }
     let Some(bytes) = payload else {
-        return Ok(());
+        anyhow::bail!("remote item {} missing payload", dto.id);
     };
     let mut tag = [0u8; 32];
     if let Ok(decoded) = hex::decode(&dto.dedup_tag)
@@ -594,7 +685,7 @@ async fn apply_remote(
     }
     let remote_id: asterism_core::ContentId = dto.id.parse()?;
     if store.contains(remote_id)? {
-        return Ok(());
+        return Ok(None);
     }
     let kind = ContentKind::parse(&dto.kind).unwrap_or(ContentKind::Text);
     let (item, manifest) = build_item(
@@ -610,11 +701,11 @@ async fn apply_remote(
         false,
     )?;
     persist_item(store, item.clone(), manifest)?;
-    if let Ok(content) = item_to_clipboard(&item, store, paths) {
-        guard.remember(item.id, content.dedup_tag());
+    if write_clipboard && let Ok(content) = item_to_clipboard(&item, store, paths) {
+        _guard.remember(item.id, content.dedup_tag());
         let _ = NativeClipboard.write(&content);
     }
-    Ok(())
+    Ok(Some(item))
 }
 
 fn load_payload(
@@ -655,10 +746,17 @@ pub async fn bootstrap_hub(
     pairing_code: Option<String>,
 ) -> anyhow::Result<HubBootstrap> {
     settings.hub_url = Some(hub_url.trim_end_matches('/').to_string());
-    let client = HubClient::new(settings.hub_url.clone().unwrap())?;
-    let code = match pairing_code {
-        Some(code) if !code.trim().is_empty() => code.trim().to_ascii_uppercase(),
-        _ => client.pairing_start().await?.code,
+    let cert = DeviceCert::load_or_create(config_dir, &identity.device_name)?;
+    let supplied = pairing_code.filter(|c| !c.trim().is_empty());
+    let (code, salt_hex) = match supplied {
+        Some(code) if looks_like_pairing_code(&code) => (asterism_sync::pairing::normalize_code(&code), None),
+        Some(bootstrap) => {
+            let client = HubClient::new(settings.hub_url.clone().unwrap())?
+                .with_bootstrap(bootstrap.trim().to_string());
+            let offer = client.pairing_start().await?;
+            (offer.code, Some(offer.kdf_salt_hex))
+        }
+        None => anyhow::bail!("first device needs the hub bootstrap secret; later devices need a pairing code"),
     };
     let finish = PairingFinish {
         code: code.clone(),
@@ -666,32 +764,65 @@ pub async fn bootstrap_hub(
         device_name: identity.device_name.clone(),
         platform: asterism_core::DevicePlatform::current().as_str().to_string(),
         identity_public_key: vec![1],
+        cert_fingerprint: cert.fingerprint_hex(),
     };
+    let client = HubClient::new(settings.hub_url.clone().unwrap())?;
     let session = client.pairing_finish(&finish).await?;
     settings.token = Some(session.token.clone());
+    persist_trusted_devices(config_dir, identity.device_id, &session.trusted_devices)?;
     settings.save(config_dir)?;
-    let vault = session
-        .avk_wrapped_hex
-        .as_deref()
-        .map(|wrapped| unwrap_pairing_avk(&code, wrapped))
-        .transpose()?;
+    let vault = match (session.avk_wrapped_hex.as_deref(), session.kdf_salt_hex.as_deref().or(salt_hex.as_deref())) {
+        (Some(wrapped), Some(salt)) => Some(unwrap_pairing_avk(&code, salt, wrapped)?),
+        (Some(_), None) => anyhow::bail!("paired AVK wrap is missing KDF salt"),
+        _ => None,
+    };
     Ok(HubBootstrap { code, vault })
 }
 
-pub fn unwrap_pairing_avk(code: &str, wrapped_hex: &str) -> anyhow::Result<AccountVaultKey> {
+fn looks_like_pairing_code(code: &str) -> bool {
+    let normalized = asterism_sync::pairing::normalize_code(code);
+    normalized.len() == asterism_sync::pairing::PAIRING_CODE_LEN
+        && normalized.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+fn persist_trusted_devices(
+    config_dir: &std::path::Path,
+    self_id: asterism_core::DeviceId,
+    devices: &[asterism_sync::hub_client::TrustedDeviceDto],
+) -> anyhow::Result<()> {
+    let mut trust = TrustStore::load(config_dir)?;
+    for device in devices {
+        if device.device_id == self_id {
+            continue;
+        }
+        if let Some(fp) = &device.cert_fingerprint {
+            trust.add(device.device_id, fp.clone(), device.name.clone())?;
+        }
+    }
+    Ok(())
+}
+
+pub fn unwrap_pairing_avk(code: &str, salt_hex: &str, wrapped_hex: &str) -> anyhow::Result<AccountVaultKey> {
     let bytes = hex::decode(wrapped_hex)?;
     let payload: asterism_crypto::EncryptedPayload = serde_json::from_slice(&bytes)?;
-    let wrap_key = AccountVaultKey::from_bytes(asterism_sync::pairing::hash_code(code));
+    let salt = asterism_sync::pairing::parse_salt_hex(salt_hex)
+        .ok_or_else(|| anyhow::anyhow!("invalid pairing KDF salt"))?;
+    let wrap_key = AccountVaultKey::from_bytes(asterism_sync::pairing::derive_wrap_key(code, &salt));
     let plain = asterism_crypto::decrypt_metadata(&wrap_key, &payload)?;
     let raw: [u8; 32] =
         plain.try_into().map_err(|_| anyhow::anyhow!("paired AVK must be 32 bytes"))?;
     Ok(AccountVaultKey::from_bytes(raw))
 }
 
-pub async fn start_pairing_code(settings: &SyncSettings) -> anyhow::Result<String> {
+pub async fn start_pairing_code(settings: &mut SyncSettings, config_dir: &std::path::Path) -> anyhow::Result<String> {
     let url = settings.hub_url.clone().ok_or_else(|| anyhow::anyhow!("set hub url first"))?;
-    let client = HubClient::new(url)?;
-    Ok(client.pairing_start().await?.code)
+    let token = settings.token.clone().ok_or_else(|| anyhow::anyhow!("connect this device first"))?;
+    let client = HubClient::new(url)?.with_token(token);
+    let offer = client.pairing_start().await?;
+    settings.pending_pair_code = Some(offer.code.clone());
+    settings.pending_pair_salt = Some(offer.kdf_salt_hex.clone());
+    settings.save(config_dir)?;
+    Ok(offer.code)
 }
 
 #[cfg(test)]
@@ -701,12 +832,13 @@ mod tests {
 
     #[test]
     fn pairing_wrap_recovers_avk() {
-        let code = "ABCDEFGH";
+        let code = "ABCDEFGHJKLMNPQRSTUV";
+        let salt = [9u8; 16];
         let expected = AccountVaultKey::generate();
-        let wrap_key = AccountVaultKey::from_bytes(asterism_sync::pairing::hash_code(code));
+        let wrap_key = AccountVaultKey::from_bytes(asterism_sync::pairing::derive_wrap_key(code, &salt));
         let wrapped = asterism_crypto::encrypt_metadata(&wrap_key, expected.as_bytes()).unwrap();
         let encoded = hex::encode(serde_json::to_vec(&wrapped).unwrap());
-        let actual = unwrap_pairing_avk(code, &encoded).unwrap();
+        let actual = unwrap_pairing_avk(code, &hex::encode(salt), &encoded).unwrap();
         assert_eq!(actual.as_bytes(), expected.as_bytes());
     }
 

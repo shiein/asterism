@@ -56,8 +56,9 @@ export function App() {
       .catch((e) => setError(String(e)));
   }, [api, token, index]);
 
-  const visible = query.trim()
-    ? items.filter((it) => index.search(query).includes(it.id) || it.kind.toLowerCase().includes(query.toLowerCase()))
+  const hits = query.trim() ? new Set(index.search(query)) : null;
+  const visible = hits
+    ? items.filter((it) => hits.has(it.id) || it.kind.toLowerCase().includes(query.toLowerCase()))
     : items;
 
   async function pair() {

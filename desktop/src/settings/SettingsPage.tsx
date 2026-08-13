@@ -55,8 +55,8 @@ export function SettingsPage() {
         />
       </label>
       <label className="search">
-        已有桌面端配对码（新设备加入时填写）
-        <input id="desktop-pairing-code" placeholder="留空则注册为首台设备" />
+        配对码或首台设备 Bootstrap Secret
+        <input id="desktop-pairing-code" placeholder="首台设备填 hub init 打印的 secret；后续设备填配对码" />
       </label>
       <div className="actions">
         <button

@@ -214,6 +214,12 @@ pub enum FileEntryKind {
     Directory,
 }
 
+impl FileEntryKind {
+    pub fn is_file(self) -> bool {
+        matches!(self, Self::File)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileEntry {
     /// 相对路径，禁止绝对路径与 `..`。
@@ -230,6 +236,7 @@ pub enum UnsupportedReason {
     Junction,
     SpecialDevice,
     Unreadable,
+    InvalidName,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,7 +248,12 @@ pub struct UnsupportedEntry {
 /// 拒绝绝对路径、盘符、`..` 与空路径。不跟随调用方去解析 symlink。
 pub fn sanitize_relative_path(path: &str) -> Result<String> {
     let raw = path.replace('\\', "/");
-    if raw.is_empty() || raw.starts_with('/') || raw.contains(':') {
+    if raw.is_empty() || raw.starts_with('/') {
+        return Err(CoreError::PathTraversal(path.to_string()));
+    }
+    // 只拒绝 Windows 盘符前缀（`C:`），文件名里的 `:`（如 `12:30 note.txt`）合法。
+    let bytes = raw.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         return Err(CoreError::PathTraversal(path.to_string()));
     }
     let mut parts = Vec::new();
@@ -293,6 +305,7 @@ mod tests {
     fn sanitize_normalizes_separators() {
         assert_eq!(sanitize_relative_path("a\\b\\c").unwrap(), "a/b/c");
         assert_eq!(sanitize_relative_path("docs/readme.txt").unwrap(), "docs/readme.txt");
+        assert_eq!(sanitize_relative_path("12:30 note.txt").unwrap(), "12:30 note.txt");
     }
 
     #[test]

@@ -252,6 +252,16 @@ pub fn delete_item(conn: &Connection, id: ContentId) -> Result<Option<BlobId>> {
     Ok(None)
 }
 
+pub fn all_blob_ids(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT blob_id FROM blob_refs")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut out = std::collections::HashSet::new();
+    for row in rows {
+        out.insert(row?);
+    }
+    Ok(out)
+}
+
 pub fn unused_blobs(conn: &Connection, released_before_ms: i64) -> Result<Vec<BlobId>> {
     let mut stmt = conn.prepare(
         "SELECT blob_id FROM blob_refs WHERE ref_count = 0 AND last_released_at_ms <= ?1",

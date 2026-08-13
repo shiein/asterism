@@ -148,6 +148,10 @@ impl SensitiveDecision {
 
 /// 目录预检硬上限，防止百万文件拖死后台线程。与 RemoteLimits 独立。
 pub const LOCAL_MAX_ENUMERATION_ENTRIES: u64 = 100_000;
+/// 本地物化硬上限，防止复制超大目录把磁盘和 watcher 线程打满。
+pub const LOCAL_MAX_MATERIALIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// 递归遍历深度上限，避免深目录栈溢出。
+pub const LOCAL_MAX_VISIT_DEPTH: u32 = 48;
 
 #[cfg(test)]
 mod tests {

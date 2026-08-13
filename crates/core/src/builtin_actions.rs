@@ -6,7 +6,16 @@ use crate::id::DeviceId;
 
 pub fn supports(id: ActionId, item: &ContentItem) -> bool {
     match id {
-        ActionId::Copy | ActionId::Favorite | ActionId::Delete => true,
+        ActionId::Copy => matches!(
+            item.kind,
+            ContentKind::Text
+                | ContentKind::Image
+                | ContentKind::Screenshot
+                | ContentKind::Files
+                | ContentKind::Gif
+                | ContentKind::Video
+        ),
+        ActionId::Favorite | ActionId::Delete => true,
         ActionId::Save => matches!(
             item.kind,
             ContentKind::Text

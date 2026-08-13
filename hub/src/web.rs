@@ -16,7 +16,15 @@ fn serve(uri: Uri) -> Response {
     let file = Asset::get(path).or_else(|| Asset::get("index.html"));
     match file {
         Some(file) => (
-            [(header::CONTENT_TYPE, mime_guess(path)), (header::CACHE_CONTROL, "no-store")],
+            [
+                (header::CONTENT_TYPE, mime_guess(path)),
+                (header::CACHE_CONTROL, "no-store"),
+                (header::HeaderName::from_static("x-content-type-options"), "nosniff"),
+                (
+                    header::HeaderName::from_static("content-security-policy"),
+                    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; object-src 'none'",
+                ),
+            ],
             file.data,
         )
             .into_response(),
@@ -25,16 +33,24 @@ fn serve(uri: Uri) -> Response {
 }
 
 fn mime_guess(path: &str) -> &'static str {
-    if path.ends_with(".js") {
+    if path.ends_with(".js") || path.ends_with(".mjs") {
         "application/javascript; charset=utf-8"
     } else if path.ends_with(".css") {
         "text/css; charset=utf-8"
-    } else if path.ends_with(".json") {
+    } else if path.ends_with(".json") || path.ends_with(".map") {
         "application/json"
     } else if path.ends_with(".png") {
         "image/png"
-    } else {
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".woff2") {
+        "font/woff2"
+    } else if path.ends_with(".woff") {
+        "font/woff"
+    } else if path.ends_with(".html") || path.is_empty() || path == "index.html" {
         "text/html; charset=utf-8"
+    } else {
+        "application/octet-stream"
     }
 }
 

@@ -90,7 +90,14 @@ impl MacOsRecording {
         if matches!(audio, AudioSource::Microphone | AudioSource::Both) && !mic_access_ok() {
             request_mic_access();
         }
-        let path = std::env::temp_dir().join(format!("asterism-{}.mp4", uuid_lite()));
+        let dir = std::env::temp_dir().join(format!("asterism-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| MediaError::Failed(e.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let path = dir.join(format!("{}.mp4", uuid_lite()));
         let c_path = CString::new(path.to_string_lossy().as_ref())
             .map_err(|e| MediaError::Failed(e.to_string()))?;
         let mut err = [0 as c_char; 256];

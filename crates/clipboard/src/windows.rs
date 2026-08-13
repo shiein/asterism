@@ -10,8 +10,8 @@ use std::sync::mpsc::{self, Sender};
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, CF_DIB, CF_HDROP, CF_UNICODETEXT, CloseClipboard, EmptyClipboard,
-    EnumClipboardFormats, GetClipboardData, GetClipboardOwner, GetClipboardSequenceNumber,
-    OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    EnumClipboardFormats, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
@@ -58,11 +58,19 @@ pub fn spawn_update_signal() -> std::sync::mpsc::Receiver<()> {
     rx
 }
 
+fn clipboard_owner_hwnd() -> HWND {
+    LISTENER_HWND
+        .get()
+        .copied()
+        .map(|raw| HWND(raw as *mut core::ffi::c_void))
+        .unwrap_or_default()
+}
+
 fn with_clipboard<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     unsafe {
         let mut last = None;
         for _ in 0..8 {
-            match OpenClipboard(HWND::default()) {
+            match OpenClipboard(clipboard_owner_hwnd()) {
                 Ok(()) => {
                     let out = f();
                     let _ = CloseClipboard();
@@ -277,24 +285,40 @@ fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>> {
     if dib.len() < 40 {
         return Err(ClipboardError::Unsupported);
     }
-    let width = i32::from_le_bytes(dib[4..8].try_into().unwrap());
-    let height_raw = i32::from_le_bytes(dib[8..12].try_into().unwrap());
-    let bit_count = u16::from_le_bytes(dib[14..16].try_into().unwrap());
-    let compression = u32::from_le_bytes(dib[16..20].try_into().unwrap());
+    let width = i32::from_le_bytes(dib[4..8].try_into().map_err(|_| ClipboardError::Unsupported)?);
+    let height_raw =
+        i32::from_le_bytes(dib[8..12].try_into().map_err(|_| ClipboardError::Unsupported)?);
+    let bit_count =
+        u16::from_le_bytes(dib[14..16].try_into().map_err(|_| ClipboardError::Unsupported)?);
+    let compression =
+        u32::from_le_bytes(dib[16..20].try_into().map_err(|_| ClipboardError::Unsupported)?);
     if compression != 0 || width <= 0 || !(bit_count == 24 || bit_count == 32) {
         return Err(ClipboardError::Unsupported);
     }
     let top_down = height_raw < 0;
     let height = height_raw.unsigned_abs();
-    let header = u32::from_le_bytes(dib[0..4].try_into().unwrap()) as usize;
+    const MAX_DIM: u32 = 16_384;
+    const MAX_PIXELS: u32 = 64 * 1024 * 1024;
+    if width as u32 > MAX_DIM || height > MAX_DIM || height.saturating_mul(width as u32) > MAX_PIXELS
+    {
+        return Err(ClipboardError::Unsupported);
+    }
+    let header =
+        u32::from_le_bytes(dib[0..4].try_into().map_err(|_| ClipboardError::Unsupported)?) as usize;
     let stride = ((width as usize * bit_count as usize + 31) / 32) * 4;
     let pixels = dib.get(header..).ok_or(ClipboardError::Unsupported)?;
+    let pixel_bytes = bit_count as usize / 8;
     let mut rgba = vec![0u8; width as usize * height as usize * 4];
     for y in 0..height as usize {
         let src_y = if top_down { y } else { height as usize - 1 - y };
-        let row = pixels.get(src_y * stride..).ok_or(ClipboardError::Unsupported)?;
+        let row_start = src_y.checked_mul(stride).ok_or(ClipboardError::Unsupported)?;
+        let row = pixels.get(row_start..).ok_or(ClipboardError::Unsupported)?;
         for x in 0..width as usize {
-            let i = x * (bit_count as usize / 8);
+            let i = x.checked_mul(pixel_bytes).ok_or(ClipboardError::Unsupported)?;
+            let needed = i.checked_add(if bit_count == 32 { 4 } else { 3 }).ok_or(ClipboardError::Unsupported)?;
+            if needed > row.len() {
+                return Err(ClipboardError::Unsupported);
+            }
             let dst = (y * width as usize + x) * 4;
             rgba[dst] = row[i + 2];
             rgba[dst + 1] = row[i + 1];
@@ -324,6 +348,7 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 static CLASS_NAME: OnceLock<Vec<u16>> = OnceLock::new();
+static LISTENER_HWND: OnceLock<isize> = OnceLock::new();
 
 fn run_listener(tx: Sender<()>) -> Result<()> {
     unsafe {
@@ -353,6 +378,7 @@ fn run_listener(tx: Sender<()>) -> Result<()> {
             None,
         )
         .map_err(|e| ClipboardError::Platform(e.to_string()))?;
+        let _ = LISTENER_HWND.set(hwnd.0 as isize);
         LISTENER.with(|slot| *slot.borrow_mut() = Some(tx));
         AddClipboardFormatListener(hwnd).map_err(|e| ClipboardError::Platform(e.to_string()))?;
         let mut msg = MSG::default();

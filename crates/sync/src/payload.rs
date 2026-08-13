@@ -60,7 +60,7 @@ const BLOB_CHUNK_HEADER: usize = 4 + 24 + 48 + 32 + 4 + 24 + 4;
 pub fn encrypt_blob_chunks(avk: &AccountVaultKey, plaintext: &[u8]) -> Result<Vec<Vec<u8>>> {
     let item_key = ItemKey::generate();
     let wrapped = wrap_item_key(avk, &item_key).map_err(crypto_failed)?;
-    let blob_id = blake3_bytes(plaintext);
+    let blob_id = avk.dedup_tag(&blake3_bytes(plaintext));
     plaintext
         .chunks(CHUNK_SIZE)
         .enumerate()
@@ -93,7 +93,9 @@ pub fn decrypt_blob_chunks(avk: &AccountVaultKey, encoded: &[Vec<u8>]) -> Result
         let item_key = unwrap_item_key(avk, &wrapped).map_err(crypto_failed)?;
         plaintext.extend(decrypt_chunk(&item_key, &chunk).map_err(crypto_failed)?);
     }
-    if expected_blob_id != Some(blake3_bytes(&plaintext)) {
+    let hash = blake3_bytes(&plaintext);
+    let expected = expected_blob_id.ok_or_else(|| SyncError::Failed("blob plaintext hash mismatch".into()))?;
+    if expected != avk.dedup_tag(&hash) && expected != hash {
         return Err(SyncError::Failed("blob plaintext hash mismatch".into()));
     }
     Ok(plaintext)

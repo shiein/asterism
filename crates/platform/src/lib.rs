@@ -1,9 +1,11 @@
 //! 平台路径、网络变化感知入口、前台进程推断（Best Effort）。
 
+pub mod atomic;
 pub mod hardening;
 pub mod identity;
 pub mod net;
 pub mod paths;
+pub mod trust;
 pub mod vault;
 
 #[cfg(target_os = "macos")]
@@ -14,6 +16,7 @@ pub mod windows;
 pub use identity::LocalIdentity;
 pub use net::{LanCandidate, local_candidates, spawn_change_watch};
 pub use paths::AppPaths;
+pub use trust::{TrustStore, TrustedPeer};
 pub use vault::LocalVault;
 
 #[derive(Clone, Debug, Default)]

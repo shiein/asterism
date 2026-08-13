@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use asterism_capture::backend::CaptureBackend;
-use asterism_capture::{AnnotationScene, OverlaySession, XcapBackend, export_png, select_region};
+use asterism_capture::{AnnotationScene, OverlaySession, XcapBackend, export_png};
 use asterism_clipboard::ClipboardBackend;
 use asterism_core::action::ActionId;
 use asterism_core::content::{ContentFlags, ContentKind};
@@ -135,15 +135,20 @@ pub fn recovery_key(state: State<'_, DesktopState>) -> String {
 }
 
 #[tauri::command]
-pub fn capture_fullscreen(state: State<'_, DesktopState>) -> Result<String, CmdError> {
-    let backend = XcapBackend;
-    backend.permission_preflight().map_err(|e| CmdError::Any(e.to_string()))?;
-    let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
-    let monitor = monitors.first().ok_or_else(|| CmdError::Any("no monitor".into()))?;
-    let frame = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-    let png = export_png(frame.width, frame.height, &frame.bgra, &AnnotationScene::default())
-        .map_err(CmdError::Any)?;
-    insert_screenshot(&state, png, frame.width, frame.height)
+pub async fn capture_fullscreen(state: State<'_, DesktopState>) -> Result<String, CmdError> {
+    let (png, width, height) = tauri::async_runtime::spawn_blocking(|| {
+        let backend = XcapBackend;
+        backend.permission_preflight().map_err(|e| e.to_string())?;
+        let monitors = backend.list_monitors().map_err(|e| e.to_string())?;
+        let monitor = monitors.first().ok_or_else(|| "no monitor".to_string())?;
+        let frame = backend.capture_display(monitor).map_err(|e| e.to_string())?;
+        let png = export_png(frame.width, frame.height, &frame.bgra, &AnnotationScene::default())?;
+        Ok::<_, String>((png, frame.width, frame.height))
+    })
+    .await
+    .map_err(|e| CmdError::Any(e.to_string()))?
+    .map_err(CmdError::Any)?;
+    insert_screenshot(&state, png, width, height)
 }
 
 pub fn insert_screenshot(
@@ -157,7 +162,7 @@ pub fn insert_screenshot(
         png: Vec::new(),
         width,
         height,
-        dedup_tag: asterism_crypto::local_dedup_tag(&png),
+        dedup_tag: state.vault.read().avk.dedup_tag(&asterism_crypto::blake3_bytes(&png)),
         flags: asterism_core::ContentFlags::REMOTE_ALLOWED,
         source_app: Some("asterism".into()),
     }
@@ -172,20 +177,25 @@ pub fn insert_screenshot(
 }
 
 #[tauri::command]
-pub fn capture_region(state: State<'_, DesktopState>) -> Result<String, CmdError> {
-    let backend = XcapBackend;
-    backend.permission_preflight().map_err(|e| CmdError::Any(e.to_string()))?;
-    let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
-    let monitor = monitors.first().ok_or_else(|| CmdError::Any("no monitor".into()))?;
-    let frame = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-    let selection = select_region(&frame).map_err(|e| CmdError::Any(e.to_string()))?;
-    let Some(selection) = selection else {
-        return Err(CmdError::Any("cancelled".into()));
-    };
-    let session = OverlaySession { frame, selection: Some(selection) };
-    let (w, h, bgra) =
-        session.crop_bgra().ok_or_else(|| CmdError::Any("empty selection".into()))?;
-    let png = export_png(w, h, &bgra, &AnnotationScene::default()).map_err(CmdError::Any)?;
+pub async fn capture_region(state: State<'_, DesktopState>) -> Result<String, CmdError> {
+    let (png, w, h) = tauri::async_runtime::spawn_blocking(|| {
+        let backend = XcapBackend;
+        backend.permission_preflight().map_err(|e| e.to_string())?;
+        let monitors = backend.list_monitors().map_err(|e| e.to_string())?;
+        let monitor = monitors.first().ok_or_else(|| "no monitor".to_string())?;
+        let frame = backend.capture_display(monitor).map_err(|e| e.to_string())?;
+        let selection = crate::overlay_cli::select_region_subprocess(&frame).map_err(|e| e.to_string())?;
+        let Some(selection) = selection else {
+            return Err("cancelled".into());
+        };
+        let session = OverlaySession { frame, selection: Some(selection) };
+        let (w, h, bgra) = session.crop_bgra().ok_or_else(|| "empty selection".to_string())?;
+        let png = export_png(w, h, &bgra, &AnnotationScene::default())?;
+        Ok::<_, String>((png, w, h))
+    })
+    .await
+    .map_err(|e| CmdError::Any(e.to_string()))?
+    .map_err(CmdError::Any)?;
     insert_screenshot(&state, png, w, h)
 }
 
@@ -231,8 +241,12 @@ pub async fn connect_hub(
 
 #[tauri::command]
 pub async fn hub_pairing_code(state: State<'_, DesktopState>) -> Result<String, CmdError> {
-    let settings = state.sync.settings.lock().clone();
-    sync_engine::start_pairing_code(&settings).await.map_err(|e| CmdError::Any(e.to_string()))
+    let mut settings = state.sync.settings.lock().clone();
+    let code = sync_engine::start_pairing_code(&mut settings, &state.paths.config_dir)
+        .await
+        .map_err(|e| CmdError::Any(e.to_string()))?;
+    *state.sync.settings.lock() = settings;
+    Ok(code)
 }
 
 #[tauri::command]
@@ -272,8 +286,14 @@ pub async fn publish_pairing_avk(
     let settings = state.sync.settings.lock().clone();
     let url = settings.hub_url.ok_or_else(|| CmdError::Any("no hub".into()))?;
     let token = settings.token.ok_or_else(|| CmdError::Any("no token".into()))?;
+    let salt_hex = settings
+        .pending_pair_salt
+        .clone()
+        .ok_or_else(|| CmdError::Any("generate a pairing code first".into()))?;
+    let salt = asterism_sync::pairing::parse_salt_hex(&salt_hex)
+        .ok_or_else(|| CmdError::Any("invalid pairing salt".into()))?;
     let wrap_key =
-        asterism_crypto::AccountVaultKey::from_bytes(asterism_sync::pairing::hash_code(&code));
+        asterism_crypto::AccountVaultKey::from_bytes(asterism_sync::pairing::derive_wrap_key(&code, &salt));
     let wrapped = {
         let vault = state.vault.read();
         asterism_crypto::encrypt_metadata(&wrap_key, vault.avk.as_bytes())

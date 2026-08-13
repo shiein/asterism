@@ -64,14 +64,25 @@ pub fn init(args: InitArgs) -> Result<()> {
         tracing::info!("wrote self-signed TLS material");
     }
 
+    let secret = asterism_sync::pairing::generate_bootstrap_secret();
+    let hash = hex::encode(asterism_sync::pairing::hash_bootstrap(&secret));
     let config = HubConfig {
         bind: args.bind,
         data_dir: args.data_dir.clone(),
         tls: crate::config::TlsConfig { cert: cert_path, key: key_path },
+        bootstrap_secret_hash: Some(hash),
     };
     if !config_path.exists() {
         fs::write(&config_path, config.to_toml()?)?;
         tracing::info!(path = %config_path.display(), "wrote config");
+        let secret_path = args.data_dir.join("bootstrap.secret");
+        fs::write(&secret_path, format!("{secret}\n"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o600));
+        }
+        println!("Bootstrap secret (save once, required for the first device): {secret}");
     }
     db::migrate(&config.data_dir.join("hub.db"))?;
     println!("initialized hub data dir {}", args.data_dir.display());

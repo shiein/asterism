@@ -18,7 +18,7 @@ pub async fn list(
     let db = state.db.lock();
     let mut stmt = db
         .prepare(
-            "SELECT id, name, platform, last_seen_at_ms, revoked_at_ms FROM devices WHERE account_id = ?1",
+            "SELECT id, name, platform, last_seen_at_ms, revoked_at_ms, cert_fingerprint FROM devices WHERE account_id = ?1",
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let rows = stmt
@@ -28,12 +28,14 @@ pub async fn list(
             if raw.len() == 16 {
                 id.copy_from_slice(&raw);
             }
+            let fp: Option<Vec<u8>> = row.get(5)?;
             Ok(DeviceDto {
                 id: DeviceId::from_bytes(id),
                 name: row.get(1)?,
                 platform: row.get(2)?,
                 last_seen_at_ms: row.get(3)?,
                 revoked: row.get::<_, Option<i64>>(4)?.is_some(),
+                cert_fingerprint: fp.filter(|b| b.len() == 32).map(hex::encode),
             })
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

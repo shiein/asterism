@@ -61,16 +61,17 @@ impl LanEndpoint {
 }
 
 pub async fn listen(cert: DeviceCert, port: u16) -> Result<TcpListener> {
-    let _ = server_config(&cert)?;
+    let _ = server_config(&cert, &[])?;
     TcpListener::bind(("0.0.0.0", port)).await.map_err(SyncError::from)
 }
 
 pub async fn accept_direct(
     listener: &TcpListener,
     cert: &DeviceCert,
+    trusted_fps: &[[u8; 32]],
 ) -> Result<(tokio_rustls::server::TlsStream<TcpStream>, SocketAddr)> {
     let (tcp, peer) = listener.accept().await?;
-    let acceptor = TlsAcceptor::from(server_config(cert)?);
+    let acceptor = TlsAcceptor::from(server_config(cert, trusted_fps)?);
     let tls = acceptor.accept(tcp).await.map_err(|e| SyncError::Tls(e.to_string()))?;
     Ok((tls, peer))
 }

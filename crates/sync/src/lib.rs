@@ -26,7 +26,10 @@ pub use cert::DeviceCert;
 pub use error::SyncError;
 pub use hub_client::HubClient;
 pub use lan::DiscoveredPeer;
-pub use pairing::{PairingFinish, PairingOffer};
+pub use pairing::{
+    PairingFinish, PairingOffer, derive_wrap_key, generate_bootstrap_secret, hash_bootstrap,
+    parse_salt_hex,
+};
 pub use payload::{
     SyncPackage, decode_package, decrypt_blob_chunks, encode_package, encrypt_blob_chunks, pack,
     unpack_body, unpack_meta,

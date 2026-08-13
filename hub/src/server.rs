@@ -21,6 +21,32 @@ use crate::{api, auth, blob, device, health, history, relay, web};
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_CHUNK_BYTES: usize = 2 * 1024 * 1024;
 
+fn ensure_bootstrap(mut config: HubConfig) -> Result<HubConfig> {
+    if config.bootstrap_secret_hash.is_some() {
+        return Ok(config);
+    }
+    let secret = asterism_sync::pairing::generate_bootstrap_secret();
+    let hash = hex::encode(asterism_sync::pairing::hash_bootstrap(&secret));
+    config.bootstrap_secret_hash = Some(hash);
+    let secret_path = config.data_dir.join("bootstrap.secret");
+    std::fs::write(&secret_path, format!("{secret}\n"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600));
+    }
+    let config_path = config.data_dir.join("config.toml");
+    if let Ok(toml) = toml::to_string_pretty(&config) {
+        let _ = std::fs::write(config_path, toml);
+    }
+    tracing::warn!(
+        path = %secret_path.display(),
+        "generated bootstrap secret for existing hub; save it for the first device"
+    );
+    println!("Bootstrap secret (save once): {secret}");
+    Ok(config)
+}
+
 pub async fn run(config: HubConfig) -> Result<()> {
     std::fs::create_dir_all(config.blob_root())?;
     crate::db::migrate(&config.db_path())?;
@@ -33,6 +59,7 @@ pub async fn run(config: HubConfig) -> Result<()> {
         "#,
     )?;
 
+    let config = ensure_bootstrap(config)?;
     let tls = crate::tls::load_server_config(&config.tls.cert, &config.tls.key)?;
     let acceptor = TlsAcceptor::from(tls);
     let addr: SocketAddr = config.bind.parse().context("parse bind address")?;

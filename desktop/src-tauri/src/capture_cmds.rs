@@ -1,5 +1,5 @@
 use asterism_capture::backend::CaptureBackend;
-use asterism_capture::{AnnotationScene, OverlaySession, XcapBackend, export_png, select_region};
+use asterism_capture::{AnnotationScene, OverlaySession, XcapBackend, export_png};
 use asterism_core::ContentKind;
 use asterism_media::AudioSource;
 use asterism_media::VideoFrame;
@@ -89,16 +89,23 @@ fn load_image_item(
 }
 
 #[tauri::command]
-pub fn record_gif(
+pub async fn record_gif(
     state: State<'_, DesktopState>,
     seconds: u32,
     fps: u16,
 ) -> Result<String, CmdError> {
+    let (bytes, w, h) = tauri::async_runtime::spawn_blocking(move || record_gif_inner(seconds, fps))
+        .await
+        .map_err(|e| CmdError::Any(e.to_string()))??;
+    insert_blob(&state, bytes, w, h, ContentKind::Gif)
+}
+
+fn record_gif_inner(seconds: u32, fps: u16) -> Result<(Vec<u8>, u32, u32), CmdError> {
     let backend = XcapBackend;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitor = monitors.first().ok_or_else(|| CmdError::Any("no monitor".into()))?;
     let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-    let sel = select_region(&first).map_err(|e| CmdError::Any(e.to_string()))?;
+    let sel = crate::overlay_cli::select_region_subprocess(&first).map_err(|e| CmdError::Any(e.to_string()))?;
     let session = OverlaySession { frame: first.clone(), selection: sel };
     let (w, h, _) = session.crop_bgra().ok_or_else(|| CmdError::Any("need selection".into()))?;
     let mut gif = GifSession::new(w, h, fps);
@@ -113,22 +120,35 @@ pub fn record_gif(
         std::thread::sleep(std::time::Duration::from_millis(1000 / u64::from(fps.max(8))));
     }
     let bytes = gif.finish().map_err(|e| CmdError::Any(e.to_string()))?;
-    insert_blob(&state, bytes, w, h, ContentKind::Gif)
+    Ok((bytes, w, h))
 }
 
 #[tauri::command]
-pub fn record_video(
+pub async fn record_video(
     state: State<'_, DesktopState>,
     seconds: u32,
     fps: u32,
     audio: Option<String>,
 ) -> Result<String, CmdError> {
+    let (bytes, w, h) = tauri::async_runtime::spawn_blocking(move || {
+        record_video_inner(seconds, fps, audio)
+    })
+    .await
+    .map_err(|e| CmdError::Any(e.to_string()))??;
+    insert_blob(&state, bytes, w, h, ContentKind::Video)
+}
+
+fn record_video_inner(
+    seconds: u32,
+    fps: u32,
+    audio: Option<String>,
+) -> Result<(Vec<u8>, u32, u32), CmdError> {
     let backend = XcapBackend;
     backend.permission_preflight().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitor = monitors.first().ok_or_else(|| CmdError::Any("no monitor".into()))?;
     let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-    let sel = select_region(&first).map_err(|e| CmdError::Any(e.to_string()))?;
+    let sel = crate::overlay_cli::select_region_subprocess(&first).map_err(|e| CmdError::Any(e.to_string()))?;
     let session = OverlaySession { frame: first, selection: sel };
     let (w, h, _) = session.crop_bgra().ok_or_else(|| CmdError::Any("need selection".into()))?;
     let backend_fps = if cfg!(target_os = "macos") { fps } else { fps.min(30) };
@@ -159,7 +179,7 @@ pub fn record_video(
             }
         }
         let bytes = rec.finish().map_err(|e| CmdError::Any(e.to_string()))?;
-        insert_blob(&state, bytes, w, h, ContentKind::Video)
+        Ok((bytes, w, h))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -179,7 +199,7 @@ pub fn record_video(
             }
         }
         let bytes = avi.finish().map_err(|e| CmdError::Any(e.to_string()))?;
-        insert_blob(&state, bytes, w, h, ContentKind::Video)
+        Ok((bytes, w, h))
     }
 }
 
@@ -191,12 +211,19 @@ fn sleep_until(deadline: std::time::Instant) {
 }
 
 #[tauri::command]
-pub fn scroll_capture(state: State<'_, DesktopState>, frames: u32) -> Result<String, CmdError> {
+pub async fn scroll_capture(state: State<'_, DesktopState>, frames: u32) -> Result<String, CmdError> {
+    let (png, w, h) = tauri::async_runtime::spawn_blocking(move || scroll_capture_inner(frames))
+        .await
+        .map_err(|e| CmdError::Any(e.to_string()))??;
+    crate::commands::insert_screenshot(&state, png, w, h)
+}
+
+fn scroll_capture_inner(frames: u32) -> Result<(Vec<u8>, u32, u32), CmdError> {
     let backend = XcapBackend;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitor = monitors.first().ok_or_else(|| CmdError::Any("no monitor".into()))?;
     let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-    let sel = select_region(&first).map_err(|e| CmdError::Any(e.to_string()))?;
+    let sel = crate::overlay_cli::select_region_subprocess(&first).map_err(|e| CmdError::Any(e.to_string()))?;
     let mut engine = asterism_capture::ScrollCaptureEngine::default();
     let n = frames.clamp(2, 40);
     for i in 0..n {
@@ -224,7 +251,7 @@ pub fn scroll_capture(state: State<'_, DesktopState>, frames: u32) -> Result<Str
     let tile = engine.flatten().ok_or_else(|| CmdError::Any("no frames".into()))?;
     let png = export_png(tile.width, tile.height, &tile.bgra, &AnnotationScene::default())
         .map_err(CmdError::Any)?;
-    insert_screenshot(&state, png, tile.width, tile.height)
+    Ok((png, tile.width, tile.height))
 }
 
 fn insert_blob(
@@ -239,7 +266,7 @@ fn insert_blob(
         png: Vec::new(),
         width: w,
         height: h,
-        dedup_tag: asterism_crypto::local_dedup_tag(&bytes),
+        dedup_tag: state.vault.read().avk.dedup_tag(&asterism_crypto::blake3_bytes(&bytes)),
         flags: asterism_core::ContentFlags::REMOTE_ALLOWED,
         source_app: Some("asterism".into()),
     }

@@ -169,6 +169,11 @@ impl Store {
         self.call(|reply| WriteOp::GcBlobs { released_before_ms, reply })
     }
 
+    pub fn sweep_orphan_blobs(&self) -> Result<u64> {
+        let known = self.readers.with(repo::all_blob_ids)?;
+        self.blobs.remove_orphans(&known)
+    }
+
     fn call<T>(&self, build: impl FnOnce(SyncSender<Result<T>>) -> WriteOp) -> Result<T> {
         let (tx, rx) = mpsc::sync_channel(1);
         self.writer.send(build(tx)).map_err(|_| StorageError::WriterStopped)?;
@@ -236,13 +241,15 @@ fn writer_loop(db: PathBuf, blobs: BlobStore, rx: Receiver<WriteOp>) {
                 let result =
                     conn.unchecked_transaction().map_err(StorageError::from).and_then(|tx| {
                         let candidates = repo::unused_blobs(&tx, released_before_ms)?;
+                        for id in &candidates {
+                            repo::delete_unused_blob_ref(&tx, id, released_before_ms)?;
+                        }
+                        tx.commit()?;
                         let mut removed = 0u64;
                         for id in candidates {
                             blobs.remove_if_unused(&id)?;
-                            repo::delete_unused_blob_ref(&tx, &id, released_before_ms)?;
                             removed += 1;
                         }
-                        tx.commit()?;
                         Ok(removed)
                     });
                 let _ = reply.send(result);

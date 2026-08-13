@@ -3,6 +3,7 @@
 mod actions;
 mod capture_cmds;
 mod commands;
+mod overlay_cli;
 mod runtime;
 mod settings;
 mod sync_engine;
@@ -12,6 +13,10 @@ use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run_overlay_select() -> i32 {
+    overlay_cli::run_overlay_select()
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(

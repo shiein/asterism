@@ -13,7 +13,7 @@ pub struct EncryptedPayload {
 
 pub fn encrypt_metadata(avk: &AccountVaultKey, plaintext: &[u8]) -> Result<EncryptedPayload> {
     let item = ItemKey::generate();
-    let blob_id = blake3_bytes(plaintext);
+    let blob_id = avk.dedup_tag(&blake3_bytes(plaintext));
     let chunk = encrypt_small(&item, blob_id, plaintext)?;
     let wrapped_key = wrap_item_key(avk, &item)?;
     Ok(EncryptedPayload { wrapped_key, chunk })
@@ -21,7 +21,12 @@ pub fn encrypt_metadata(avk: &AccountVaultKey, plaintext: &[u8]) -> Result<Encry
 
 pub fn decrypt_metadata(avk: &AccountVaultKey, payload: &EncryptedPayload) -> Result<Vec<u8>> {
     let item = unwrap_item_key(avk, &payload.wrapped_key)?;
-    decrypt_chunk(&item, &payload.chunk)
+    let plain = decrypt_chunk(&item, &payload.chunk)?;
+    let hash = blake3_bytes(&plain);
+    if payload.chunk.blob_id != avk.dedup_tag(&hash) && payload.chunk.blob_id != hash {
+        return Err(crate::error::CryptoError::Decrypt);
+    }
+    Ok(plain)
 }
 
 #[cfg(test)]

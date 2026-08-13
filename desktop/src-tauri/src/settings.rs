@@ -8,11 +8,29 @@ pub struct SyncSettings {
     pub token: Option<String>,
     pub lan_port: u16,
     pub auto_sync: bool,
+    #[serde(default = "default_true")]
+    pub auto_receive: bool,
+    #[serde(default)]
+    pub pending_pair_code: Option<String>,
+    #[serde(default)]
+    pub pending_pair_salt: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for SyncSettings {
     fn default() -> Self {
-        Self { hub_url: None, token: None, lan_port: 47820, auto_sync: true }
+        Self {
+            hub_url: None,
+            token: None,
+            lan_port: 47820,
+            auto_sync: true,
+            auto_receive: true,
+            pending_pair_code: None,
+            pending_pair_salt: None,
+        }
     }
 }
 

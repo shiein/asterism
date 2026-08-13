@@ -2,29 +2,22 @@ use std::sync::Arc;
 
 use asterism_sync::Envelope;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Query, State, WebSocketUpgrade};
+use axum::extract::{State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::auth::auth_token;
 use crate::device::bearer;
 use crate::state::HubState;
 
-#[derive(Deserialize)]
-pub struct WsQuery {
-    pub token: Option<String>,
-}
-
 pub async fn ws(
     State(state): State<Arc<HubState>>,
     headers: HeaderMap,
-    Query(q): Query<WsQuery>,
     upgrade: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, StatusCode> {
     let (account, device) =
-        auth_token(&state, bearer(&headers), q.token.as_deref()).ok_or(StatusCode::UNAUTHORIZED)?;
+        auth_token(&state, bearer(&headers), None).ok_or(StatusCode::UNAUTHORIZED)?;
     Ok(upgrade.on_upgrade(move |socket| handle(state, account, device, socket)))
 }
 

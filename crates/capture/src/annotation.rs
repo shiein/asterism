@@ -123,7 +123,63 @@ fn draw(pixmap: &mut Pixmap, ann: &Annotation) {
         AnnotationKind::Mosaic | AnnotationKind::Blur if ann.geometry.len() >= 4 => {
             apply_block(pixmap, ann.geometry[0], ann.geometry[1], ann.geometry[2], ann.geometry[3]);
         }
+        AnnotationKind::Text if ann.geometry.len() >= 2 => {
+            let text = annotation_text(ann);
+            if !text.is_empty() {
+                draw_bitmap_text(pixmap, ann.geometry[0] as i32, ann.geometry[1] as i32, &text);
+            }
+        }
         _ => {}
+    }
+}
+
+fn annotation_text(ann: &Annotation) -> String {
+    ann.style
+        .get("text")
+        .or_else(|| ann.style.get("label"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn draw_bitmap_text(pixmap: &mut Pixmap, x: i32, y: i32, text: &str) {
+    let mut cx = x;
+    let cy = y;
+    for ch in text.chars().take(128) {
+        let glyph = glyph_for(ch);
+        for row in 0..7 {
+            for col in 0..5 {
+                if glyph[row] & (1 << (4 - col)) != 0 {
+                    put_pixel(pixmap, cx + col, cy + row as i32, 255, 70, 70);
+                }
+            }
+        }
+        cx += 6;
+    }
+}
+
+fn put_pixel(pixmap: &mut Pixmap, x: i32, y: i32, r: u8, g: u8, b: u8) {
+    if x < 0 || y < 0 {
+        return;
+    }
+    let x = x as u32;
+    let y = y as u32;
+    if x >= pixmap.width() || y >= pixmap.height() {
+        return;
+    }
+    let color = Color::from_rgba8(r, g, b, 255).premultiply().to_color_u8();
+    let width = pixmap.width();
+    pixmap.pixels_mut()[(y * width + x) as usize] = color;
+}
+
+fn glyph_for(ch: char) -> [u8; 7] {
+    match ch.to_ascii_uppercase() {
+        ' ' => [0; 7],
+        'A' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+        'E' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
+        'O' => [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+        'T' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+        _ => [0x1F, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1F],
     }
 }
 

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self, FileType};
 use std::path::{Path, PathBuf};
 
@@ -5,7 +6,7 @@ use asterism_core::content::{
     FileEntry, FileEntryKind, FileManifest, UnsupportedEntry, UnsupportedReason,
 };
 use asterism_core::id::ManifestId;
-use asterism_core::policy::LOCAL_MAX_ENUMERATION_ENTRIES;
+use asterism_core::policy::{LOCAL_MAX_ENUMERATION_ENTRIES, LOCAL_MAX_VISIT_DEPTH};
 
 use crate::error::{ClipboardError, Result};
 
@@ -23,17 +24,40 @@ pub fn preflight_paths(paths: &[PathBuf]) -> Result<FileManifest> {
     let mut entries = Vec::new();
     let mut unsupported = Vec::new();
     let mut count = 0u64;
+    let mut used_roots = HashSet::new();
 
     for path in paths {
-        visit(path, Path::new(""), &mut entries, &mut unsupported, &mut count)?;
+        let root = unique_name(
+            &mut used_roots,
+            path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "item".into()),
+        );
+        visit(path, Path::new(&root), 0, &mut entries, &mut unsupported, &mut count)?;
     }
 
     Ok(FileManifest { id: ManifestId::new(), root_name, entries, unsupported })
 }
 
+fn unique_name(used: &mut HashSet<String>, raw: String) -> String {
+    if used.insert(raw.clone()) {
+        return raw;
+    }
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("{raw}.{n}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n = n.saturating_add(1);
+        if n == 0 {
+            return format!("{raw}.dup");
+        }
+    }
+}
+
 fn visit(
     abs: &Path,
     rel: &Path,
+    depth: u32,
     entries: &mut Vec<FileEntry>,
     unsupported: &mut Vec<UnsupportedEntry>,
     count: &mut u64,
@@ -41,6 +65,10 @@ fn visit(
     *count += 1;
     if *count > LOCAL_MAX_ENUMERATION_ENTRIES {
         return Err(ClipboardError::TooManyEntries);
+    }
+    if depth > LOCAL_MAX_VISIT_DEPTH {
+        push_unsupported(rel, UnsupportedReason::Unreadable, unsupported);
+        return Ok(());
     }
 
     let meta = match fs::symlink_metadata(abs) {
@@ -51,14 +79,17 @@ fn visit(
         }
     };
     let ft = meta.file_type();
-    let relative_path = if rel.as_os_str().is_empty() {
-        abs.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "item".into())
-    } else {
-        asterism_core::content::sanitize_relative_path(&rel.to_string_lossy())?
+    let relative_path = match asterism_core::content::sanitize_relative_path(&rel.to_string_lossy()) {
+        Ok(p) => p,
+        Err(_) => {
+            push_unsupported(rel, UnsupportedReason::InvalidName, unsupported);
+            return Ok(());
+        }
     };
 
-    if is_symlink_or_junction(&ft, abs) {
-        push_unsupported(Path::new(&relative_path), UnsupportedReason::Symlink, unsupported);
+    if is_reparse_point(&ft, abs) {
+        let reason = if ft.is_symlink() { UnsupportedReason::Symlink } else { UnsupportedReason::Junction };
+        push_unsupported(Path::new(&relative_path), reason, unsupported);
         return Ok(());
     }
     if !ft.is_file() && !ft.is_dir() {
@@ -91,7 +122,7 @@ fn visit(
             };
             let name = child.file_name();
             let child_rel = Path::new(&relative_path).join(name);
-            visit(&child.path(), &child_rel, entries, unsupported, count)?;
+            visit(&child.path(), &child_rel, depth + 1, entries, unsupported, count)?;
         }
         return Ok(());
     }
@@ -114,27 +145,34 @@ fn push_unsupported(rel: &Path, reason: UnsupportedReason, out: &mut Vec<Unsuppo
 pub fn materialize_to_cache(dest: &Path, sources: &[PathBuf]) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(dest)?;
     let mut written = Vec::new();
+    let mut used = HashSet::new();
     for src in sources {
-        let name = src.file_name().ok_or_else(|| {
-            ClipboardError::Platform(format!("file has no name: {}", src.display()))
-        })?;
+        let raw = src
+            .file_name()
+            .ok_or_else(|| ClipboardError::Platform(format!("file has no name: {}", src.display())))?
+            .to_string_lossy()
+            .into_owned();
+        let name = unique_name(&mut used, raw);
         let target = dest.join(name);
-        copy_no_follow(src, &target)?;
+        copy_no_follow(src, &target, 0)?;
         written.push(target);
     }
     Ok(written)
 }
 
-fn copy_no_follow(src: &Path, dest: &Path) -> Result<()> {
+fn copy_no_follow(src: &Path, dest: &Path, depth: u32) -> Result<()> {
+    if depth > LOCAL_MAX_VISIT_DEPTH {
+        return Ok(());
+    }
     let meta = fs::symlink_metadata(src)?;
-    if is_symlink_or_junction(&meta.file_type(), src) {
+    if is_reparse_point(&meta.file_type(), src) {
         return Ok(());
     }
     if meta.file_type().is_dir() {
         fs::create_dir_all(dest)?;
         for entry in fs::read_dir(src)? {
             let entry = entry?;
-            copy_no_follow(&entry.path(), &dest.join(entry.file_name()))?;
+            copy_no_follow(&entry.path(), &dest.join(entry.file_name()), depth + 1)?;
         }
         return Ok(());
     }
@@ -147,18 +185,22 @@ fn copy_no_follow(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn is_symlink_or_junction(ft: &FileType, path: &Path) -> bool {
+fn is_reparse_point(ft: &FileType, path: &Path) -> bool {
     if ft.is_symlink() {
         return true;
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::FileTypeExt;
+        use std::os::windows::fs::{FileTypeExt, MetadataExt};
         if ft.is_symlink_dir() || ft.is_symlink_file() {
             return true;
         }
-        // Junction 在 Windows 上常表现为 reparse point；symlink_metadata 后 is_symlink 可能为 false。
-        let _ = path;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if let Ok(meta) = fs::symlink_metadata(path)
+            && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return true;
+        }
     }
     #[cfg(not(windows))]
     {
@@ -204,5 +246,17 @@ mod tests {
         let written = materialize_to_cache(dest.path(), &[src.path().join("note.txt")]).unwrap();
         assert_eq!(written.len(), 1);
         assert_eq!(std::fs::read(&written[0]).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn duplicate_root_names_are_disambiguated() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("report.txt"), b"one").unwrap();
+        std::fs::write(b.path().join("report.txt"), b"two").unwrap();
+        let manifest = preflight_paths(&[a.path().join("report.txt"), b.path().join("report.txt")]).unwrap();
+        let names: Vec<_> = manifest.entries.iter().map(|e| e.relative_path.as_str()).collect();
+        assert!(names.contains(&"report.txt"));
+        assert!(names.iter().any(|n| *n != "report.txt"));
     }
 }

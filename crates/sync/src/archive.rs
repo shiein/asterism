@@ -67,6 +67,12 @@ pub fn pack_tree(root: &Path) -> Result<Vec<u8>> {
             out.extend_from_slice(&0u64.to_le_bytes());
             continue;
         }
+        let meta = std::fs::metadata(&path)?;
+        const MAX_ARCHIVE_BYTES: u64 = 500 * 1024 * 1024;
+        if meta.len() > MAX_ARCHIVE_BYTES || (out.len() as u64).saturating_add(meta.len()) > MAX_ARCHIVE_BYTES
+        {
+            return Err(SyncError::Failed("file tree exceeds remote size limit".into()));
+        }
         let bytes = std::fs::read(&path)?;
         out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
         out.extend_from_slice(&bytes);
@@ -74,27 +80,33 @@ pub fn pack_tree(root: &Path) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+fn take<'a>(bytes: &'a [u8], i: &mut usize, n: usize) -> Result<&'a [u8]> {
+    let end = i.checked_add(n).ok_or_else(|| SyncError::Protocol("archive offset overflow".into()))?;
+    let slice = bytes.get(*i..end).ok_or_else(|| SyncError::Protocol("truncated archive".into()))?;
+    *i = end;
+    Ok(slice)
+}
+
 pub fn unpack_tree(bytes: &[u8], dest: &Path) -> Result<Vec<PathBuf>> {
     if bytes.len() < 8 || &bytes[..4] != MAGIC {
         return Err(SyncError::Protocol("bad archive magic".into()));
     }
-    let count = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let count = u32::from_le_bytes(bytes[4..8].try_into().map_err(|_| SyncError::Protocol("bad count".into()))?)
+        as usize;
     let mut i = 8usize;
     let mut roots = Vec::new();
     std::fs::create_dir_all(dest)?;
     for _ in 0..count {
-        if i + 3 > bytes.len() {
-            return Err(SyncError::Protocol("truncated archive".into()));
-        }
-        let nlen = u16::from_le_bytes(bytes[i..i + 2].try_into().unwrap()) as usize;
-        i += 2;
-        let name = std::str::from_utf8(&bytes[i..i + nlen])
-            .map_err(|e| SyncError::Protocol(e.to_string()))?;
-        i += nlen;
-        let is_dir = bytes[i] == 1;
-        i += 1;
-        let size = u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap()) as usize;
-        i += 8;
+        let nlen_bytes = take(bytes, &mut i, 2)?;
+        let nlen = u16::from_le_bytes(nlen_bytes.try_into().map_err(|_| SyncError::Protocol("name len".into()))?)
+            as usize;
+        let name_bytes = take(bytes, &mut i, nlen)?;
+        let name = std::str::from_utf8(name_bytes).map_err(|e| SyncError::Protocol(e.to_string()))?;
+        let flag = take(bytes, &mut i, 1)?;
+        let is_dir = flag[0] == 1;
+        let size_bytes = take(bytes, &mut i, 8)?;
+        let size = u64::from_le_bytes(size_bytes.try_into().map_err(|_| SyncError::Protocol("size".into()))?)
+            as usize;
         let rel = sanitize_relative_path(name).map_err(|e| SyncError::Failed(e.to_string()))?;
         let path = dest.join(&rel);
         if is_dir {
@@ -103,9 +115,9 @@ pub fn unpack_tree(bytes: &[u8], dest: &Path) -> Result<Vec<PathBuf>> {
             if let Some(p) = path.parent() {
                 std::fs::create_dir_all(p)?;
             }
+            let payload = take(bytes, &mut i, size)?;
             let mut f = std::fs::File::create(&path)?;
-            f.write_all(&bytes[i..i + size])?;
-            i += size;
+            f.write_all(payload)?;
         }
         if !rel.contains('/') {
             roots.push(path);
@@ -187,5 +199,15 @@ mod tests {
         assert_eq!(restored, manifest);
         assert_eq!(roots, vec![out.path().join("a.txt")]);
         assert_eq!(std::fs::read(&roots[0]).unwrap(), b"hi");
+    }
+
+    #[test]
+    fn unpack_rejects_truncated_archive() {
+        let mut packed = b"ASF1".to_vec();
+        packed.extend_from_slice(&1u32.to_le_bytes());
+        packed.extend_from_slice(&10u16.to_le_bytes());
+        packed.extend_from_slice(b"ab");
+        let dest = tempfile::tempdir().unwrap();
+        assert!(unpack_tree(&packed, dest.path()).is_err());
     }
 }

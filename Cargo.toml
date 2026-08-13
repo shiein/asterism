@@ -44,6 +44,7 @@ asterism-capture = { path = "crates/capture" }
 asterism-media = { path = "crates/media" }
 asterism-sync = { path = "crates/sync" }
 
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 anyhow = "1.0"
 async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "ws"] }

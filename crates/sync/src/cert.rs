@@ -70,7 +70,7 @@ pub fn fingerprint_of_der(der: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-pub fn server_config(cert: &DeviceCert) -> Result<Arc<ServerConfig>> {
+pub fn server_config(cert: &DeviceCert, trusted_fps: &[[u8; 32]]) -> Result<Arc<ServerConfig>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let certs = rustls_pemfile::certs(&mut cert.cert_pem.as_bytes())
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -79,7 +79,7 @@ pub fn server_config(cert: &DeviceCert) -> Result<Arc<ServerConfig>> {
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| SyncError::Tls(e.to_string()))?;
     let key = keys.pop().ok_or_else(|| SyncError::Tls("no key".into()))?;
-    let verifier = Arc::new(AnyClient);
+    let verifier = Arc::new(TrustedClient { allowed: trusted_fps.to_vec() });
     let config = ServerConfig::builder()
         .with_client_cert_verifier(verifier)
         .with_single_cert(
@@ -166,20 +166,27 @@ impl ServerCertVerifier for Pinned {
 }
 
 #[derive(Debug)]
-struct AnyClient;
+struct TrustedClient {
+    allowed: Vec<[u8; 32]>,
+}
 
-impl ClientCertVerifier for AnyClient {
+impl ClientCertVerifier for TrustedClient {
     fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
         &[]
     }
 
     fn verify_client_cert(
         &self,
-        _end_entity: &CertificateDer<'_>,
+        end_entity: &CertificateDer<'_>,
         _intermediates: &[CertificateDer<'_>],
         _now: UnixTime,
     ) -> std::result::Result<ClientCertVerified, rustls::Error> {
-        Ok(ClientCertVerified::assertion())
+        let fp = fingerprint_of_der(end_entity.as_ref());
+        if self.allowed.iter().any(|allowed| *allowed == fp) {
+            Ok(ClientCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General("untrusted client certificate".into()))
+        }
     }
 
     fn verify_tls12_signature(
