@@ -178,8 +178,8 @@ async fn run_loop(
                         vault = next;
                     }
                     SyncCmd::Reload => {
-                        refresh_trust(&identity, &settings, &trust).await;
-                        exchange_candidates(&identity, &cert, &settings, &peers).await;
+                        refresh_trust(&identity, &settings, &trust, &paths).await;
+                        exchange_candidates(&identity, &cert, &settings, &peers, &paths).await;
                         retry_pending(&identity, &vault, &store, &paths, &settings, &on_change).await;
                         if let Err(err) = pull_hub(&identity, &vault, &store, &paths, &guard, &settings, &mut last_cursor, &mut failed_remote, &on_change).await {
                             tracing::warn!(error = %err, "hub pull failed");
@@ -189,11 +189,11 @@ async fn run_loop(
             }
             _ = net_rx.recv() => {
                 tracing::info!("network change; refreshing candidates");
-                exchange_candidates(&identity, &cert, &settings, &peers).await;
+                exchange_candidates(&identity, &cert, &settings, &peers, &paths).await;
             }
             _ = tokio::time::sleep(Duration::from_secs(8)) => {
-                refresh_trust(&identity, &settings, &trust).await;
-                exchange_candidates(&identity, &cert, &settings, &peers).await;
+                refresh_trust(&identity, &settings, &trust, &paths).await;
+                exchange_candidates(&identity, &cert, &settings, &peers, &paths).await;
                 retry_pending(&identity, &vault, &store, &paths, &settings, &on_change).await;
                 if let Err(err) = pull_hub(&identity, &vault, &store, &paths, &guard, &settings, &mut last_cursor, &mut failed_remote, &on_change).await {
                     tracing::debug!(error = %err, "hub pull");
@@ -286,22 +286,30 @@ async fn refresh_trust(
     identity: &LocalIdentity,
     settings: &Arc<Mutex<SyncSettings>>,
     trust: &Arc<Mutex<TrustStore>>,
+    paths: &AppPaths,
 ) {
     let snap = settings.lock().clone();
     if !snap.hub_ready() {
         return;
     }
-    let Ok(client) = client(&snap).await else { return };
+    let Ok(client) = client(&snap) else { return };
     let Ok(devices) = client.devices().await else { return };
+    persist_hub_pin(settings, paths, &client);
     let mut store = trust.lock();
     for device in devices {
-        if device.id == identity.device_id || device.revoked {
+        if device.id == identity.device_id {
             continue;
         }
-        if let Some(fp) = device.cert_fingerprint {
-            if let Err(err) = store.add(device.id, fp, device.name) {
-                tracing::warn!(error = %err, "persist trusted peer");
+        if device.revoked {
+            if let Err(err) = store.remove(device.id) {
+                tracing::warn!(error = %err, "drop revoked peer");
             }
+            continue;
+        }
+        if let Some(fp) = device.cert_fingerprint
+            && let Err(err) = store.add(device.id, fp, device.name)
+        {
+            tracing::warn!(error = %err, "persist trusted peer");
         }
     }
 }
@@ -365,13 +373,15 @@ async fn exchange_candidates(
     cert: &DeviceCert,
     settings: &Arc<Mutex<SyncSettings>>,
     peers: &Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
+    paths: &AppPaths,
 ) {
     let snap = settings.lock().clone();
     if !snap.hub_ready() {
         return;
     }
-    let Ok(client) = client(&snap).await else { return };
+    let Ok(client) = client(&snap) else { return };
     let Ok(mut ws) = client.connect_ws().await else { return };
+    persist_hub_pin(settings, paths, &client);
     let cands = asterism_platform::local_candidates(snap.lan_port)
         .into_iter()
         .map(|c| c.endpoint())
@@ -386,8 +396,11 @@ async fn exchange_candidates(
     if HubClient::send_control(&mut ws, &env).await.is_err() {
         return;
     }
-    let incoming = match tokio::time::timeout(Duration::from_secs(2), HubClient::recv_control(&mut ws))
-        .await
+    let incoming = match tokio::time::timeout(
+        Duration::from_secs(2),
+        HubClient::recv_control(&mut ws),
+    )
+    .await
     {
         Ok(Ok(Some(incoming))) => incoming,
         _ => return,
@@ -552,10 +565,45 @@ fn build_item(
     }
 }
 
-async fn client(settings: &SyncSettings) -> anyhow::Result<HubClient> {
+fn client(settings: &SyncSettings) -> anyhow::Result<HubClient> {
+    hub_client_from_settings(settings)
+}
+
+pub fn hub_client_from_settings(settings: &SyncSettings) -> anyhow::Result<HubClient> {
     let url = settings.hub_url.clone().ok_or_else(|| anyhow::anyhow!("no hub"))?;
-    let token = settings.token.clone().ok_or_else(|| anyhow::anyhow!("no token"))?;
-    Ok(HubClient::new(url)?.with_token(token))
+    let mut client = HubClient::with_pin(url, settings.hub_cert_sha256.as_deref())?;
+    if let Some(token) = &settings.token {
+        client = client.with_token(token.clone());
+    }
+    Ok(client)
+}
+
+fn persist_hub_pin(settings: &Arc<Mutex<SyncSettings>>, paths: &AppPaths, client: &HubClient) {
+    let Some(fp) = client.observed_cert_sha256() else { return };
+    let mut snap = settings.lock();
+    if snap.hub_cert_sha256.is_some() {
+        return;
+    }
+    snap.hub_cert_sha256 = Some(fp);
+    if let Err(err) = snap.save(&paths.config_dir) {
+        tracing::warn!(error = %err, "persist hub cert pin");
+    }
+}
+
+pub fn persist_hub_pin_settings(
+    settings: &mut SyncSettings,
+    config_dir: &std::path::Path,
+    client: &HubClient,
+) {
+    if settings.hub_cert_sha256.is_some() {
+        return;
+    }
+    if let Some(fp) = client.observed_cert_sha256() {
+        settings.hub_cert_sha256 = Some(fp);
+        if let Err(err) = settings.save(config_dir) {
+            tracing::warn!(error = %err, "persist hub cert pin");
+        }
+    }
 }
 
 async fn publish(
@@ -576,7 +624,7 @@ async fn publish(
     }
     let meta = serde_json::to_vec(&item.metadata)?;
     let mut pkg = pack(vault, &meta, payload.as_deref())?;
-    let client = client(&snap).await?;
+    let client = client(&snap)?;
     let mut blob_id = None;
     if pkg.body.is_none()
         && let Some(bytes) = payload
@@ -604,6 +652,7 @@ async fn publish(
         blob_id,
     };
     client.publish_history(&dto).await?;
+    persist_hub_pin(settings, paths, &client);
     if let Ok(mut ws) = client.connect_ws().await {
         let offer = ItemOffer {
             item_id: item.id,
@@ -647,7 +696,7 @@ async fn pull_hub(
     if !snap.hub_ready() {
         return Ok(());
     }
-    let client = client(&snap).await?;
+    let client = client(&snap)?;
     let mut retry = std::mem::take(failed_remote);
     let mut newest: Option<ContentItem> = None;
     for dto in retry.drain(..) {
@@ -661,6 +710,7 @@ async fn pull_hub(
         }
     }
     let items = client.history(last_cursor.as_deref(), 50).await?;
+    persist_hub_pin(settings, paths, &client);
     for dto in items {
         let next_cursor = format!("{}:{}", dto.created_at_ms, dto.id);
         match apply_remote(vault, store, paths, guard, &client, dto.clone(), false).await {
@@ -675,7 +725,7 @@ async fn pull_hub(
             Err(err) => {
                 tracing::warn!(id = %dto.id, error = %err, "remote item failed; will retry");
                 failed_remote.push(dto);
-                persist_cursor(store, last_cursor, next_cursor);
+                break;
             }
         }
     }
@@ -811,14 +861,22 @@ pub async fn bootstrap_hub(
     let cert = DeviceCert::load_or_create(config_dir, &identity.device_name)?;
     let supplied = pairing_code.filter(|c| !c.trim().is_empty());
     let (code, salt_hex) = match supplied {
-        Some(code) if looks_like_pairing_code(&code) => (asterism_sync::pairing::normalize_code(&code), None),
+        Some(code) if looks_like_pairing_code(&code) => {
+            (asterism_sync::pairing::normalize_code(&code), None)
+        }
         Some(bootstrap) => {
-            let client = HubClient::new(settings.hub_url.clone().unwrap())?
-                .with_bootstrap(bootstrap.trim().to_string());
+            let client = HubClient::with_pin(
+                settings.hub_url.clone().unwrap(),
+                settings.hub_cert_sha256.as_deref(),
+            )?
+            .with_bootstrap(bootstrap.trim().to_string());
             let offer = client.pairing_start().await?;
+            persist_hub_pin_settings(settings, config_dir, &client);
             (offer.code, Some(offer.kdf_salt_hex))
         }
-        None => anyhow::bail!("first device needs the hub bootstrap secret; later devices need a pairing code"),
+        None => anyhow::bail!(
+            "first device needs the hub bootstrap secret; later devices need a pairing code"
+        ),
     };
     let finish = PairingFinish {
         code: code.clone(),
@@ -828,12 +886,19 @@ pub async fn bootstrap_hub(
         identity_public_key: vec![1],
         cert_fingerprint: cert.fingerprint_hex(),
     };
-    let client = HubClient::new(settings.hub_url.clone().unwrap())?;
+    let client = HubClient::with_pin(
+        settings.hub_url.clone().unwrap(),
+        settings.hub_cert_sha256.as_deref(),
+    )?;
     let session = client.pairing_finish(&finish).await?;
+    persist_hub_pin_settings(settings, config_dir, &client);
     settings.token = Some(session.token.clone());
     persist_trusted_devices(config_dir, identity.device_id, &session.trusted_devices)?;
     settings.save(config_dir)?;
-    let vault = match (session.avk_wrapped_hex.as_deref(), session.kdf_salt_hex.as_deref().or(salt_hex.as_deref())) {
+    let vault = match (
+        session.avk_wrapped_hex.as_deref(),
+        session.kdf_salt_hex.as_deref().or(salt_hex.as_deref()),
+    ) {
         (Some(wrapped), Some(salt)) => Some(unwrap_pairing_avk(&code, salt, wrapped)?),
         (Some(_), None) => anyhow::bail!("paired AVK wrap is missing KDF salt"),
         _ => None,
@@ -864,23 +929,33 @@ fn persist_trusted_devices(
     Ok(())
 }
 
-pub fn unwrap_pairing_avk(code: &str, salt_hex: &str, wrapped_hex: &str) -> anyhow::Result<AccountVaultKey> {
+pub fn unwrap_pairing_avk(
+    code: &str,
+    salt_hex: &str,
+    wrapped_hex: &str,
+) -> anyhow::Result<AccountVaultKey> {
     let bytes = hex::decode(wrapped_hex)?;
     let payload: asterism_crypto::EncryptedPayload = serde_json::from_slice(&bytes)?;
     let salt = asterism_sync::pairing::parse_salt_hex(salt_hex)
         .ok_or_else(|| anyhow::anyhow!("invalid pairing KDF salt"))?;
-    let wrap_key = AccountVaultKey::from_bytes(asterism_sync::pairing::derive_wrap_key(code, &salt));
+    let wrap_key =
+        AccountVaultKey::from_bytes(asterism_sync::pairing::derive_wrap_key(code, &salt));
     let plain = asterism_crypto::decrypt_metadata(&wrap_key, &payload)?;
     let raw: [u8; 32] =
         plain.try_into().map_err(|_| anyhow::anyhow!("paired AVK must be 32 bytes"))?;
     Ok(AccountVaultKey::from_bytes(raw))
 }
 
-pub async fn start_pairing_code(settings: &mut SyncSettings, config_dir: &std::path::Path) -> anyhow::Result<String> {
+pub async fn start_pairing_code(
+    settings: &mut SyncSettings,
+    config_dir: &std::path::Path,
+) -> anyhow::Result<String> {
     let url = settings.hub_url.clone().ok_or_else(|| anyhow::anyhow!("set hub url first"))?;
-    let token = settings.token.clone().ok_or_else(|| anyhow::anyhow!("connect this device first"))?;
-    let client = HubClient::new(url)?.with_token(token);
+    let token =
+        settings.token.clone().ok_or_else(|| anyhow::anyhow!("connect this device first"))?;
+    let client = HubClient::with_pin(url, settings.hub_cert_sha256.as_deref())?.with_token(token);
     let offer = client.pairing_start().await?;
+    persist_hub_pin_settings(settings, config_dir, &client);
     settings.pending_pair_code = Some(offer.code.clone());
     settings.pending_pair_salt = Some(offer.kdf_salt_hex.clone());
     settings.save(config_dir)?;
@@ -897,7 +972,8 @@ mod tests {
         let code = "ABCDEFGHJKLMNPQRSTUV";
         let salt = [9u8; 16];
         let expected = AccountVaultKey::generate();
-        let wrap_key = AccountVaultKey::from_bytes(asterism_sync::pairing::derive_wrap_key(code, &salt));
+        let wrap_key =
+            AccountVaultKey::from_bytes(asterism_sync::pairing::derive_wrap_key(code, &salt));
         let wrapped = asterism_crypto::encrypt_metadata(&wrap_key, expected.as_bytes()).unwrap();
         let encoded = hex::encode(serde_json::to_vec(&wrapped).unwrap());
         let actual = unwrap_pairing_avk(code, &hex::encode(salt), &encoded).unwrap();

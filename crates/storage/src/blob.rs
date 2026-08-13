@@ -98,10 +98,10 @@ fn visit_blob_files(dir: &Path, on_file: &mut impl FnMut(&Path, &str)) -> Result
         let path = entry.path();
         if path.is_dir() {
             visit_blob_files(&path, on_file)?;
-        } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if !name.ends_with(".tmp") {
-                on_file(&path, name);
-            }
+        } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && !name.ends_with(".tmp")
+        {
+            on_file(&path, name);
         }
     }
     Ok(())

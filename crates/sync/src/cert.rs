@@ -140,28 +140,24 @@ impl ServerCertVerifier for Pinned {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_peer_tls12(message, cert, dss)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_peer_tls13(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ED25519,
-            SignatureScheme::RSA_PSS_SHA256,
-        ]
+        supported_schemes()
     }
 }
 
@@ -182,7 +178,7 @@ impl ClientCertVerifier for TrustedClient {
         _now: UnixTime,
     ) -> std::result::Result<ClientCertVerified, rustls::Error> {
         let fp = fingerprint_of_der(end_entity.as_ref());
-        if self.allowed.iter().any(|allowed| *allowed == fp) {
+        if self.allowed.contains(&fp) {
             Ok(ClientCertVerified::assertion())
         } else {
             Err(rustls::Error::General("untrusted client certificate".into()))
@@ -191,27 +187,142 @@ impl ClientCertVerifier for TrustedClient {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_peer_tls12(message, cert, dss)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_peer_tls13(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ED25519,
-            SignatureScheme::RSA_PSS_SHA256,
-        ]
+        supported_schemes()
+    }
+}
+
+fn verify_algs() -> rustls::crypto::WebPkiSupportedAlgorithms {
+    rustls::crypto::ring::default_provider().signature_verification_algorithms
+}
+
+fn supported_schemes() -> Vec<SignatureScheme> {
+    verify_algs().supported_schemes()
+}
+
+fn verify_peer_tls12(
+    message: &[u8],
+    cert: &CertificateDer<'_>,
+    dss: &DigitallySignedStruct,
+) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+    rustls::crypto::verify_tls12_signature(message, cert, dss, &verify_algs())
+}
+
+fn verify_peer_tls13(
+    message: &[u8],
+    cert: &CertificateDer<'_>,
+    dss: &DigitallySignedStruct,
+) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+    rustls::crypto::verify_tls13_signature(message, cert, dss, &verify_algs())
+}
+
+/// Hub HTTPS/WSS：已 pin 则只认该指纹；未 pin 则 TOFU 并记下观察值。
+#[derive(Clone, Debug)]
+pub struct HubTls {
+    pub config: Arc<ClientConfig>,
+    observed: Arc<std::sync::Mutex<Option<[u8; 32]>>>,
+}
+
+impl HubTls {
+    pub fn new(pin: Option<[u8; 32]>) -> Result<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let mut config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(HubPin {
+                expected: pin,
+                observed: Arc::clone(&observed),
+            }))
+            .with_no_client_auth();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Ok(Self { config: Arc::new(config), observed })
+    }
+
+    pub fn observed_hex(&self) -> Option<String> {
+        self.observed.lock().ok().and_then(|g| g.map(hex::encode))
+    }
+}
+
+#[derive(Debug)]
+struct HubPin {
+    expected: Option<[u8; 32]>,
+    observed: Arc<std::sync::Mutex<Option<[u8; 32]>>>,
+}
+
+impl ServerCertVerifier for HubPin {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        let fp = fingerprint_of_der(end_entity.as_ref());
+        if let Ok(mut slot) = self.observed.lock() {
+            *slot = Some(fp);
+        }
+        if let Some(expected) = self.expected
+            && fp != expected
+        {
+            return Err(rustls::Error::General("hub certificate fingerprint mismatch".into()));
+        }
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        verify_peer_tls12(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        verify_peer_tls13(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lan_and_hub_verifiers_use_rustls_signature_schemes() {
+        let schemes = supported_schemes();
+        assert!(schemes.contains(&SignatureScheme::ECDSA_NISTP256_SHA256));
+        assert!(schemes.contains(&SignatureScheme::ED25519));
+    }
+
+    #[test]
+    fn tofu_hub_tls_records_no_pin_until_handshake() {
+        let tls = HubTls::new(None).unwrap();
+        assert!(tls.observed_hex().is_none());
     }
 }

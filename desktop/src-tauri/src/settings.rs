@@ -14,6 +14,8 @@ pub struct SyncSettings {
     pub pending_pair_code: Option<String>,
     #[serde(default)]
     pub pending_pair_salt: Option<String>,
+    #[serde(default)]
+    pub hub_cert_sha256: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -30,6 +32,7 @@ impl Default for SyncSettings {
             auto_receive: true,
             pending_pair_code: None,
             pending_pair_salt: None,
+            hub_cert_sha256: None,
         }
     }
 }
@@ -66,9 +69,8 @@ impl SyncSettings {
     pub fn save(&self, config_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(config_dir)?;
         let path = Self::path(config_dir);
-        let bytes = toml::to_string_pretty(self).map_err(|err| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
-        })?;
+        let bytes = toml::to_string_pretty(self)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
         asterism_platform::atomic::atomic_write(&path, bytes.as_bytes())?;
         #[cfg(unix)]
         {

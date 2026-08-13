@@ -98,4 +98,10 @@ export class HubApi {
     const res = await fetch(`${this.base}/api/v1/history/${id}`, { method: "DELETE", headers: this.headers() });
     if (!res.ok) throw new Error(`delete ${res.status}`);
   }
+
+  async getChunk(blobId: string, index: number): Promise<Uint8Array> {
+    const res = await fetch(`${this.base}/api/v1/blobs/${blobId}/chunks/${index}`, { headers: this.headers() });
+    if (!res.ok) throw new Error(`chunk ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
+  }
 }

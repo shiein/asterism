@@ -76,6 +76,19 @@ pub fn select_region(frame: &CapturedFrame) -> Result<Option<Selection>, Capture
     Ok(app.result)
 }
 
+fn overlay_monitor(
+    event_loop: &ActiveEventLoop,
+    origin: (i32, i32),
+) -> Option<winit::monitor::MonitorHandle> {
+    event_loop
+        .available_monitors()
+        .find(|monitor| {
+            let pos = monitor.position();
+            pos.x == origin.0 && pos.y == origin.1
+        })
+        .or_else(|| event_loop.primary_monitor())
+}
+
 struct OverlayApp {
     frame: CapturedFrame,
     window: Option<Arc<Window>>,
@@ -89,9 +102,10 @@ struct OverlayApp {
 
 impl ApplicationHandler for OverlayApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let target = overlay_monitor(event_loop, self.frame.monitor.origin_physical);
         let attrs = Window::default_attributes()
             .with_title("Asterism")
-            .with_fullscreen(Some(Fullscreen::Borderless(event_loop.primary_monitor())))
+            .with_fullscreen(Some(Fullscreen::Borderless(target)))
             .with_decorations(false);
         let window = Arc::new(event_loop.create_window(attrs).expect("overlay window"));
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer");

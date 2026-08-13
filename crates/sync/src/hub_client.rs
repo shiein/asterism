@@ -3,11 +3,11 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use asterism_core::id::{AccountId, DeviceId};
 
+use crate::cert::HubTls;
 use crate::error::{Result, SyncError};
 use crate::pairing::{PairingFinish, PairingOffer};
 use crate::protocol::Envelope;
@@ -18,6 +18,7 @@ pub struct HubClient {
     pub token: Option<String>,
     pub bootstrap: Option<String>,
     http: reqwest::Client,
+    tls: HubTls,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,8 +68,14 @@ pub struct HistoryDto {
 
 impl HubClient {
     pub fn new(base: impl Into<String>) -> Result<Self> {
+        Self::with_pin(base, None)
+    }
+
+    pub fn with_pin(base: impl Into<String>, pin_hex: Option<&str>) -> Result<Self> {
+        let pin = parse_pin(pin_hex)?;
+        let tls = HubTls::new(pin)?;
         let http = reqwest::Client::builder()
-            .use_rustls_tls()
+            .use_preconfigured_tls((*tls.config).clone())
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| SyncError::Failed(e.to_string()))?;
@@ -77,7 +84,12 @@ impl HubClient {
             token: None,
             bootstrap: None,
             http,
+            tls,
         })
+    }
+
+    pub fn observed_cert_sha256(&self) -> Option<String> {
+        self.tls.observed_hex()
     }
 
     pub fn with_token(mut self, token: String) -> Self {
@@ -96,6 +108,20 @@ impl HubClient {
 
     pub async fn pairing_finish(&self, req: &PairingFinish) -> Result<SessionResponse> {
         self.json(Method::POST, "/api/v1/pairing/finish", Some(req)).await
+    }
+
+    pub async fn deposit_avk(&self, code: &str, wrapped_hex: &str) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body {
+            code: String,
+            wrapped_hex: String,
+        }
+        self.empty_json(
+            Method::POST,
+            "/api/v1/pairing/avk",
+            &Body { code: code.to_string(), wrapped_hex: wrapped_hex.to_string() },
+        )
+        .await
     }
 
     pub async fn devices(&self) -> Result<Vec<DeviceDto>> {
@@ -183,19 +209,22 @@ impl HubClient {
             Url::parse(&self.base.replace("https://", "wss://").replace("http://", "ws://"))
                 .map_err(|e| SyncError::Failed(e.to_string()))?;
         url.set_path("/ws/v1/device");
-        let mut request = url
-            .as_str()
-            .into_client_request()
-            .map_err(|e| SyncError::Failed(e.to_string()))?;
+        let mut request =
+            url.as_str().into_client_request().map_err(|e| SyncError::Failed(e.to_string()))?;
         let value = format!("Bearer {token}");
         request.headers_mut().insert(
             tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
-            value.parse().map_err(|e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
-                SyncError::Failed(e.to_string())
-            })?,
+            value.parse().map_err(
+                |e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
+                    SyncError::Failed(e.to_string())
+                },
+            )?,
         );
+        let connector = tokio_tungstenite::Connector::Rustls(self.tls.config.clone());
         let (stream, _) =
-            connect_async(request).await.map_err(|e| SyncError::Failed(e.to_string()))?;
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector))
+                .await
+                .map_err(|e| SyncError::Failed(e.to_string()))?;
         Ok(stream)
     }
 
@@ -280,4 +309,17 @@ impl HubClient {
             Err(SyncError::Failed(res.status().to_string()))
         }
     }
+}
+
+fn parse_pin(pin_hex: Option<&str>) -> Result<Option<[u8; 32]>> {
+    let Some(pin_hex) = pin_hex.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let raw = hex::decode(pin_hex).map_err(|e| SyncError::Tls(e.to_string()))?;
+    if raw.len() != 32 {
+        return Err(SyncError::Tls("hub cert pin must be 32 bytes".into()));
+    }
+    let mut fp = [0u8; 32];
+    fp.copy_from_slice(&raw);
+    Ok(Some(fp))
 }

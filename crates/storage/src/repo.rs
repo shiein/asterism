@@ -110,13 +110,9 @@ fn bump_blob_ref(conn: &Connection, blob_id: &BlobId, now_ms: i64) -> Result<()>
 }
 
 pub fn get_cursor(conn: &Connection, scope: &str) -> Result<Option<String>> {
-    conn.query_row(
-        "SELECT cursor FROM sync_cursors WHERE scope = ?1",
-        [scope],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(StorageError::from)
+    conn.query_row("SELECT cursor FROM sync_cursors WHERE scope = ?1", [scope], |row| row.get(0))
+        .optional()
+        .map_err(StorageError::from)
 }
 
 pub fn set_cursor(conn: &Connection, scope: &str, cursor: &str, now_ms: i64) -> Result<()> {
@@ -131,9 +127,8 @@ pub fn set_cursor(conn: &Connection, scope: &str, cursor: &str, now_ms: i64) -> 
 }
 
 pub fn list_cache_pins(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT metadata_json FROM content_items WHERE payload_kind = 'file_manifest'",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT metadata_json FROM content_items WHERE payload_kind = 'file_manifest'")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let mut pins = Vec::new();
     for row in rows {

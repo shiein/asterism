@@ -140,7 +140,8 @@ pub async fn capture_fullscreen(state: State<'_, DesktopState>) -> Result<String
         let backend = XcapBackend;
         backend.permission_preflight().map_err(|e| e.to_string())?;
         let monitors = backend.list_monitors().map_err(|e| e.to_string())?;
-        let monitor = asterism_capture::preferred_monitor(&monitors).ok_or_else(|| "no monitor".to_string())?;
+        let monitor = asterism_capture::preferred_monitor(&monitors)
+            .ok_or_else(|| "no monitor".to_string())?;
         let frame = backend.capture_display(monitor).map_err(|e| e.to_string())?;
         let png = export_png(frame.width, frame.height, &frame.bgra, &AnnotationScene::default())?;
         Ok::<_, String>((png, frame.width, frame.height))
@@ -195,9 +196,11 @@ pub async fn capture_region(state: State<'_, DesktopState>) -> Result<String, Cm
         let backend = XcapBackend;
         backend.permission_preflight().map_err(|e| e.to_string())?;
         let monitors = backend.list_monitors().map_err(|e| e.to_string())?;
-        let monitor = asterism_capture::preferred_monitor(&monitors).ok_or_else(|| "no monitor".to_string())?;
+        let monitor = asterism_capture::preferred_monitor(&monitors)
+            .ok_or_else(|| "no monitor".to_string())?;
         let frame = backend.capture_display(monitor).map_err(|e| e.to_string())?;
-        let selection = crate::overlay_cli::select_region_subprocess(&frame).map_err(|e| e.to_string())?;
+        let selection =
+            crate::overlay_cli::select_region_subprocess(&frame).map_err(|e| e.to_string())?;
         let Some(selection) = selection else {
             return Err("cancelled".into());
         };
@@ -222,6 +225,15 @@ pub fn save_sync_settings(
     state: State<'_, DesktopState>,
     settings: SyncSettings,
 ) -> Result<(), CmdError> {
+    let current = SyncSettings::load(&state.paths.config_dir);
+    let mut settings = settings;
+    if settings.hub_cert_sha256.is_none() {
+        settings.hub_cert_sha256 = current.hub_cert_sha256;
+    }
+    if settings.pending_pair_salt.is_none() {
+        settings.pending_pair_salt = current.pending_pair_salt;
+        settings.pending_pair_code = current.pending_pair_code.or(settings.pending_pair_code);
+    }
     settings.save(&state.paths.config_dir).map_err(|e| CmdError::Any(e.to_string()))?;
     *state.sync.settings.lock() = settings;
     state.sync.reload();
@@ -267,12 +279,18 @@ pub async fn hub_devices(
     state: State<'_, DesktopState>,
 ) -> Result<Vec<asterism_sync::hub_client::DeviceDto>, CmdError> {
     let settings = state.sync.settings.lock().clone();
-    let url = settings.hub_url.clone().ok_or_else(|| CmdError::Any("no hub".into()))?;
-    let token = settings.token.clone().ok_or_else(|| CmdError::Any("no token".into()))?;
-    let client = asterism_sync::HubClient::new(url)
-        .map_err(|e| CmdError::Any(e.to_string()))?
-        .with_token(token);
-    client.devices().await.map_err(|e| CmdError::Any(e.to_string()))
+    if settings.token.is_none() {
+        return Err(CmdError::Any("no token".into()));
+    }
+    let client = sync_engine::hub_client_from_settings(&settings)
+        .map_err(|e| CmdError::Any(e.to_string()))?;
+    let devices = client.devices().await.map_err(|e| CmdError::Any(e.to_string()))?;
+    let mut snap = settings;
+    sync_engine::persist_hub_pin_settings(&mut snap, &state.paths.config_dir, &client);
+    if state.sync.settings.lock().hub_cert_sha256.is_none() {
+        state.sync.settings.lock().hub_cert_sha256 = snap.hub_cert_sha256;
+    }
+    Ok(devices)
 }
 
 #[tauri::command]
@@ -297,33 +315,35 @@ pub async fn publish_pairing_avk(
     code: String,
 ) -> Result<(), CmdError> {
     let settings = state.sync.settings.lock().clone();
-    let url = settings.hub_url.ok_or_else(|| CmdError::Any("no hub".into()))?;
-    let token = settings.token.ok_or_else(|| CmdError::Any("no token".into()))?;
+    let url = settings.hub_url.clone().ok_or_else(|| CmdError::Any("no hub".into()))?;
+    let token = settings.token.clone().ok_or_else(|| CmdError::Any("no token".into()))?;
     let salt_hex = settings
         .pending_pair_salt
         .clone()
         .ok_or_else(|| CmdError::Any("generate a pairing code first".into()))?;
     let salt = asterism_sync::pairing::parse_salt_hex(&salt_hex)
         .ok_or_else(|| CmdError::Any("invalid pairing salt".into()))?;
-    let wrap_key =
-        asterism_crypto::AccountVaultKey::from_bytes(asterism_sync::pairing::derive_wrap_key(&code, &salt));
+    let wrap_key = asterism_crypto::AccountVaultKey::from_bytes(
+        asterism_sync::pairing::derive_wrap_key(&code, &salt),
+    );
     let wrapped = {
         let vault = state.vault.read();
         asterism_crypto::encrypt_metadata(&wrap_key, vault.avk.as_bytes())
             .map_err(|e| CmdError::Any(e.to_string()))?
     };
-    let client = reqwest::Client::new();
-    let res = client
-        .post(format!("{url}/api/v1/pairing/avk"))
-        .bearer_auth(token)
-        .json(&serde_json::json!({
-            "code": code,
-            "wrapped_hex": hex::encode(serde_json::to_vec(&wrapped).unwrap_or_default())
-        }))
-        .send()
+    let client = asterism_sync::HubClient::with_pin(url, settings.hub_cert_sha256.as_deref())
+        .map_err(|e| CmdError::Any(e.to_string()))?
+        .with_token(token);
+    client
+        .deposit_avk(&code, &hex::encode(serde_json::to_vec(&wrapped).unwrap_or_default()))
         .await
         .map_err(|e| CmdError::Any(e.to_string()))?;
-    if res.status().is_success() { Ok(()) } else { Err(CmdError::Any(res.status().to_string())) }
+    let mut snap = settings;
+    sync_engine::persist_hub_pin_settings(&mut snap, &state.paths.config_dir, &client);
+    if state.sync.settings.lock().hub_cert_sha256.is_none() {
+        state.sync.settings.lock().hub_cert_sha256 = snap.hub_cert_sha256;
+    }
+    Ok(())
 }
 
 fn persist_and_activate_vault(

@@ -22,3 +22,4 @@ button { cursor: pointer; }
   display: flex; gap: 12px; align-items: center; justify-content: space-between;
   background: #1b2018; border: 1px solid #2c3328; border-radius: 10px; padding: 10px 12px;
 }
+.preview { max-width: 160px; max-height: 96px; object-fit: contain; border-radius: 6px; }

@@ -59,11 +59,7 @@ pub fn spawn_update_signal() -> std::sync::mpsc::Receiver<()> {
 }
 
 fn clipboard_owner_hwnd() -> HWND {
-    LISTENER_HWND
-        .get()
-        .copied()
-        .map(|raw| HWND(raw as *mut core::ffi::c_void))
-        .unwrap_or_default()
+    LISTENER_HWND.get().copied().map(|raw| HWND(raw as *mut core::ffi::c_void)).unwrap_or_default()
 }
 
 fn with_clipboard<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -92,7 +88,7 @@ unsafe fn read_inner() -> Result<Option<CapturedClipboard>> {
     if formats.is_empty() {
         return Ok(None);
     }
-    let sensitive = formats.iter().any(|f| is_sensitive_format(f));
+    let sensitive = is_sensitive_clipboard(&formats);
     let source_app = clipboard_owner_app();
     let text = read_unicode_text();
     let image = read_png().or_else(read_dib);
@@ -136,11 +132,44 @@ unsafe fn format_name(fmt: u32) -> String {
     }
 }
 
-fn is_sensitive_format(name: &str) -> bool {
-    let l = name.to_ascii_lowercase();
-    l.contains(&WIN_EXCLUDE_MONITOR.to_ascii_lowercase())
-        || l.eq_ignore_ascii_case(WIN_NO_HISTORY)
-        || l.eq_ignore_ascii_case(WIN_NO_CLOUD)
+fn has_format(formats: &[String], name: &str) -> bool {
+    formats.iter().any(|f| {
+        f.eq_ignore_ascii_case(name) || f.to_ascii_lowercase().contains(&name.to_ascii_lowercase())
+    })
+}
+
+unsafe fn is_sensitive_clipboard(formats: &[String]) -> bool {
+    if has_format(formats, WIN_EXCLUDE_MONITOR) {
+        return true;
+    }
+    if has_format(formats, WIN_NO_HISTORY) && dword_forbids(WIN_NO_HISTORY) {
+        return true;
+    }
+    if has_format(formats, WIN_NO_CLOUD) && dword_forbids(WIN_NO_CLOUD) {
+        return true;
+    }
+    false
+}
+
+/// `CanIncludeInClipboardHistory` / `CanUploadToCloudClipboard` 是 DWORD：0 禁止，1 允许。
+/// 格式存在但读失败时保守当作敏感。
+unsafe fn dword_forbids(format_name: &str) -> bool {
+    let fmt = RegisterClipboardFormatW(PCWSTR(wide(format_name).as_ptr()));
+    if fmt == 0 {
+        return true;
+    }
+    let Ok(handle) = GetClipboardData(windows::Win32::System::DataExchange::CLIPBOARD_FORMATS(fmt))
+    else {
+        return true;
+    };
+    lock_hglobal(handle, |slice| {
+        if slice.len() < 4 {
+            return Some(true);
+        }
+        let value = u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]);
+        Some(value == 0)
+    })
+    .unwrap_or(true)
 }
 
 unsafe fn read_unicode_text() -> Option<String> {
@@ -299,7 +328,9 @@ fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>> {
     let height = height_raw.unsigned_abs();
     const MAX_DIM: u32 = 16_384;
     const MAX_PIXELS: u32 = 64 * 1024 * 1024;
-    if width as u32 > MAX_DIM || height > MAX_DIM || height.saturating_mul(width as u32) > MAX_PIXELS
+    if width as u32 > MAX_DIM
+        || height > MAX_DIM
+        || height.saturating_mul(width as u32) > MAX_PIXELS
     {
         return Err(ClipboardError::Unsupported);
     }
@@ -315,7 +346,9 @@ fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>> {
         let row = pixels.get(row_start..).ok_or(ClipboardError::Unsupported)?;
         for x in 0..width as usize {
             let i = x.checked_mul(pixel_bytes).ok_or(ClipboardError::Unsupported)?;
-            let needed = i.checked_add(if bit_count == 32 { 4 } else { 3 }).ok_or(ClipboardError::Unsupported)?;
+            let needed = i
+                .checked_add(if bit_count == 32 { 4 } else { 3 })
+                .ok_or(ClipboardError::Unsupported)?;
             if needed > row.len() {
                 return Err(ClipboardError::Unsupported);
             }

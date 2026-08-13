@@ -69,7 +69,8 @@ pub fn pack_tree(root: &Path) -> Result<Vec<u8>> {
         }
         let meta = std::fs::metadata(&path)?;
         const MAX_ARCHIVE_BYTES: u64 = 500 * 1024 * 1024;
-        if meta.len() > MAX_ARCHIVE_BYTES || (out.len() as u64).saturating_add(meta.len()) > MAX_ARCHIVE_BYTES
+        if meta.len() > MAX_ARCHIVE_BYTES
+            || (out.len() as u64).saturating_add(meta.len()) > MAX_ARCHIVE_BYTES
         {
             return Err(SyncError::Failed("file tree exceeds remote size limit".into()));
         }
@@ -81,8 +82,10 @@ pub fn pack_tree(root: &Path) -> Result<Vec<u8>> {
 }
 
 fn take<'a>(bytes: &'a [u8], i: &mut usize, n: usize) -> Result<&'a [u8]> {
-    let end = i.checked_add(n).ok_or_else(|| SyncError::Protocol("archive offset overflow".into()))?;
-    let slice = bytes.get(*i..end).ok_or_else(|| SyncError::Protocol("truncated archive".into()))?;
+    let end =
+        i.checked_add(n).ok_or_else(|| SyncError::Protocol("archive offset overflow".into()))?;
+    let slice =
+        bytes.get(*i..end).ok_or_else(|| SyncError::Protocol("truncated archive".into()))?;
     *i = end;
     Ok(slice)
 }
@@ -91,22 +94,26 @@ pub fn unpack_tree(bytes: &[u8], dest: &Path) -> Result<Vec<PathBuf>> {
     if bytes.len() < 8 || &bytes[..4] != MAGIC {
         return Err(SyncError::Protocol("bad archive magic".into()));
     }
-    let count = u32::from_le_bytes(bytes[4..8].try_into().map_err(|_| SyncError::Protocol("bad count".into()))?)
-        as usize;
+    let count = u32::from_le_bytes(
+        bytes[4..8].try_into().map_err(|_| SyncError::Protocol("bad count".into()))?,
+    ) as usize;
     let mut i = 8usize;
     let mut roots = Vec::new();
     std::fs::create_dir_all(dest)?;
     for _ in 0..count {
         let nlen_bytes = take(bytes, &mut i, 2)?;
-        let nlen = u16::from_le_bytes(nlen_bytes.try_into().map_err(|_| SyncError::Protocol("name len".into()))?)
-            as usize;
+        let nlen = u16::from_le_bytes(
+            nlen_bytes.try_into().map_err(|_| SyncError::Protocol("name len".into()))?,
+        ) as usize;
         let name_bytes = take(bytes, &mut i, nlen)?;
-        let name = std::str::from_utf8(name_bytes).map_err(|e| SyncError::Protocol(e.to_string()))?;
+        let name =
+            std::str::from_utf8(name_bytes).map_err(|e| SyncError::Protocol(e.to_string()))?;
         let flag = take(bytes, &mut i, 1)?;
         let is_dir = flag[0] == 1;
         let size_bytes = take(bytes, &mut i, 8)?;
-        let size = u64::from_le_bytes(size_bytes.try_into().map_err(|_| SyncError::Protocol("size".into()))?)
-            as usize;
+        let size = u64::from_le_bytes(
+            size_bytes.try_into().map_err(|_| SyncError::Protocol("size".into()))?,
+        ) as usize;
         let rel = sanitize_relative_path(name).map_err(|e| SyncError::Failed(e.to_string()))?;
         let path = dest.join(&rel);
         if is_dir {

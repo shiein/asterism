@@ -177,7 +177,13 @@ fn persist(
             item.payload_size = png.len() as u64;
             item
         }
-        NormalizedContent::Files { paths: sources, manifest: _, dedup_tag: _, flags, source_app } => {
+        NormalizedContent::Files {
+            paths: sources,
+            manifest: _,
+            dedup_tag: _,
+            flags,
+            source_app,
+        } => {
             let manifest = asterism_clipboard::preflight_paths(&sources)?;
             let file_count = manifest.entries.iter().filter(|e| e.kind.is_file()).count() as u64;
             let logical_size: u64 = manifest.entries.iter().map(|e| e.size).sum();
@@ -278,6 +284,7 @@ pub fn item_to_clipboard(
             let name = if item.kind == ContentKind::Gif { "clip.gif" } else { "clip.mp4" };
             let path = cache.join(name);
             std::fs::write(&path, &bytes)?;
+            let dedup_tag = asterism_clipboard::files_local_dedup_tag(std::slice::from_ref(&path));
             Ok(NormalizedContent::Files {
                 paths: vec![path],
                 manifest: asterism_core::FileManifest {
@@ -291,7 +298,7 @@ pub fn item_to_clipboard(
                     }],
                     unsupported: Vec::new(),
                 },
-                dedup_tag: asterism_crypto::local_dedup_tag(&bytes),
+                dedup_tag,
                 flags: item.flags | ContentFlags::FROM_REMOTE,
                 source_app: item.metadata.source_app.clone(),
             })
@@ -313,13 +320,13 @@ pub fn item_to_clipboard(
                 anyhow::bail!("cached files missing");
             }
             Ok(NormalizedContent::Files {
-                paths: file_paths,
+                paths: file_paths.clone(),
                 manifest: if let PayloadRef::FileManifest { manifest_id } = item.payload_ref {
                     store.load_manifest(manifest_id)?
                 } else {
                     anyhow::bail!("files item missing manifest")
                 },
-                dedup_tag: item.dedup_tag,
+                dedup_tag: asterism_clipboard::files_local_dedup_tag(&file_paths),
                 flags: item.flags | ContentFlags::FROM_REMOTE,
                 source_app: item.metadata.source_app.clone(),
             })
@@ -365,6 +372,41 @@ mod tests {
 
         assert_ne!(first.id, second.id);
         assert_eq!(store.history(asterism_storage::HistoryQuery::recent(10)).unwrap().len(), 2);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_clipboard_tag_matches_watcher_path_fingerprint() {
+        let root = std::env::temp_dir()
+            .join(format!("asterism-file-tag-{}", asterism_core::ContentId::new()));
+        let paths = AppPaths {
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            config_dir: root.join("config"),
+        };
+        paths.ensure().unwrap();
+        let store = Store::open(&paths.data_dir).unwrap();
+        let src = root.join("note.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let manifest = asterism_clipboard::preflight_paths(std::slice::from_ref(&src)).unwrap();
+        let mut item = NormalizedContent::Files {
+            paths: vec![src],
+            manifest: manifest.clone(),
+            dedup_tag: [9u8; 32],
+            flags: ContentFlags::REMOTE_ALLOWED,
+            source_app: None,
+        }
+        .into_item(DeviceId::new(), 1);
+        let cache = paths.item_cache(item.id);
+        std::fs::create_dir_all(&cache).unwrap();
+        let file = cache.join("note.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        item.metadata.local_cache_rel = Some(item.id.to_string());
+        persist_item(&store, item.clone(), Some(manifest)).unwrap();
+
+        let written = item_to_clipboard(&item, &store, &paths).unwrap();
+        assert_eq!(written.dedup_tag(), asterism_clipboard::files_local_dedup_tag(&[file]));
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

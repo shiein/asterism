@@ -36,15 +36,87 @@ function fromJsonBytes(value: number[] | Uint8Array): Uint8Array {
 export async function decryptPackage(
   recoveryHex: string,
   packageHex: string,
-): Promise<{ meta: string; body: Uint8Array | null }> {
+): Promise<{ meta: string; body: Uint8Array | null; chunkCount: number }> {
   const pkg = JSON.parse(new TextDecoder().decode(hexToBytes(packageHex))) as {
     meta: EncryptedPayload;
     body: EncryptedPayload | null;
+    chunk_count?: number;
   };
   const avk = hexToBytes(recoveryHex);
   const meta = new TextDecoder().decode(await decryptPayload(avk, pkg.meta));
   const body = pkg.body ? await decryptPayload(avk, pkg.body) : null;
-  return { meta, body };
+  return { meta, body, chunkCount: pkg.chunk_count ?? 0 };
+}
+
+export function textFromDecrypt(metaJson: string, body: Uint8Array | null): string {
+  if (body && body.length) {
+    try {
+      return new TextDecoder().decode(body);
+    } catch {
+      /* fall through */
+    }
+  }
+  try {
+    const meta = JSON.parse(metaJson) as { text_preview?: string };
+    return meta.text_preview ?? "";
+  } catch {
+    return "";
+  }
+}
+
+const BLOB_CHUNK_HEADER = 4 + 24 + 48 + 32 + 4 + 24 + 4;
+
+export async function decryptBlobChunks(recoveryHex: string, encoded: Uint8Array[]): Promise<Uint8Array> {
+  if (encoded.length === 0) throw new Error("encrypted blob has no chunks");
+  const avk = hexToBytes(recoveryHex);
+  const wrapKey = await hkdfSha256(avk, "asterism/item-key-wrap/v1");
+  const parts: Uint8Array[] = [];
+  let expectedBlob: string | null = null;
+  for (let i = 0; i < encoded.length; i++) {
+    const chunk = decodeBlobChunk(encoded[i]);
+    if (chunk.chunkIndex !== i) throw new Error("blob chunk index is not contiguous");
+    const blobHex = bytesToHex(chunk.blobId);
+    if (expectedBlob && expectedBlob !== blobHex) throw new Error("blob id changed between chunks");
+    expectedBlob = blobHex;
+    const itemKey = await xchachaDecrypt(wrapKey, chunk.wrapNonce, chunk.wrapCipher);
+    const aad = new Uint8Array(36);
+    aad.set(chunk.blobId.subarray(0, 32), 0);
+    new DataView(aad.buffer).setUint32(32, chunk.chunkIndex, true);
+    parts.push(await xchachaDecrypt(itemKey, chunk.nonce, chunk.ciphertext, aad));
+  }
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+function decodeBlobChunk(bytes: Uint8Array): {
+  wrapNonce: Uint8Array;
+  wrapCipher: Uint8Array;
+  blobId: Uint8Array;
+  chunkIndex: number;
+  nonce: Uint8Array;
+  ciphertext: Uint8Array;
+} {
+  if (bytes.length < BLOB_CHUNK_HEADER) throw new Error("invalid encrypted blob chunk");
+  const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+  if (magic !== "ASB1") throw new Error("invalid encrypted blob chunk");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const chunkIndex = view.getUint32(108, true);
+  const ciphertextLen = view.getUint32(136, true);
+  if (bytes.length !== BLOB_CHUNK_HEADER + ciphertextLen) throw new Error("encrypted blob chunk length mismatch");
+  return {
+    wrapNonce: bytes.subarray(4, 28),
+    wrapCipher: bytes.subarray(28, 76),
+    blobId: bytes.subarray(76, 108),
+    chunkIndex,
+    nonce: bytes.subarray(112, 136),
+    ciphertext: bytes.subarray(BLOB_CHUNK_HEADER),
+  };
 }
 
 interface EncryptedPayload {

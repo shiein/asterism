@@ -50,7 +50,14 @@ impl AviMjpeg {
         let mut hdrl = Vec::new();
         write_avih(&mut hdrl, self.width, self.height, self.fps, self.frames.len() as u32);
         let mut strl = Vec::new();
-        write_strh(&mut strl, self.width, self.height, self.fps, self.frames.len() as u32, max_frame);
+        write_strh(
+            &mut strl,
+            self.width,
+            self.height,
+            self.fps,
+            self.frames.len() as u32,
+            max_frame,
+        );
         write_strf(&mut strl, self.width, self.height);
         write_list(&mut hdrl, b"strl", &strl);
         // idx1 offsets are relative to the 'movi' FourCC (offset 4 inside the LIST payload).

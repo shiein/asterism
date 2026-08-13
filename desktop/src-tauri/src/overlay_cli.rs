@@ -13,8 +13,10 @@ pub fn run_overlay_select() -> i32 {
     };
     let width = args.get(idx + 1).and_then(|s| s.parse().ok());
     let height = args.get(idx + 2).and_then(|s| s.parse().ok());
+    let origin_x = args.get(idx + 3).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let origin_y = args.get(idx + 4).and_then(|s| s.parse().ok()).unwrap_or(0);
     let (Some(width), Some(height)) = (width, height) else {
-        eprintln!("usage: --overlay-select WIDTH HEIGHT < frame.bgra");
+        eprintln!("usage: --overlay-select WIDTH HEIGHT [ORIGIN_X ORIGIN_Y] < frame.bgra");
         return 2;
     };
     let expected = (width as usize).saturating_mul(height as usize).saturating_mul(4);
@@ -35,8 +37,8 @@ pub fn run_overlay_select() -> i32 {
         monitor: MonitorInfo {
             id: 0,
             name: "overlay".into(),
-            origin_physical: (0, 0),
-            origin_logical: (0.0, 0.0),
+            origin_physical: (origin_x, origin_y),
+            origin_logical: (origin_x as f64, origin_y as f64),
             scale_factor: 1.0,
             capture_size: (width, height),
         },
@@ -69,6 +71,8 @@ pub fn select_region_subprocess(frame: &CapturedFrame) -> anyhow::Result<Option<
         .arg("--overlay-select")
         .arg(frame.width.to_string())
         .arg(frame.height.to_string())
+        .arg(frame.monitor.origin_physical.0.to_string())
+        .arg(frame.monitor.origin_physical.1.to_string())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

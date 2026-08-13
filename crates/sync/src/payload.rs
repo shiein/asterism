@@ -94,7 +94,8 @@ pub fn decrypt_blob_chunks(avk: &AccountVaultKey, encoded: &[Vec<u8>]) -> Result
         plaintext.extend(decrypt_chunk(&item_key, &chunk).map_err(crypto_failed)?);
     }
     let hash = blake3_bytes(&plaintext);
-    let expected = expected_blob_id.ok_or_else(|| SyncError::Failed("blob plaintext hash mismatch".into()))?;
+    let expected =
+        expected_blob_id.ok_or_else(|| SyncError::Failed("blob plaintext hash mismatch".into()))?;
     if expected != avk.dedup_tag(&hash) && expected != hash {
         return Err(SyncError::Failed("blob plaintext hash mismatch".into()));
     }

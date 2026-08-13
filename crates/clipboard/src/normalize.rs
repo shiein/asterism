@@ -157,7 +157,6 @@ pub fn normalize(
 
     if !captured.files.is_empty() {
         // 预检可能枚举十万项，不能堵在 watcher 线程。persist 侧再做 preflight / policy。
-        let fingerprint = path_list_fingerprint(&captured.files);
         return Ok(Some(NormalizedContent::Files {
             paths: captured.files.clone(),
             manifest: asterism_core::FileManifest {
@@ -166,7 +165,7 @@ pub fn normalize(
                 entries: Vec::new(),
                 unsupported: Vec::new(),
             },
-            dedup_tag: local_dedup_tag(&fingerprint),
+            dedup_tag: files_local_dedup_tag(&captured.files),
             flags: decision.flags(),
             source_app: captured.source_app.clone(),
         }));
@@ -174,13 +173,8 @@ pub fn normalize(
 
     if let Some(image) = &captured.image {
         let png = normalize_png(image)?;
-        let flags = remote_flags(
-            decision.flags(),
-            remote,
-            ContentKind::Image,
-            0,
-            png.bytes.len() as u64,
-        );
+        let flags =
+            remote_flags(decision.flags(), remote, ContentKind::Image, 0, png.bytes.len() as u64);
         let tag = local_dedup_tag(&png.bytes);
         return Ok(Some(NormalizedContent::Image {
             png: png.bytes,
@@ -196,13 +190,7 @@ pub fn normalize(
         if text.is_empty() {
             return Err(ClipboardError::Empty);
         }
-        let flags = remote_flags(
-            decision.flags(),
-            remote,
-            ContentKind::Text,
-            0,
-            text.len() as u64,
-        );
+        let flags = remote_flags(decision.flags(), remote, ContentKind::Text, 0, text.len() as u64);
         return Ok(Some(NormalizedContent::Text {
             dedup_tag: local_dedup_tag(text.as_bytes()),
             text: text.clone(),
@@ -214,10 +202,17 @@ pub fn normalize(
     Err(ClipboardError::Unsupported)
 }
 
+/// Watcher 读回系统剪贴板时用的文件去重标签。回写前必须登记同一套标签。
+pub fn files_local_dedup_tag(paths: &[std::path::PathBuf]) -> [u8; 32] {
+    local_dedup_tag(&path_list_fingerprint(paths))
+}
+
 fn path_list_fingerprint(paths: &[std::path::PathBuf]) -> Vec<u8> {
+    let mut sorted: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    sorted.sort();
     let mut buf = Vec::new();
-    for path in paths {
-        buf.extend_from_slice(path.to_string_lossy().as_bytes());
+    for path in sorted {
+        buf.extend_from_slice(path.as_bytes());
         buf.push(0);
     }
     buf
@@ -257,6 +252,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(out.kind(), ContentKind::Files);
+    }
+
+    #[test]
+    fn file_path_tag_ignores_order() {
+        let a = std::path::PathBuf::from("/tmp/a");
+        let b = std::path::PathBuf::from("/tmp/b");
+        assert_eq!(files_local_dedup_tag(&[a.clone(), b.clone()]), files_local_dedup_tag(&[b, a]));
     }
 
     #[test]

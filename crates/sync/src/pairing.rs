@@ -30,14 +30,13 @@ pub struct PairingFinish {
 
 pub fn generate_code() -> String {
     let mut rng = rand::thread_rng();
-    (0..PAIRING_CODE_LEN).map(|_| PAIRING_ALPH[rng.gen_range(0..PAIRING_ALPH.len())] as char).collect()
+    (0..PAIRING_CODE_LEN)
+        .map(|_| PAIRING_ALPH[rng.gen_range(0..PAIRING_ALPH.len())] as char)
+        .collect()
 }
 
 pub fn normalize_code(code: &str) -> String {
-    code.chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_uppercase())
-        .collect()
+    code.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
 }
 
 pub fn hash_code(code: &str) -> [u8; 32] {

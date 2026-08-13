@@ -22,7 +22,7 @@ pub mod session;
 pub mod transport;
 
 pub use archive::{pack_file_bundle, pack_tree, unpack_file_bundle, unpack_tree};
-pub use cert::DeviceCert;
+pub use cert::{DeviceCert, HubTls};
 pub use error::SyncError;
 pub use hub_client::HubClient;
 pub use lan::DiscoveredPeer;

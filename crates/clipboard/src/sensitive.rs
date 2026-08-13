@@ -25,8 +25,6 @@ fn has_sensitive_format(formats: &[String]) -> bool {
         let l = f.to_ascii_lowercase();
         l.contains(&MACOS_CONCEALED.to_ascii_lowercase())
             || l.contains(&WIN_EXCLUDE_MONITOR.to_ascii_lowercase())
-            || l.eq_ignore_ascii_case(WIN_NO_HISTORY)
-            || l.eq_ignore_ascii_case(WIN_NO_CLOUD)
     })
 }
 
@@ -49,5 +47,19 @@ mod tests {
             decide(&captured, &CapturePolicy::default()),
             SensitiveDecision::MarkedSensitive
         );
+    }
+
+    #[test]
+    fn windows_allow_history_format_name_is_not_sensitive() {
+        let captured = CapturedClipboard {
+            change_token: 1,
+            source_app: None,
+            formats: vec![WIN_NO_HISTORY.into(), WIN_NO_CLOUD.into()],
+            text: Some("ok".into()),
+            image: None,
+            files: vec![],
+            sensitive: false,
+        };
+        assert_eq!(decide(&captured, &CapturePolicy::default()), SensitiveDecision::Allow);
     }
 }

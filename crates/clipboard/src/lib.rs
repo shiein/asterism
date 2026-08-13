@@ -18,5 +18,5 @@ pub use capture::{CapturedClipboard, ClipboardBackend, NativeClipboard};
 pub use error::ClipboardError;
 pub use files::{materialize_to_cache, preflight_paths};
 pub use guard::SelfWriteGuard;
-pub use normalize::NormalizedContent;
+pub use normalize::{NormalizedContent, files_local_dedup_tag};
 pub use watcher::{ClipboardEvent, WatcherConfig, WatcherHandle, spawn_watcher};

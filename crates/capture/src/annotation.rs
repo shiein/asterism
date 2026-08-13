@@ -147,9 +147,9 @@ fn draw_bitmap_text(pixmap: &mut Pixmap, x: i32, y: i32, text: &str) {
     let cy = y;
     for ch in text.chars().take(128) {
         let glyph = glyph_for(ch);
-        for row in 0..7 {
+        for (row, bits) in glyph.iter().enumerate() {
             for col in 0..5 {
-                if glyph[row] & (1 << (4 - col)) != 0 {
+                if bits & (1 << (4 - col)) != 0 {
                     put_pixel(pixmap, cx + col, cy + row as i32, 255, 70, 70);
                 }
             }

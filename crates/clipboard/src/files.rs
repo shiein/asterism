@@ -29,7 +29,9 @@ pub fn preflight_paths(paths: &[PathBuf]) -> Result<FileManifest> {
     for path in paths {
         let root = unique_name(
             &mut used_roots,
-            path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "item".into()),
+            path.file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "item".into()),
         );
         visit(path, Path::new(&root), 0, &mut entries, &mut unsupported, &mut count)?;
     }
@@ -79,7 +81,8 @@ fn visit(
         }
     };
     let ft = meta.file_type();
-    let relative_path = match asterism_core::content::sanitize_relative_path(&rel.to_string_lossy()) {
+    let relative_path = match asterism_core::content::sanitize_relative_path(&rel.to_string_lossy())
+    {
         Ok(p) => p,
         Err(_) => {
             push_unsupported(rel, UnsupportedReason::InvalidName, unsupported);
@@ -88,7 +91,8 @@ fn visit(
     };
 
     if is_reparse_point(&ft, abs) {
-        let reason = if ft.is_symlink() { UnsupportedReason::Symlink } else { UnsupportedReason::Junction };
+        let reason =
+            if ft.is_symlink() { UnsupportedReason::Symlink } else { UnsupportedReason::Junction };
         push_unsupported(Path::new(&relative_path), reason, unsupported);
         return Ok(());
     }
@@ -149,7 +153,9 @@ pub fn materialize_to_cache(dest: &Path, sources: &[PathBuf]) -> Result<Vec<Path
     for src in sources {
         let raw = src
             .file_name()
-            .ok_or_else(|| ClipboardError::Platform(format!("file has no name: {}", src.display())))?
+            .ok_or_else(|| {
+                ClipboardError::Platform(format!("file has no name: {}", src.display()))
+            })?
             .to_string_lossy()
             .into_owned();
         let name = unique_name(&mut used, raw);
@@ -254,7 +260,8 @@ mod tests {
         let b = tempfile::tempdir().unwrap();
         std::fs::write(a.path().join("report.txt"), b"one").unwrap();
         std::fs::write(b.path().join("report.txt"), b"two").unwrap();
-        let manifest = preflight_paths(&[a.path().join("report.txt"), b.path().join("report.txt")]).unwrap();
+        let manifest =
+            preflight_paths(&[a.path().join("report.txt"), b.path().join("report.txt")]).unwrap();
         let names: Vec<_> = manifest.entries.iter().map(|e| e.relative_path.as_str()).collect();
         assert!(names.contains(&"report.txt"));
         assert!(names.iter().any(|n| *n != "report.txt"));

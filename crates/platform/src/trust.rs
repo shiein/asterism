@@ -65,7 +65,12 @@ impl TrustStore {
         self.peers.iter().any(|p| decode_fp(&p.fingerprint_hex).is_some_and(|fp| fp == fingerprint))
     }
 
-    pub fn add(&mut self, device_id: DeviceId, fingerprint_hex: String, name: String) -> std::io::Result<()> {
+    pub fn add(
+        &mut self,
+        device_id: DeviceId,
+        fingerprint_hex: String,
+        name: String,
+    ) -> std::io::Result<()> {
         if let Some(existing) = self.peers.iter_mut().find(|p| p.device_id == device_id) {
             existing.fingerprint_hex = fingerprint_hex;
             existing.name = name;
@@ -73,6 +78,16 @@ impl TrustStore {
             self.peers.push(TrustedPeer { device_id, fingerprint_hex, name });
         }
         self.save()
+    }
+
+    pub fn remove(&mut self, device_id: DeviceId) -> std::io::Result<bool> {
+        let before = self.peers.len();
+        self.peers.retain(|peer| peer.device_id != device_id);
+        if self.peers.len() == before {
+            return Ok(false);
+        }
+        self.save()?;
+        Ok(true)
     }
 
     fn save(&self) -> std::io::Result<()> {
@@ -94,4 +109,24 @@ fn decode_fp(hex_str: &str) -> Option<[u8; 32]> {
         a.copy_from_slice(&raw);
         a
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_drops_revoked_peer() {
+        let root = std::env::temp_dir().join(format!("asterism-trust-{}", DeviceId::new()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut store = TrustStore::load(&root).unwrap();
+        let id = DeviceId::new();
+        store.add(id, "ab".repeat(32), "peer".into()).unwrap();
+        assert!(store.contains_device(id));
+        assert!(store.remove(id).unwrap());
+        assert!(!store.contains_device(id));
+        let reloaded = TrustStore::load(&root).unwrap();
+        assert!(!reloaded.contains_device(id));
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

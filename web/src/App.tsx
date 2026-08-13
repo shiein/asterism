@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { HubApi, type HistoryItem } from "./api";
-import { decryptPackage, loadUnlock, persistUnlock, vaultReady, wipeUnlock } from "./crypto";
+import {
+  decryptBlobChunks,
+  decryptPackage,
+  loadUnlock,
+  persistUnlock,
+  textFromDecrypt,
+  vaultReady,
+  wipeUnlock,
+} from "./crypto";
 import { LocalIndex } from "./search";
 import { clearIndex, loadShard, saveShard } from "./search/idb";
 
@@ -44,9 +52,7 @@ export function App() {
     (async () => {
       try {
         const cached = (await loadShard<HistoryItem[]>("history")) ?? [];
-        const cursor = await loadShard<string>("cursor");
-        const page = await api.history(200, cursor);
-        const list = mergeHistory(cached, page);
+        const list = mergeHistory(cached, await api.allHistory(200));
         if (cancelled) return;
         setItems([...list].reverse());
         await saveShard("history", list);
@@ -69,8 +75,21 @@ export function App() {
           if (it.encrypted_metadata) {
             try {
               const dec = await decryptPackage(hex, it.encrypted_metadata);
-              text += " " + dec.meta;
-              nextPreviews[it.id] = dec.meta;
+              const preview = textFromDecrypt(dec.meta, dec.body);
+              if (preview) text += " " + preview;
+              if (isImageKind(it.kind) && dec.body) {
+                nextPreviews[it.id] = URL.createObjectURL(new Blob([toArrayBuffer(dec.body)], { type: "image/png" }));
+              } else {
+                nextPreviews[it.id] = preview || dec.meta;
+              }
+              if (!dec.body && it.blob_id && dec.chunkCount > 0 && isTextKind(it.kind)) {
+                const chunks: Uint8Array[] = [];
+                for (let i = 0; i < dec.chunkCount; i++) chunks.push(await api.getChunk(it.blob_id, i));
+                const plain = await decryptBlobChunks(hex, chunks);
+                const bodyText = new TextDecoder().decode(plain);
+                nextPreviews[it.id] = bodyText;
+                text += " " + bodyText;
+              }
             } catch (err) {
               failed += 1;
               console.warn("decrypt failed", it.id, err);
@@ -93,7 +112,7 @@ export function App() {
 
   const hits = query.trim() ? new Set(index.search(query)) : null;
   const visible = items.filter((it) => {
-    if (kindFilter && it.kind !== kindFilter) return false;
+    if (kindFilter && it.kind.toUpperCase() !== kindFilter) return false;
     if (!hits) return true;
     return hits.has(it.id) || it.kind.toLowerCase().includes(query.toLowerCase());
   });
@@ -125,13 +144,24 @@ export function App() {
   }
 
   async function copyItem(it: HistoryItem) {
-    const text = previews[it.id];
-    if (!text) {
+    const hex = loadUnlock();
+    if (!hex || !vaultReady()) {
       setError("该条目尚未解密，无法复制正文");
       return;
     }
     try {
-      await navigator.clipboard.writeText(text);
+      const bytes = await materializeItem(api, hex, it);
+      if (isTextKind(it.kind)) {
+        await navigator.clipboard.writeText(new TextDecoder().decode(bytes));
+        return;
+      }
+      const blob = new Blob([toArrayBuffer(bytes)]);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = downloadName(it);
+      a.click();
+      URL.revokeObjectURL(url);
     } catch (e) {
       setError(String(e));
     }
@@ -160,9 +190,14 @@ export function App() {
         <button
           onClick={() => {
             wipeUnlock();
+            setRecovery("");
+            setCode("");
             setToken("");
             localStorage.removeItem("asterism.token");
             setItems([]);
+            for (const url of Object.values(previews)) {
+              if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+            }
             setPreviews({});
             void clearIndex();
           }}
@@ -179,12 +214,12 @@ export function App() {
       <input className="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索已索引历史" />
       <select value={kindFilter} onChange={(e) => setKindFilter(e.target.value)}>
         <option value="">全部类型</option>
-        <option value="text">text</option>
-        <option value="image">image</option>
-        <option value="screenshot">screenshot</option>
-        <option value="files">files</option>
-        <option value="gif">gif</option>
-        <option value="video">video</option>
+        <option value="TEXT">TEXT</option>
+        <option value="IMAGE">IMAGE</option>
+        <option value="SCREENSHOT">SCREENSHOT</option>
+        <option value="FILES">FILES</option>
+        <option value="GIF">GIF</option>
+        <option value="VIDEO">VIDEO</option>
       </select>
 
       <ul className="list">
@@ -193,8 +228,11 @@ export function App() {
             <strong>{it.kind}</strong>
             <span>{new Date(it.created_at_ms).toLocaleString()}</span>
             <span>{it.logical_size} B</span>
-            {previews[it.id] && <p className="muted">{previews[it.id].slice(0, 160)}</p>}
-            <button onClick={() => void copyItem(it)}>复制</button>
+            {previews[it.id]?.startsWith("blob:") && (
+              <img className="preview" src={previews[it.id]} alt="" />
+            )}
+            {previews[it.id] && isTextKind(it.kind) && <p className="muted">{previews[it.id].slice(0, 160)}</p>}
+            <button onClick={() => void copyItem(it)}>{isTextKind(it.kind) ? "复制" : "下载"}</button>
             <button onClick={() => api.deleteHistory(it.id).then(() => setItems((xs) => xs.filter((x) => x.id !== it.id)))}>
               删除
             </button>
@@ -203,4 +241,44 @@ export function App() {
       </ul>
     </main>
   );
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+function isTextKind(kind: string): boolean {
+  return kind.toUpperCase() === "TEXT";
+}
+
+function isImageKind(kind: string): boolean {
+  const k = kind.toUpperCase();
+  return k === "IMAGE" || k === "SCREENSHOT" || k === "GIF";
+}
+
+function downloadName(it: HistoryItem): string {
+  switch (it.kind.toUpperCase()) {
+    case "IMAGE":
+    case "SCREENSHOT":
+      return `${it.id}.png`;
+    case "GIF":
+      return `${it.id}.gif`;
+    case "VIDEO":
+      return `${it.id}.mp4`;
+    default:
+      return `${it.id}.bin`;
+  }
+}
+
+async function materializeItem(api: HubApi, recoveryHex: string, it: HistoryItem): Promise<Uint8Array> {
+  const dec = await decryptPackage(recoveryHex, it.encrypted_metadata);
+  if (dec.body && dec.body.length) return dec.body;
+  if (it.blob_id && dec.chunkCount > 0) {
+    const chunks: Uint8Array[] = [];
+    for (let i = 0; i < dec.chunkCount; i++) chunks.push(await api.getChunk(it.blob_id, i));
+    return decryptBlobChunks(recoveryHex, chunks);
+  }
+  const preview = textFromDecrypt(dec.meta, null);
+  if (preview) return new TextEncoder().encode(preview);
+  throw new Error("该条目没有可复制的正文");
 }

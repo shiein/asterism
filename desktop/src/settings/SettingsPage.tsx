@@ -6,6 +6,10 @@ interface SyncSettings {
   token: string | null;
   lan_port: number;
   auto_sync: boolean;
+  auto_receive?: boolean;
+  pending_pair_code?: string | null;
+  pending_pair_salt?: string | null;
+  hub_cert_sha256?: string | null;
 }
 
 interface DeviceDto {

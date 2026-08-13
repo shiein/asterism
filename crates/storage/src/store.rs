@@ -188,7 +188,11 @@ impl Store {
     }
 
     pub fn set_hub_cursor(&self, cursor: &str) -> Result<()> {
-        self.call(|reply| WriteOp::SetCursor { scope: "hub".into(), cursor: cursor.to_string(), reply })
+        self.call(|reply| WriteOp::SetCursor {
+            scope: "hub".into(),
+            cursor: cursor.to_string(),
+            reply,
+        })
     }
 
     pub fn cache_pins(&self) -> Result<Vec<String>> {

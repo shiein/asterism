@@ -77,10 +77,26 @@ pub async fn pairing_finish(
     if too_many_global_failures(&state, now) {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
+    let mut db = state.db.lock();
+    match pairing_finish_tx(&mut db, &req, now) {
+        Ok(session) => Ok(Json(session)),
+        Err(status @ (StatusCode::NOT_FOUND | StatusCode::GONE)) => {
+            record_global_failure(&state, now);
+            Err(status)
+        }
+        Err(other) => Err(other),
+    }
+}
+
+fn pairing_finish_tx(
+    db: &mut rusqlite::Connection,
+    req: &PairingFinish,
+    now: i64,
+) -> Result<SessionRes, StatusCode> {
     let hash = hash_code(&req.code);
-    let db = state.db.lock();
+    let tx = db.unchecked_transaction().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     type PairRow = (Vec<u8>, i64, Option<i64>, Option<String>, Option<Vec<u8>>, i64);
-    let row: Option<PairRow> = db
+    let row: Option<PairRow> = tx
         .query_row(
             "SELECT account_id, expires_at_ms, consumed_at_ms, avk_wrap, kdf_salt, fail_count FROM pairings WHERE code_hash = ?1",
             [hash.as_slice()],
@@ -89,44 +105,73 @@ pub async fn pairing_finish(
         .optional()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let Some((account_raw, exp, consumed, avk_wrap, kdf_salt, fail_count)) = row else {
-        record_global_failure(&state, now);
         return Err(StatusCode::NOT_FOUND);
     };
     if fail_count >= MAX_CODE_FAILURES || consumed.is_some() || exp < now {
-        record_global_failure(&state, now);
         return Err(StatusCode::GONE);
     }
     let mut account_bytes = [0u8; 16];
     account_bytes.copy_from_slice(&account_raw);
     let account = AccountId::from_bytes(account_bytes);
-    db.execute(
+    let existing: Option<Option<i64>> = tx
+        .query_row(
+            "SELECT revoked_at_ms FROM devices WHERE id = ?1",
+            [req.device_id.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if matches!(existing, Some(Some(_))) {
+        return Err(StatusCode::CONFLICT);
+    }
+    tx.execute(
         "UPDATE pairings SET consumed_at_ms = ?1, avk_wrap = NULL WHERE code_hash = ?2",
         rusqlite::params![now, hash.as_slice()],
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let fp = hex::decode(req.cert_fingerprint.trim()).ok().filter(|b| b.len() == 32);
-    db.execute(
-        r#"
-        INSERT INTO devices (id, account_id, name, platform, identity_public_key, capabilities, created_at_ms, last_seen_at_ms, revoked_at_ms, cert_fingerprint)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, NULL, ?8)
-        "#,
-        rusqlite::params![
-            req.device_id.as_bytes().as_slice(),
-            account.as_bytes().as_slice(),
-            req.device_name,
-            req.platform,
-            req.identity_public_key,
-            asterism_core::DeviceCapabilities::desktop_v1().bits() as i64,
-            now,
-            fp.as_deref()
-        ],
-    )
-    .map_err(|_| StatusCode::CONFLICT)?;
-    let trusted = list_trusted(&db, account).unwrap_or_default();
+    if existing.is_some() {
+        tx.execute(
+            r#"
+            UPDATE devices
+            SET name = ?2, platform = ?3, identity_public_key = ?4, last_seen_at_ms = ?5, cert_fingerprint = ?6
+            WHERE id = ?1 AND revoked_at_ms IS NULL
+            "#,
+            rusqlite::params![
+                req.device_id.as_bytes().as_slice(),
+                req.device_name,
+                req.platform,
+                req.identity_public_key,
+                now,
+                fp.as_deref()
+            ],
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    } else {
+        tx.execute(
+            r#"
+            INSERT INTO devices (id, account_id, name, platform, identity_public_key, capabilities, created_at_ms, last_seen_at_ms, revoked_at_ms, cert_fingerprint)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, NULL, ?8)
+            "#,
+            rusqlite::params![
+                req.device_id.as_bytes().as_slice(),
+                account.as_bytes().as_slice(),
+                req.device_name,
+                req.platform,
+                req.identity_public_key,
+                asterism_core::DeviceCapabilities::desktop_v1().bits() as i64,
+                now,
+                fp.as_deref()
+            ],
+        )
+        .map_err(|_| StatusCode::CONFLICT)?;
+    }
+    let trusted = list_trusted(&tx, account).unwrap_or_default();
     let salt_hex = kdf_salt.filter(|s| !s.is_empty()).map(hex::encode);
-    issue_session(&db, req.device_id, account, now, avk_wrap, salt_hex, trusted)
-        .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let session = issue_session(&tx, req.device_id, account, now, avk_wrap, salt_hex, trusted)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tx.commit().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(session)
 }
 
 pub async fn session(
@@ -261,16 +306,17 @@ fn bootstrap_ok(state: &HubState, headers: &HeaderMap) -> bool {
 }
 
 fn has_active_devices(db: &rusqlite::Connection) -> bool {
-    db.query_row(
-        "SELECT COUNT(*) FROM devices WHERE revoked_at_ms IS NULL",
-        [],
-        |r| r.get::<_, i64>(0),
-    )
+    db.query_row("SELECT COUNT(*) FROM devices WHERE revoked_at_ms IS NULL", [], |r| {
+        r.get::<_, i64>(0)
+    })
     .ok()
     .is_some_and(|n| n > 0)
 }
 
-fn list_trusted(db: &rusqlite::Connection, account: AccountId) -> rusqlite::Result<Vec<TrustedDeviceDto>> {
+fn list_trusted(
+    db: &rusqlite::Connection,
+    account: AccountId,
+) -> rusqlite::Result<Vec<TrustedDeviceDto>> {
     let mut stmt = db.prepare(
         "SELECT id, name, cert_fingerprint FROM devices WHERE account_id = ?1 AND revoked_at_ms IS NULL",
     )?;
@@ -337,4 +383,84 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asterism_sync::pairing::{generate_code, generate_kdf_salt, hash_code};
+
+    fn seeded() -> (tempfile::TempDir, rusqlite::Connection, String, DeviceId) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hub.db");
+        crate::db::migrate(&path).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let now = 1_000_000i64;
+        let account = ensure_account(&conn, now).unwrap();
+        let code = generate_code();
+        let salt = generate_kdf_salt();
+        conn.execute(
+            "INSERT INTO pairings (code_hash, account_id, expires_at_ms, consumed_at_ms, kdf_salt, fail_count) VALUES (?1, ?2, ?3, NULL, ?4, 0)",
+            rusqlite::params![hash_code(&code).as_slice(), account.as_bytes().as_slice(), now + PAIRING_TTL_MS, salt.as_slice()],
+        )
+        .unwrap();
+        (dir, conn, code, DeviceId::new())
+    }
+
+    fn finish(code: &str, device: DeviceId) -> PairingFinish {
+        PairingFinish {
+            code: code.to_string(),
+            device_id: device,
+            device_name: "Mac".into(),
+            platform: "macos".into(),
+            identity_public_key: vec![1],
+            cert_fingerprint: "ab".repeat(32),
+        }
+    }
+
+    #[test]
+    fn re_pairing_same_device_issues_new_session() {
+        let (_dir, mut db, code, device) = seeded();
+        let first = pairing_finish_tx(&mut db, &finish(&code, device), 1_000_100).unwrap();
+        let code2 = generate_code();
+        let salt = generate_kdf_salt();
+        let account = ensure_account(&db, 1_000_200).unwrap();
+        db.execute(
+            "INSERT INTO pairings (code_hash, account_id, expires_at_ms, consumed_at_ms, kdf_salt, fail_count) VALUES (?1, ?2, ?3, NULL, ?4, 0)",
+            rusqlite::params![hash_code(&code2).as_slice(), account.as_bytes().as_slice(), 1_000_200 + PAIRING_TTL_MS, salt.as_slice()],
+        )
+        .unwrap();
+        let second = pairing_finish_tx(&mut db, &finish(&code2, device), 1_000_300).unwrap();
+        assert_ne!(first.token, second.token);
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM devices WHERE revoked_at_ms IS NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn revoked_device_does_not_consume_code() {
+        let (_dir, mut db, code, device) = seeded();
+        let account = ensure_account(&db, 1).unwrap();
+        db.execute(
+            r#"
+            INSERT INTO devices (id, account_id, name, platform, identity_public_key, capabilities, created_at_ms, last_seen_at_ms, revoked_at_ms)
+            VALUES (?1, ?2, 'old', 'macos', x'01', 0, 1, 1, 2)
+            "#,
+            rusqlite::params![device.as_bytes().as_slice(), account.as_bytes().as_slice()],
+        )
+        .unwrap();
+        let err = pairing_finish_tx(&mut db, &finish(&code, device), 1_000_100)
+            .err()
+            .expect("revoked device must be rejected");
+        assert_eq!(err, StatusCode::CONFLICT);
+        let consumed: Option<i64> = db
+            .query_row(
+                "SELECT consumed_at_ms FROM pairings WHERE code_hash = ?1",
+                [hash_code(&code).as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(consumed.is_none());
+    }
 }

@@ -99,17 +99,19 @@ fn run_loop<B: ClipboardBackend>(
         }
         last = token;
         match backend.read() {
-            Ok(Some(captured)) => match normalize::normalize(&captured, &config.policy, &config.remote) {
-                Ok(Some(content)) => {
-                    if guard.is_self_write(None, &content.dedup_tag()) {
-                        on_event(ClipboardEvent::Ignored);
-                        continue;
+            Ok(Some(captured)) => {
+                match normalize::normalize(&captured, &config.policy, &config.remote) {
+                    Ok(Some(content)) => {
+                        if guard.is_self_write(None, &content.dedup_tag()) {
+                            on_event(ClipboardEvent::Ignored);
+                            continue;
+                        }
+                        on_event(ClipboardEvent::Captured(content));
                     }
-                    on_event(ClipboardEvent::Captured(content));
+                    Ok(None) => on_event(ClipboardEvent::Ignored),
+                    Err(err) => on_event(ClipboardEvent::Error(err.to_string())),
                 }
-                Ok(None) => on_event(ClipboardEvent::Ignored),
-                Err(err) => on_event(ClipboardEvent::Error(err.to_string())),
-            },
+            }
             Ok(None) => on_event(ClipboardEvent::Ignored),
             Err(err) => on_event(ClipboardEvent::Error(err.to_string())),
         }
