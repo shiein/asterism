@@ -1,0 +1,13 @@
+[package]
+name = "asterism-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Capture backend trait, overlay contract, and scroll engine boundary"
+
+[dependencies]
+asterism-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

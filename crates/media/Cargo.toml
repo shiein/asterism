@@ -1,0 +1,11 @@
+[package]
+name = "asterism-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Shared frame stream plus GIF/video encoder boundaries"
+
+[dependencies]
+asterism-core.workspace = true
+thiserror.workspace = true
