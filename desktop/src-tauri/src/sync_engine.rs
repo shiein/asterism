@@ -475,8 +475,9 @@ async fn pull_hub(
     let client = client(&snap).await?;
     let items = client.history(last_cursor.as_deref(), 50).await?;
     for dto in items {
-        *last_cursor = Some(dto.created_at_ms.to_string());
+        let next_cursor = format!("{}:{}", dto.created_at_ms, dto.id);
         apply_remote(vault, store, paths, guard, &client, dto).await?;
+        *last_cursor = Some(next_cursor);
         on_change();
     }
     Ok(())

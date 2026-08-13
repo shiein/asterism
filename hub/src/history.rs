@@ -17,6 +17,11 @@ pub struct HistoryQuery {
     pub limit: Option<u32>,
 }
 
+struct HistoryCursor {
+    created_at_ms: i64,
+    id: Vec<u8>,
+}
+
 pub async fn list(
     State(state): State<Arc<HubState>>,
     headers: HeaderMap,
@@ -33,10 +38,11 @@ pub async fn list(
         FROM content_refs WHERE account_id = ?1
         "#,
     );
-    if q.cursor.is_some() {
-        sql.push_str(" AND created_at_ms < ?2");
+    let cursor = q.cursor.as_deref().map(parse_cursor).transpose()?;
+    if cursor.is_some() {
+        sql.push_str(" AND (created_at_ms > ?2 OR (created_at_ms = ?2 AND id > ?3))");
     }
-    sql.push_str(" ORDER BY created_at_ms DESC LIMIT ?");
+    sql.push_str(" ORDER BY created_at_ms ASC, id ASC LIMIT ?");
     let mut stmt = db.prepare(&sql).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let map = |row: &rusqlite::Row<'_>| -> rusqlite::Result<HistoryDto> {
         let id: Vec<u8> = row.get(0)?;
@@ -58,13 +64,34 @@ pub async fn list(
             blob_id: row.get(9)?,
         })
     };
-    let rows = if let Some(cursor) = q.cursor.as_ref().and_then(|c| c.parse::<i64>().ok()) {
-        stmt.query_map(rusqlite::params![account.as_bytes().as_slice(), cursor, limit], map)
+    let rows = if let Some(cursor) = cursor {
+        stmt.query_map(
+            rusqlite::params![
+                account.as_bytes().as_slice(),
+                cursor.created_at_ms,
+                cursor.id,
+                limit
+            ],
+            map,
+        )
     } else {
         stmt.query_map(rusqlite::params![account.as_bytes().as_slice(), limit], map)
     }
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(rows.collect::<Result<Vec<_>, _>>().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?))
+}
+
+fn parse_cursor(raw: &str) -> Result<HistoryCursor, StatusCode> {
+    if let Some((created, id)) = raw.split_once(':') {
+        let created_at_ms = created.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+        let id = hex::decode(id).map_err(|_| StatusCode::BAD_REQUEST)?;
+        if id.len() != 16 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        return Ok(HistoryCursor { created_at_ms, id });
+    }
+    let created_at_ms = raw.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(HistoryCursor { created_at_ms, id: Vec::new() })
 }
 
 pub async fn create(
@@ -129,4 +156,24 @@ pub async fn delete(
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_keeps_timestamp_and_id_tie_breaker() {
+        let id = "00112233445566778899aabbccddeeff";
+        let cursor = parse_cursor(&format!("123:{id}")).unwrap();
+        assert_eq!(cursor.created_at_ms, 123);
+        assert_eq!(cursor.id, hex::decode(id).unwrap());
+    }
+
+    #[test]
+    fn legacy_timestamp_cursor_is_still_accepted() {
+        let cursor = parse_cursor("123").unwrap();
+        assert_eq!(cursor.created_at_ms, 123);
+        assert!(cursor.id.is_empty());
+    }
 }
