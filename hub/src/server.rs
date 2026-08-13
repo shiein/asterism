@@ -40,6 +40,24 @@ pub async fn run(config: HubConfig) -> Result<()> {
     tracing::info!(%addr, "asterism-hub listening (https)");
 
     let state = HubState::new(config, conn);
+    let gc_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+        loop {
+            interval.tick().await;
+            let state = Arc::clone(&gc_state);
+            match tokio::task::spawn_blocking(move || {
+                blob::gc_unused(&state, std::time::Duration::from_secs(24 * 60 * 60))
+            })
+            .await
+            {
+                Ok(Ok(removed)) if removed > 0 => tracing::info!(removed, "hub blob GC"),
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => tracing::warn!(error = %err, "hub blob GC failed"),
+                Err(err) => tracing::warn!(error = %err, "hub blob GC task failed"),
+            }
+        }
+    });
     let app = router(state);
 
     loop {

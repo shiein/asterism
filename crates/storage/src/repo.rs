@@ -252,6 +252,30 @@ pub fn delete_item(conn: &Connection, id: ContentId) -> Result<Option<BlobId>> {
     Ok(None)
 }
 
+pub fn unused_blobs(conn: &Connection, released_before_ms: i64) -> Result<Vec<BlobId>> {
+    let mut stmt = conn.prepare(
+        "SELECT blob_id FROM blob_refs WHERE ref_count = 0 AND last_released_at_ms <= ?1",
+    )?;
+    let rows = stmt.query_map([released_before_ms], |row| row.get::<_, String>(0))?;
+    rows.map(|row| {
+        let raw = row?;
+        BlobId::from_hex(raw).map_err(StorageError::from)
+    })
+    .collect()
+}
+
+pub fn delete_unused_blob_ref(
+    conn: &Connection,
+    id: &BlobId,
+    released_before_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM blob_refs WHERE blob_id = ?1 AND ref_count = 0 AND last_released_at_ms <= ?2",
+        params![id.as_str(), released_before_ms],
+    )?;
+    Ok(())
+}
+
 pub fn load_manifest(conn: &Connection, id: ManifestId) -> Result<FileManifest> {
     let json: String = conn
         .query_row(
@@ -358,4 +382,8 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+pub(crate) fn now_ms_for_gc() -> i64 {
+    now_ms()
 }

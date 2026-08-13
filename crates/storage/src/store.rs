@@ -37,6 +37,10 @@ enum WriteOp {
         id: ContentId,
         reply: SyncSender<Result<Option<BlobId>>>,
     },
+    GcBlobs {
+        released_before_ms: i64,
+        reply: SyncSender<Result<u64>>,
+    },
     Shutdown,
 }
 
@@ -82,16 +86,18 @@ impl Store {
         schema::initialize(&bootstrap)?;
         drop(bootstrap);
 
+        let blobs = BlobStore::open(&data_root)?;
+        let writer_blobs = blobs.clone();
         let (tx, rx) = mpsc::sync_channel(128);
         let writer_db = db.clone();
         let handle = thread::Builder::new().name("asterism-db-writer".into()).spawn(move || {
-            writer_loop(writer_db, rx);
+            writer_loop(writer_db, writer_blobs, rx);
         })?;
 
         let store = Arc::new(Self {
             writer: tx,
             readers: ReaderPool::open(&db, READER_COUNT)?,
-            blobs: BlobStore::open(&data_root)?,
+            blobs,
             writer_thread: Mutex::new(Some(handle)),
         });
         Ok(store)
@@ -157,6 +163,12 @@ impl Store {
         self.blobs.get(id)
     }
 
+    pub fn gc_blobs(&self, grace: Duration) -> Result<u64> {
+        let released_before_ms = crate::repo::now_ms_for_gc()
+            .saturating_sub(i64::try_from(grace.as_millis()).unwrap_or(i64::MAX));
+        self.call(|reply| WriteOp::GcBlobs { released_before_ms, reply })
+    }
+
     fn call<T>(&self, build: impl FnOnce(SyncSender<Result<T>>) -> WriteOp) -> Result<T> {
         let (tx, rx) = mpsc::sync_channel(1);
         self.writer.send(build(tx)).map_err(|_| StorageError::WriterStopped)?;
@@ -173,7 +185,7 @@ impl Drop for Store {
     }
 }
 
-fn writer_loop(db: PathBuf, rx: Receiver<WriteOp>) {
+fn writer_loop(db: PathBuf, blobs: BlobStore, rx: Receiver<WriteOp>) {
     let conn = match open_write(&db) {
         Ok(conn) => conn,
         Err(err) => {
@@ -217,6 +229,21 @@ fn writer_loop(db: PathBuf, rx: Receiver<WriteOp>) {
                         let blob = repo::delete_item(&tx, id)?;
                         tx.commit()?;
                         Ok(blob)
+                    });
+                let _ = reply.send(result);
+            }
+            Ok(WriteOp::GcBlobs { released_before_ms, reply }) => {
+                let result =
+                    conn.unchecked_transaction().map_err(StorageError::from).and_then(|tx| {
+                        let candidates = repo::unused_blobs(&tx, released_before_ms)?;
+                        let mut removed = 0u64;
+                        for id in candidates {
+                            blobs.remove_if_unused(&id)?;
+                            repo::delete_unused_blob_ref(&tx, &id, released_before_ms)?;
+                            removed += 1;
+                        }
+                        tx.commit()?;
+                        Ok(removed)
                     });
                 let _ = reply.send(result);
             }
@@ -336,6 +363,22 @@ mod tests {
         assert_eq!(store.pending_sync(10).unwrap()[0].status, ContentStatus::Failed);
         store.set_status(id, ContentStatus::SyncedToHub).unwrap();
         assert!(store.pending_sync(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn blob_gc_removes_released_file_through_writer_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let blob = store.put_blob(b"image bytes").unwrap();
+        let mut item = sample("image");
+        item.kind = ContentKind::Image;
+        item.payload_ref = PayloadRef::Blob { blob_id: blob.clone() };
+        let id = store.insert(item, None).unwrap();
+
+        store.delete(id).unwrap();
+        assert!(store.blobs().exists(&blob));
+        assert_eq!(store.gc_blobs(Duration::ZERO).unwrap(), 1);
+        assert!(!store.blobs().exists(&blob));
     }
 
     #[test]

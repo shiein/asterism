@@ -123,6 +123,7 @@ async fn run_loop(
 
     let listener = lan::listen(cert.clone(), port).await.ok();
     let mut last_cursor: Option<String> = None;
+    let mut maintenance = tokio::time::interval(Duration::from_secs(60 * 60));
 
     loop {
         tokio::select! {
@@ -167,6 +168,11 @@ async fn run_loop(
                 retry_pending(&identity, &vault, &store, &paths, &settings, &on_change).await;
                 if let Err(err) = pull_hub(&vault, &store, &paths, &guard, &settings, &mut last_cursor, &on_change).await {
                     tracing::debug!(error = %err, "hub pull");
+                }
+            }
+            _ = maintenance.tick() => {
+                if let Err(err) = store.gc_blobs(Duration::from_secs(24 * 60 * 60)) {
+                    tracing::warn!(error = %err, "local blob GC failed");
                 }
             }
         }
