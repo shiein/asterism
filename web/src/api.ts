@@ -65,10 +65,27 @@ export class HubApi {
     return res.json();
   }
 
-  async history(limit = 80): Promise<HistoryItem[]> {
-    const res = await fetch(`${this.base}/api/v1/history?limit=${limit}`, { headers: this.headers() });
+  async history(limit = 80, cursor?: string): Promise<HistoryItem[]> {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set("cursor", cursor);
+    const res = await fetch(`${this.base}/api/v1/history?${query}`, { headers: this.headers() });
     if (!res.ok) throw new Error(`history ${res.status}`);
     return res.json();
+  }
+
+  async allHistory(pageSize = 200): Promise<HistoryItem[]> {
+    const items: HistoryItem[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.history(pageSize, cursor);
+      items.push(...page);
+      if (page.length < pageSize) return items;
+      const last = page.at(-1);
+      if (!last) return items;
+      const next = `${last.created_at_ms}:${last.id}`;
+      if (next === cursor) throw new Error("history cursor did not advance");
+      cursor = next;
+    }
   }
 
   async devices(): Promise<Device[]> {

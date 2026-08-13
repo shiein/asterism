@@ -32,6 +32,11 @@ export class LocalIndex {
     }
   }
 
+  clear() {
+    this.postings.clear();
+    this.docs.clear();
+  }
+
   remove(id: string) {
     const prev = this.docs.get(id);
     if (!prev) return;

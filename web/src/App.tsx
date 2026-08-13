@@ -31,9 +31,10 @@ export function App() {
   useEffect(() => {
     if (!token || !vaultReady()) return;
     api
-      .history(200)
+      .allHistory()
       .then(async (list) => {
-        setItems(list);
+        index.clear();
+        setItems([...list].reverse());
         const hex = loadUnlock();
         for (const it of list) {
           let text = `${it.kind}`;
@@ -48,7 +49,8 @@ export function App() {
           index.add(it.id, text);
         }
         setIndexed(index.size);
-        void saveShard("cursor", list.at(-1)?.created_at_ms ?? 0);
+        const last = list.at(-1);
+        void saveShard("cursor", last ? `${last.created_at_ms}:${last.id}` : null);
         void saveShard("count", index.size);
       })
       .catch((e) => setError(String(e)));
