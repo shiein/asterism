@@ -4,10 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Capture backend trait, overlay contract, and scroll engine boundary"
+description = "Capture backend, overlay contract, annotation export, scroll stitch"
 
 [dependencies]
 asterism-core.workspace = true
+image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tiny-skia = "0.11"
+xcap = "0.6"
+
+[dev-dependencies]
+tempfile = "3.20"
