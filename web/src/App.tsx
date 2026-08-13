@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { HubApi, type HistoryItem } from "./api";
-import { loadUnlock, persistUnlock, vaultReady, wipeUnlock } from "./crypto";
+import { decryptPackage, loadUnlock, persistUnlock, vaultReady, wipeUnlock } from "./crypto";
 import { LocalIndex } from "./search";
 
 const DEVICE_ID_KEY = "asterism.web.device_id";
@@ -31,9 +31,21 @@ export function App() {
     if (!token || !vaultReady()) return;
     api
       .history(200)
-      .then((list) => {
+      .then(async (list) => {
         setItems(list);
-        list.forEach((it) => index.add(it.id, `${it.kind} ${it.dedup_tag}`));
+        const hex = loadUnlock();
+        for (const it of list) {
+          let text = `${it.kind}`;
+          if (hex && it.encrypted_metadata) {
+            try {
+              const dec = await decryptPackage(hex, it.encrypted_metadata);
+              text += " " + dec.meta;
+            } catch {
+              /* 密文不可解密时仍可按类型浏览 */
+            }
+          }
+          index.add(it.id, text);
+        }
         setIndexed(index.size);
       })
       .catch((e) => setError(String(e)));

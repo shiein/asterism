@@ -23,12 +23,12 @@ Windows Desktop  ◄── LAN TLS ──►  macOS Desktop
 
 ## 当前进度
 
-代码层已按基线阶段铺开（尚未做完整现场验收）：
+代码层已按基线阶段接通主路径（现场验收仍需你在真实双机上跑）：
 
 1. Core / 本地历史 / Windows+macOS 剪贴板 / 敏感策略 / Desktop UI  
 2. 设备证书、mDNS、LAN TCP+TLS、文件分块流、Hub client  
-3. Hub 配对/会话/设备/密文历史/Blob/WSS 中继 + Web 历史中心  
-4. CaptureBackend（xcap）、标注导出、滚动拼接  
+3. Hub 配对/会话/设备/密文历史/Blob/WSS 中继；Desktop 捕获后自动加密上传并拉取远端；Web/内嵌页可配对浏览  
+4. 冻结 Overlay 选区、标注导出、滚动拼接  
 5. GIF 会话、视频/音频状态机  
 6. 崩溃标记、缓存淘汰、macOS LaunchAgent 草稿
 

@@ -35,6 +35,10 @@ export function captureFullscreen(): Promise<string> {
   return invoke("capture_fullscreen");
 }
 
+export function captureRegion(): Promise<string> {
+  return invoke("capture_region");
+}
+
 export function recoveryKey(): Promise<string> {
   return invoke("recovery_key");
 }

@@ -1,18 +1,39 @@
-use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse};
+use axum::http::{StatusCode, Uri, header};
+use axum::response::{Html, IntoResponse, Response};
+use rust_embed::Embed;
 
-pub async fn index() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Html(
-            r#"<!doctype html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><title>Asterism Hub</title></head>
-<body>
-  <h1>Asterism Hub</h1>
-  <p>Web 历史中心将在 Phase 3 内嵌到本二进制。当前仅提供健康检查与 API 骨架。</p>
-</body>
-</html>"#,
-        ),
-    )
+#[derive(Embed)]
+#[folder = "webroot/"]
+struct Asset;
+
+pub async fn asset(uri: Uri) -> Response {
+    serve(uri)
+}
+
+fn serve(uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    let file = Asset::get(path).or_else(|| Asset::get("index.html"));
+    match file {
+        Some(file) => (
+            [(header::CONTENT_TYPE, mime_guess(path)), (header::CACHE_CONTROL, "no-store")],
+            file.data,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, Html("<p>web assets missing</p>")).into_response(),
+    }
+}
+
+fn mime_guess(path: &str) -> &'static str {
+    if path.ends_with(".js") {
+        "application/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".json") {
+        "application/json"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else {
+        "text/html; charset=utf-8"
+    }
 }

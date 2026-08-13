@@ -12,6 +12,9 @@ use asterism_platform::{AppPaths, LocalIdentity, LocalVault};
 use asterism_storage::Store;
 use tauri::{AppHandle, Emitter};
 
+use crate::settings::SyncSettings;
+use crate::sync_engine::{self, SyncHandle};
+
 pub struct DesktopState {
     pub store: Arc<Store>,
     pub guard: Arc<SelfWriteGuard>,
@@ -19,6 +22,7 @@ pub struct DesktopState {
     pub paths: AppPaths,
     pub clipboard: NativeClipboard,
     pub vault: LocalVault,
+    pub sync: SyncHandle,
     _crash: CrashGuard,
 }
 
@@ -35,11 +39,25 @@ impl DesktopState {
         let store = Store::open(&paths.data_dir)?;
         let guard = Arc::new(SelfWriteGuard::default());
 
+        let settings = SyncSettings::load(&paths.config_dir);
         let store_task = Arc::clone(&store);
         let guard_task = Arc::clone(&guard);
         let paths_task = paths.clone();
         let device_id = identity.device_id;
         let app_task = app.clone();
+        let app_sync = app.clone();
+        let sync = sync_engine::spawn(
+            identity.clone(),
+            asterism_crypto::AccountVaultKey::from_bytes(*vault.avk.as_bytes()),
+            Arc::clone(&store),
+            paths.clone(),
+            Arc::clone(&guard),
+            settings,
+            move || {
+                let _ = app_sync.emit("history-changed", ());
+            },
+        );
+        let sync_watch = sync.clone();
 
         spawn_watcher(
             WatcherConfig {
@@ -51,10 +69,11 @@ impl DesktopState {
             move |event| match event {
                 ClipboardEvent::Captured(content) => {
                     match persist(&store_task, &paths_task, device_id, content) {
-                        Ok(true) => {
+                        Ok(Some(item)) => {
+                            sync_watch.notify_local(item);
                             let _ = app_task.emit("history-changed", ());
                         }
-                        Ok(false) => {}
+                        Ok(None) => {}
                         Err(err) => {
                             tracing::warn!(error = %err, "failed to persist clipboard item")
                         }
@@ -67,7 +86,16 @@ impl DesktopState {
             },
         );
 
-        Ok(Self { store, guard, identity, paths, clipboard: NativeClipboard, vault, _crash: crash })
+        Ok(Self {
+            store,
+            guard,
+            identity,
+            paths,
+            clipboard: NativeClipboard,
+            vault,
+            sync,
+            _crash: crash,
+        })
     }
 }
 
@@ -76,16 +104,13 @@ fn persist(
     paths: &AppPaths,
     device_id: DeviceId,
     content: NormalizedContent,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<ContentItem>> {
     if store.find_by_dedup(&content.dedup_tag())?.is_some() {
-        return Ok(false);
+        return Ok(None);
     }
     let now = asterism_platform::now_ms();
-    match content {
-        NormalizedContent::Text { .. } => {
-            let item = content.into_item(device_id, now);
-            store.insert(item, None)?;
-        }
+    let item = match content {
+        NormalizedContent::Text { .. } => content.into_item(device_id, now),
         NormalizedContent::Image { png, width, height, dedup_tag, flags, source_app } => {
             let blob_id = store.put_blob(&png)?;
             let mut item = NormalizedContent::Image {
@@ -100,7 +125,7 @@ fn persist(
             item.payload_ref = PayloadRef::Blob { blob_id };
             item.logical_size = png.len() as u64;
             item.payload_size = png.len() as u64;
-            store.insert(item, None)?;
+            item
         }
         NormalizedContent::Files { paths: sources, manifest, dedup_tag, flags, source_app } => {
             let mut item = NormalizedContent::Files {
@@ -114,10 +139,24 @@ fn persist(
             let cache = paths.item_cache(item.id);
             materialize_to_cache(&cache, &sources)?;
             item.metadata.local_cache_rel = Some(item.id.to_string());
-            store.insert(item, Some(manifest))?;
+            persist_item(store, item.clone(), Some(manifest))?;
+            return Ok(Some(item));
         }
+    };
+    persist_item(store, item.clone(), None)?;
+    Ok(Some(item))
+}
+
+pub fn persist_item(
+    store: &Store,
+    item: ContentItem,
+    manifest: Option<asterism_core::FileManifest>,
+) -> anyhow::Result<()> {
+    if store.find_by_dedup(&item.dedup_tag)?.is_some() {
+        return Ok(());
     }
-    Ok(true)
+    store.insert(item, manifest)?;
+    Ok(())
 }
 
 pub fn item_to_clipboard(

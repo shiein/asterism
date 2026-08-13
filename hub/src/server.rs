@@ -83,7 +83,7 @@ fn router(state: Arc<HubState>) -> Router {
         .route("/api/v1/blobs/{id}/commit", post(blob::commit))
         .route("/ws/v1/device", get(relay::ws))
         .route("/api/v1/signaling/{*rest}", get(api::not_implemented))
-        .fallback(web::index)
+        .fallback(web::asset)
         .layer(TraceLayer::new_for_http())
         .layer(RequestBodyLimitLayer::new(MAX_CHUNK_BYTES))
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES.max(MAX_CHUNK_BYTES)))

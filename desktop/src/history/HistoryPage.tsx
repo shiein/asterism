@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { captureFullscreen, copyItem, deleteItem, getIdentity, listHistory, setFavorite } from "../api";
+import { captureFullscreen, captureRegion, copyItem, deleteItem, getIdentity, listHistory, setFavorite } from "../api";
 import { useUiStore } from "../store";
 import type { ContentKind, HistoryItem } from "../types";
 
@@ -58,6 +58,13 @@ export function HistoryPage() {
             }}
           >
             全屏截图
+          </button>
+          <button
+            onClick={() => {
+              void captureRegion().then(() => queryClient.invalidateQueries({ queryKey: ["history"] }));
+            }}
+          >
+            选区截图
           </button>
           <label className="search">
             <span>搜索</span>

@@ -26,6 +26,7 @@ sha2.workspace = true
 hyper = { version = "1.6", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1"] }
 rcgen.workspace = true
+rust-embed = { version = "8.7", features = ["interpolate-folder-path"] }
 rusqlite.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true

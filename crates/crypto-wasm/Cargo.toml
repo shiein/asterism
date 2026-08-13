@@ -1,0 +1,17 @@
+[package]
+name = "asterism-crypto-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WASM bindings for the shared Asterism crypto crate"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+asterism-crypto.workspace = true
+hex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+wasm-bindgen = "0.2"

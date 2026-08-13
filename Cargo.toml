@@ -11,6 +11,7 @@ members = [
     "crates/sync",
     "hub",
     "desktop/src-tauri",
+    "crates/crypto-wasm",
 ]
 default-members = [
     "crates/core",

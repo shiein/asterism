@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use asterism_capture::backend::CaptureBackend;
-use asterism_capture::{AnnotationScene, XcapBackend, export_png};
+use asterism_capture::{AnnotationScene, OverlaySession, XcapBackend, export_png, select_region};
 use asterism_clipboard::ClipboardBackend;
 use asterism_core::action::ActionId;
 use asterism_core::content::{ContentFlags, ContentKind};
@@ -12,6 +12,8 @@ use tauri::State;
 
 use crate::actions;
 use crate::runtime::{DesktopState, item_to_clipboard};
+use crate::settings::SyncSettings;
+use crate::sync_engine;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CmdError {
@@ -155,8 +157,100 @@ pub fn capture_fullscreen(state: State<'_, DesktopState>) -> Result<String, CmdE
     item.payload_ref = asterism_core::PayloadRef::Blob { blob_id: blob };
     item.logical_size = png.len() as u64;
     item.payload_size = png.len() as u64;
-    let id = state.store.insert(item, None).map_err(|e| CmdError::Any(e.to_string()))?;
+    let id = state.store.insert(item.clone(), None).map_err(|e| CmdError::Any(e.to_string()))?;
+    state.sync.notify_local(item);
     Ok(id.to_string())
+}
+
+#[tauri::command]
+pub fn capture_region(state: State<'_, DesktopState>) -> Result<String, CmdError> {
+    let backend = XcapBackend;
+    backend.permission_preflight().map_err(|e| CmdError::Any(e.to_string()))?;
+    let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
+    let monitor = monitors.first().ok_or_else(|| CmdError::Any("no monitor".into()))?;
+    let frame = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
+    let selection = select_region(&frame).map_err(|e| CmdError::Any(e.to_string()))?;
+    let Some(selection) = selection else {
+        return Err(CmdError::Any("cancelled".into()));
+    };
+    let session = OverlaySession { frame, selection: Some(selection) };
+    let (w, h, bgra) =
+        session.crop_bgra().ok_or_else(|| CmdError::Any("empty selection".into()))?;
+    let png = export_png(w, h, &bgra, &AnnotationScene::default()).map_err(CmdError::Any)?;
+    let blob = state.store.put_blob(&png).map_err(|e| CmdError::Any(e.to_string()))?;
+    let mut item = asterism_clipboard::NormalizedContent::Image {
+        png: Vec::new(),
+        width: w,
+        height: h,
+        dedup_tag: asterism_crypto::local_dedup_tag(&png),
+        flags: asterism_core::ContentFlags::REMOTE_ALLOWED,
+        source_app: Some("asterism".into()),
+    }
+    .into_item(state.identity.device_id, asterism_platform::now_ms());
+    item.kind = asterism_core::ContentKind::Screenshot;
+    item.payload_ref = asterism_core::PayloadRef::Blob { blob_id: blob };
+    item.logical_size = png.len() as u64;
+    item.payload_size = png.len() as u64;
+    let id = state.store.insert(item.clone(), None).map_err(|e| CmdError::Any(e.to_string()))?;
+    state.sync.notify_local(item);
+    Ok(id.to_string())
+}
+
+#[tauri::command]
+pub fn get_sync_settings(state: State<'_, DesktopState>) -> SyncSettings {
+    state.sync.settings.lock().clone()
+}
+
+#[tauri::command]
+pub fn save_sync_settings(
+    state: State<'_, DesktopState>,
+    settings: SyncSettings,
+) -> Result<(), CmdError> {
+    settings.save(&state.paths.config_dir).map_err(|e| CmdError::Any(e.to_string()))?;
+    *state.sync.settings.lock() = settings;
+    state.sync.reload();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn connect_hub(state: State<'_, DesktopState>, url: String) -> Result<String, CmdError> {
+    let mut settings = state.sync.settings.lock().clone();
+    let code =
+        sync_engine::bootstrap_hub(&mut settings, &state.identity, &state.paths.config_dir, url)
+            .await
+            .map_err(|e| CmdError::Any(e.to_string()))?;
+    *state.sync.settings.lock() = settings;
+    state.sync.reload();
+    Ok(code)
+}
+
+#[tauri::command]
+pub async fn hub_pairing_code(state: State<'_, DesktopState>) -> Result<String, CmdError> {
+    let settings = state.sync.settings.lock().clone();
+    sync_engine::start_pairing_code(&settings).await.map_err(|e| CmdError::Any(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn hub_devices(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<asterism_sync::hub_client::DeviceDto>, CmdError> {
+    let settings = state.sync.settings.lock().clone();
+    let url = settings.hub_url.clone().ok_or_else(|| CmdError::Any("no hub".into()))?;
+    let token = settings.token.clone().ok_or_else(|| CmdError::Any("no token".into()))?;
+    let client = asterism_sync::HubClient::new(url)
+        .map_err(|e| CmdError::Any(e.to_string()))?
+        .with_token(token);
+    client.devices().await.map_err(|e| CmdError::Any(e.to_string()))
+}
+
+#[tauri::command]
+pub fn import_recovery(state: State<'_, DesktopState>, hex_key: String) -> Result<(), CmdError> {
+    let key = asterism_crypto::RecoveryKey::decode_hex(&hex_key)
+        .map_err(|e| CmdError::Any(e.to_string()))?;
+    let file = serde_json::json!({ "recovery_hex": key.encode_hex() });
+    std::fs::write(state.paths.config_dir.join("vault.json"), file.to_string())
+        .map_err(|e| CmdError::Any(e.to_string()))?;
+    Ok(())
 }
 
 fn to_dto(item: asterism_core::ContentItem) -> HistoryItemDto {

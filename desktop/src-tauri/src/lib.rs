@@ -1,6 +1,10 @@
+#![allow(clippy::too_many_arguments)]
+
 mod actions;
 mod commands;
 mod runtime;
+mod settings;
+mod sync_engine;
 
 use runtime::DesktopState;
 use tauri::Manager;
@@ -30,6 +34,13 @@ pub fn run() {
             commands::execute_action,
             commands::recovery_key,
             commands::capture_fullscreen,
+            commands::capture_region,
+            commands::get_sync_settings,
+            commands::save_sync_settings,
+            commands::connect_hub,
+            commands::hub_pairing_code,
+            commands::hub_devices,
+            commands::import_recovery,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Asterism desktop");
