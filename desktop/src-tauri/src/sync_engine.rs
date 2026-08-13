@@ -326,13 +326,23 @@ fn apply_lan(
     if lan_item.offer.dedup_tag.len() == 32 {
         tag.copy_from_slice(&lan_item.offer.dedup_tag);
     }
-    if store.find_by_dedup(&tag)?.is_some() {
+    if store.contains(lan_item.offer.item_id)? {
         return Ok(());
     }
     let metadata: ItemMetadata = serde_json::from_str(&lan_item.metadata_json).unwrap_or_default();
     let kind = ContentKind::parse(&lan_item.offer.kind).unwrap_or(ContentKind::Text);
-    let (item, manifest) =
-        build_item(from, kind, lan_item.offer.flags, tag, metadata, payload, store, paths, true)?;
+    let (item, manifest) = build_item(
+        lan_item.offer.item_id,
+        from,
+        kind,
+        lan_item.offer.flags,
+        tag,
+        metadata,
+        payload,
+        store,
+        paths,
+        true,
+    )?;
     persist_item(store, item.clone(), manifest)?;
     if let Ok(content) = item_to_clipboard(&item, store, paths) {
         guard.remember(item.id, content.dedup_tag());
@@ -342,6 +352,7 @@ fn apply_lan(
 }
 
 fn build_item(
+    id: asterism_core::ContentId,
     origin: asterism_core::DeviceId,
     kind: ContentKind,
     flags: u32,
@@ -352,7 +363,6 @@ fn build_item(
     paths: &AppPaths,
     from_lan: bool,
 ) -> anyhow::Result<(ContentItem, Option<FileManifest>)> {
-    let id = asterism_core::ContentId::new();
     let flags = ContentFlags::from_bits_truncate(flags) | ContentFlags::FROM_REMOTE;
     let now = asterism_platform::now_ms();
     match kind {
@@ -576,11 +586,13 @@ async fn apply_remote(
     {
         tag.copy_from_slice(&decoded);
     }
-    if store.find_by_dedup(&tag)?.is_some() {
+    let remote_id: asterism_core::ContentId = dto.id.parse()?;
+    if store.contains(remote_id)? {
         return Ok(());
     }
     let kind = ContentKind::parse(&dto.kind).unwrap_or(ContentKind::Text);
     let (item, manifest) = build_item(
+        remote_id,
         dto.origin_device_id,
         kind,
         dto.flags,
@@ -710,6 +722,7 @@ mod tests {
         let store = Store::open(&paths.data_dir).unwrap();
 
         let (item, received_manifest) = build_item(
+            asterism_core::ContentId::new(),
             asterism_core::DeviceId::new(),
             ContentKind::Files,
             ContentFlags::REMOTE_ALLOWED.bits(),

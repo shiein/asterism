@@ -118,8 +118,8 @@ impl Store {
         self.readers.with(|conn| repo::get_item(conn, id))
     }
 
-    pub fn find_by_dedup(&self, tag: &[u8; 32]) -> Result<Option<ContentId>> {
-        self.readers.with(|conn| repo::find_by_dedup(conn, tag))
+    pub fn contains(&self, id: ContentId) -> Result<bool> {
+        self.readers.with(|conn| repo::contains_item(conn, id))
     }
 
     pub fn history(&self, query: HistoryQuery) -> Result<Vec<ContentItem>> {

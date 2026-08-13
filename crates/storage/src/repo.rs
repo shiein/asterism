@@ -112,23 +112,13 @@ pub fn get_item(conn: &Connection, id: ContentId) -> Result<ContentItem> {
     Ok(item)
 }
 
-pub fn find_by_dedup(conn: &Connection, tag: &[u8; 32]) -> Result<Option<ContentId>> {
-    let id: Option<Vec<u8>> = conn
-        .query_row(
-            "SELECT id FROM content_items WHERE dedup_tag = ?1 ORDER BY created_at_ms DESC LIMIT 1",
-            params![tag.as_slice()],
-            |row| row.get(0),
-        )
-        .optional()?;
-    match id {
-        Some(bytes) if bytes.len() == 16 => {
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(&bytes);
-            Ok(Some(ContentId::from_bytes(arr)))
-        }
-        Some(_) => Err(StorageError::from(asterism_core::CoreError::InvalidUuid)),
-        None => Ok(None),
-    }
+pub fn contains_item(conn: &Connection, id: ContentId) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM content_items WHERE id = ?1)",
+        params![id.as_bytes().as_slice()],
+        |row| row.get(0),
+    )
+    .map_err(StorageError::from)
 }
 
 pub fn list_history(conn: &Connection, query: &HistoryQuery) -> Result<Vec<ContentItem>> {

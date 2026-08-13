@@ -105,9 +105,6 @@ fn persist(
     device_id: DeviceId,
     content: NormalizedContent,
 ) -> anyhow::Result<Option<ContentItem>> {
-    if store.find_by_dedup(&content.dedup_tag())?.is_some() {
-        return Ok(None);
-    }
     let now = asterism_platform::now_ms();
     let item = match content {
         NormalizedContent::Text { .. } => content.into_item(device_id, now),
@@ -152,9 +149,6 @@ pub fn persist_item(
     item: ContentItem,
     manifest: Option<asterism_core::FileManifest>,
 ) -> anyhow::Result<()> {
-    if store.find_by_dedup(&item.dedup_tag)?.is_some() {
-        return Ok(());
-    }
     store.insert(item, manifest)?;
     Ok(())
 }
@@ -230,5 +224,38 @@ fn load_bytes(item: &ContentItem, store: &Store) -> anyhow::Result<Vec<u8>> {
         PayloadRef::Inline { bytes } => Ok(bytes.to_vec()),
         PayloadRef::Blob { blob_id } => Ok(store.get_blob(blob_id)?),
         PayloadRef::FileManifest { .. } => anyhow::bail!("expected blob payload"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_user_copy_creates_a_new_history_item() {
+        let root = std::env::temp_dir()
+            .join(format!("asterism-repeat-copy-{}", asterism_core::ContentId::new()));
+        let paths = AppPaths {
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            config_dir: root.join("config"),
+        };
+        paths.ensure().unwrap();
+        let store = Store::open(&paths.data_dir).unwrap();
+        let device = DeviceId::new();
+        let content = NormalizedContent::Text {
+            text: "copy again".into(),
+            dedup_tag: asterism_crypto::local_dedup_tag(b"copy again"),
+            flags: ContentFlags::REMOTE_ALLOWED,
+            source_app: None,
+        };
+
+        let first = persist(&store, &paths, device, content.clone()).unwrap().unwrap();
+        let second = persist(&store, &paths, device, content).unwrap().unwrap();
+
+        assert_ne!(first.id, second.id);
+        assert_eq!(store.history(asterism_storage::HistoryQuery::recent(10)).unwrap().len(), 2);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
