@@ -77,6 +77,7 @@ pub fn migrate(db_path: &Path) -> Result<()> {
             ON content_refs(account_id, created_at_ms DESC);
         "#,
     )?;
+    let _ = conn.execute("ALTER TABLE pairings ADD COLUMN avk_wrap TEXT", []);
     conn.execute(
         "INSERT OR REPLACE INTO sqlite_sequence(name, seq) SELECT 'schema', 1 WHERE 0",
         [],

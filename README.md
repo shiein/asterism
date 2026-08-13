@@ -27,10 +27,10 @@ Windows Desktop  ◄── LAN TLS ──►  macOS Desktop
 
 1. Core / 本地历史 / Windows+macOS 剪贴板 / 敏感策略 / Desktop UI  
 2. 设备证书、mDNS、LAN TCP+TLS、文件分块流、Hub client  
-3. Hub 配对/会话/设备/密文历史/Blob/WSS 中继；Desktop 捕获后自动加密上传并拉取远端；Web/内嵌页可配对浏览  
-4. 冻结 Overlay 选区、标注导出、滚动拼接  
-5. GIF 会话、视频/音频状态机  
-6. 崩溃标记、缓存淘汰、macOS LaunchAgent 草稿
+3. Hub 配对/会话/设备/密文历史/Blob/WSS 中继；LAN Direct 真传；文件归档跨端；AVK 经配对码包装传递  
+4. 窗口/选区截图、标注 Undo/导出、滚动拼接  
+5. GIF / Motion-JPEG AVI 录制入口  
+6. 崩溃锁、缓存淘汰、Hub 安装脚本、macOS 开机启动
 
 ## 开发
 

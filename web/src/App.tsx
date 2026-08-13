@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { HubApi, type HistoryItem } from "./api";
 import { decryptPackage, loadUnlock, persistUnlock, vaultReady, wipeUnlock } from "./crypto";
 import { LocalIndex } from "./search";
+import { clearIndex, loadShard, saveShard } from "./search/idb";
 
 const DEVICE_ID_KEY = "asterism.web.device_id";
 
@@ -47,6 +48,8 @@ export function App() {
           index.add(it.id, text);
         }
         setIndexed(index.size);
+        void saveShard("cursor", list.at(-1)?.created_at_ms ?? 0);
+        void saveShard("count", index.size);
       })
       .catch((e) => setError(String(e)));
   }, [api, token, index]);
@@ -104,6 +107,8 @@ export function App() {
             setToken("");
             localStorage.removeItem("asterism.token");
             setItems([]);
+            void clearIndex();
+            void loadShard("cursor");
           }}
         >
           退出

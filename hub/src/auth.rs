@@ -25,6 +25,7 @@ pub struct SessionRes {
     pub token: String,
     pub account_id: AccountId,
     pub device_id: DeviceId,
+    pub avk_wrapped_hex: Option<String>,
 }
 
 pub async fn pairing_start(
@@ -50,15 +51,16 @@ pub async fn pairing_finish(
     let now = now_ms();
     let hash = hash_code(&req.code);
     let db = state.db.lock();
-    let row: Option<(Vec<u8>, i64, Option<i64>)> = db
+    type PairRow = (Vec<u8>, i64, Option<i64>, Option<String>);
+    let row: Option<PairRow> = db
         .query_row(
-            "SELECT account_id, expires_at_ms, consumed_at_ms FROM pairings WHERE code_hash = ?1",
+            "SELECT account_id, expires_at_ms, consumed_at_ms, avk_wrap FROM pairings WHERE code_hash = ?1",
             [hash.as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let Some((account_raw, exp, consumed)) = row else {
+    let Some((account_raw, exp, consumed, avk_wrap)) = row else {
         return Err(StatusCode::NOT_FOUND);
     };
     if consumed.is_some() || exp < now {
@@ -88,7 +90,7 @@ pub async fn pairing_finish(
         ],
     )
     .map_err(|_| StatusCode::CONFLICT)?;
-    issue_session(&db, req.device_id, account, now)
+    issue_session(&db, req.device_id, account, now, avk_wrap)
         .map(Json)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -126,7 +128,31 @@ pub async fn session(
         token,
         account_id: AccountId::from_bytes(account_id),
         device_id: DeviceId::from_bytes(device_id),
+        avk_wrapped_hex: None,
     }))
+}
+
+#[derive(Deserialize)]
+pub struct AvkDeposit {
+    pub code: String,
+    pub wrapped_hex: String,
+}
+
+pub async fn deposit_avk(
+    State(state): State<Arc<HubState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<AvkDeposit>,
+) -> Result<StatusCode, StatusCode> {
+    let _ = auth_token(&state, crate::device::bearer(&headers), None)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let hash = hash_code(&req.code);
+    let db = state.db.lock();
+    db.execute(
+        "UPDATE pairings SET avk_wrap = ?1 WHERE code_hash = ?2 AND consumed_at_ms IS NULL",
+        rusqlite::params![req.wrapped_hex, hash.as_slice()],
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub fn auth_token(
@@ -167,6 +193,7 @@ fn issue_session(
     device: DeviceId,
     account: AccountId,
     now: i64,
+    avk_wrapped_hex: Option<String>,
 ) -> anyhow::Result<SessionRes> {
     let token = generate_session_token();
     let hash = hash_token(&token);
@@ -174,7 +201,7 @@ fn issue_session(
         "INSERT INTO sessions (token_hash, device_id, created_at_ms, expires_at_ms, revoked_at_ms) VALUES (?1, ?2, ?3, ?4, NULL)",
         rusqlite::params![hash.as_slice(), device.as_bytes().as_slice(), now, now + SESSION_TTL_MS],
     )?;
-    Ok(SessionRes { token, account_id: account, device_id: device })
+    Ok(SessionRes { token, account_id: account, device_id: device, avk_wrapped_hex })
 }
 
 fn ensure_account(db: &rusqlite::Connection, now: i64) -> anyhow::Result<AccountId> {

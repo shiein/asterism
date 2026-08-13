@@ -74,6 +74,7 @@ fn router(state: Arc<HubState>) -> Router {
         .route("/api/v1/auth/session", post(auth::session))
         .route("/api/v1/pairing/start", post(auth::pairing_start))
         .route("/api/v1/pairing/finish", post(auth::pairing_finish))
+        .route("/api/v1/pairing/avk", post(auth::deposit_avk))
         .route("/api/v1/devices", get(device::list))
         .route("/api/v1/devices/{id}", delete(device::revoke))
         .route("/api/v1/history", get(history::list).post(history::create))

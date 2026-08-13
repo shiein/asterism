@@ -157,6 +157,29 @@ pub fn capture_fullscreen(state: State<'_, DesktopState>) -> Result<String, CmdE
     item.payload_ref = asterism_core::PayloadRef::Blob { blob_id: blob };
     item.logical_size = png.len() as u64;
     item.payload_size = png.len() as u64;
+    insert_screenshot(&state, png, frame.width, frame.height)
+}
+
+pub fn insert_screenshot(
+    state: &DesktopState,
+    png: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> Result<String, CmdError> {
+    let blob = state.store.put_blob(&png).map_err(|e| CmdError::Any(e.to_string()))?;
+    let mut item = asterism_clipboard::NormalizedContent::Image {
+        png: Vec::new(),
+        width,
+        height,
+        dedup_tag: asterism_crypto::local_dedup_tag(&png),
+        flags: asterism_core::ContentFlags::REMOTE_ALLOWED,
+        source_app: Some("asterism".into()),
+    }
+    .into_item(state.identity.device_id, asterism_platform::now_ms());
+    item.kind = asterism_core::ContentKind::Screenshot;
+    item.payload_ref = asterism_core::PayloadRef::Blob { blob_id: blob };
+    item.logical_size = png.len() as u64;
+    item.payload_size = png.len() as u64;
     let id = state.store.insert(item.clone(), None).map_err(|e| CmdError::Any(e.to_string()))?;
     state.sync.notify_local(item);
     Ok(id.to_string())
@@ -177,23 +200,7 @@ pub fn capture_region(state: State<'_, DesktopState>) -> Result<String, CmdError
     let (w, h, bgra) =
         session.crop_bgra().ok_or_else(|| CmdError::Any("empty selection".into()))?;
     let png = export_png(w, h, &bgra, &AnnotationScene::default()).map_err(CmdError::Any)?;
-    let blob = state.store.put_blob(&png).map_err(|e| CmdError::Any(e.to_string()))?;
-    let mut item = asterism_clipboard::NormalizedContent::Image {
-        png: Vec::new(),
-        width: w,
-        height: h,
-        dedup_tag: asterism_crypto::local_dedup_tag(&png),
-        flags: asterism_core::ContentFlags::REMOTE_ALLOWED,
-        source_app: Some("asterism".into()),
-    }
-    .into_item(state.identity.device_id, asterism_platform::now_ms());
-    item.kind = asterism_core::ContentKind::Screenshot;
-    item.payload_ref = asterism_core::PayloadRef::Blob { blob_id: blob };
-    item.logical_size = png.len() as u64;
-    item.payload_size = png.len() as u64;
-    let id = state.store.insert(item.clone(), None).map_err(|e| CmdError::Any(e.to_string()))?;
-    state.sync.notify_local(item);
-    Ok(id.to_string())
+    insert_screenshot(&state, png, w, h)
 }
 
 #[tauri::command]
@@ -251,6 +258,40 @@ pub fn import_recovery(state: State<'_, DesktopState>, hex_key: String) -> Resul
     std::fs::write(state.paths.config_dir.join("vault.json"), file.to_string())
         .map_err(|e| CmdError::Any(e.to_string()))?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn enable_autostart() -> Result<String, CmdError> {
+    let exe = std::env::current_exe().map_err(|e| CmdError::Any(e.to_string()))?;
+    let path = asterism_platform::hardening::write_autostart_plist("dev.asterism.desktop", &exe)
+        .map_err(|e| CmdError::Any(e.to_string()))?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+pub async fn publish_pairing_avk(
+    state: State<'_, DesktopState>,
+    code: String,
+) -> Result<(), CmdError> {
+    let settings = state.sync.settings.lock().clone();
+    let url = settings.hub_url.ok_or_else(|| CmdError::Any("no hub".into()))?;
+    let token = settings.token.ok_or_else(|| CmdError::Any("no token".into()))?;
+    let wrap_key =
+        asterism_crypto::AccountVaultKey::from_bytes(asterism_sync::pairing::hash_code(&code));
+    let wrapped = asterism_crypto::encrypt_metadata(&wrap_key, state.vault.avk.as_bytes())
+        .map_err(|e| CmdError::Any(e.to_string()))?;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{url}/api/v1/pairing/avk"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "code": code,
+            "wrapped_hex": hex::encode(serde_json::to_vec(&wrapped).unwrap_or_default())
+        }))
+        .send()
+        .await
+        .map_err(|e| CmdError::Any(e.to_string()))?;
+    if res.status().is_success() { Ok(()) } else { Err(CmdError::Any(res.status().to_string())) }
 }
 
 fn to_dto(item: asterism_core::ContentItem) -> HistoryItemDto {

@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 mod actions;
+mod capture_cmds;
 mod commands;
 mod runtime;
 mod settings;
@@ -41,6 +42,14 @@ pub fn run() {
             commands::hub_pairing_code,
             commands::hub_devices,
             commands::import_recovery,
+            commands::enable_autostart,
+            commands::publish_pairing_avk,
+            capture_cmds::list_windows,
+            capture_cmds::capture_window,
+            capture_cmds::export_annotated,
+            capture_cmds::record_gif,
+            capture_cmds::record_video,
+            capture_cmds::scroll_capture,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Asterism desktop");

@@ -63,6 +63,15 @@ export function SettingsPage() {
           连接并注册本机
         </button>
         <button onClick={() => void pair.mutate()}>生成浏览器配对码</button>
+        <button
+          onClick={() => {
+            const code = pair.data;
+            if (code) void invoke("publish_pairing_avk", { code });
+          }}
+        >
+          把 AVK 附到配对码
+        </button>
+        <button onClick={() => void invoke("enable_autostart")}>开机启动</button>
       </div>
       {connect.data && <p className="sub">已连接。首次配对码：{connect.data}</p>}
       {pair.data && <p className="sub">浏览器配对码：{pair.data}</p>}
