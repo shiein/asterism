@@ -3,7 +3,7 @@ use axum::response::{Html, IntoResponse, Response};
 use rust_embed::Embed;
 
 #[derive(Embed)]
-#[folder = "webroot/"]
+#[folder = "../web/dist/"]
 struct Asset;
 
 pub async fn asset(uri: Uri) -> Response {
@@ -35,5 +35,18 @@ fn mime_guess(path: &str) -> &'static str {
         "image/png"
     } else {
         "text/html; charset=utf-8"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embeds_built_react_application() {
+        let index = Asset::get("index.html").expect("embedded index.html");
+        let html = std::str::from_utf8(&index.data).unwrap();
+        assert!(html.contains("id=\"root\""));
+        assert!(Asset::iter().any(|path| path.starts_with("assets/") && path.ends_with(".js")));
     }
 }
