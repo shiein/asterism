@@ -205,7 +205,11 @@ pub fn scroll_capture(state: State<'_, DesktopState>, frames: u32) -> Result<Str
                 bgra,
                 monitor: frame.monitor,
             };
-            let _ = engine.push(&cropped);
+            let confidence = engine.push(&cropped).map_err(|e| CmdError::Any(e.to_string()))?;
+            if engine.should_stop_auto() {
+                tracing::warn!(confidence, "scroll capture stopped after low-confidence matches");
+                break;
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(280));
     }
