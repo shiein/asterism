@@ -11,6 +11,7 @@ dist-ssr/
 .vite/
 .turbo/
 .pnpm-store/
+*.tsbuildinfo
 
 # Tauri / desktop
 desktop/src-tauri/gen/
