@@ -143,20 +143,6 @@ pub fn capture_fullscreen(state: State<'_, DesktopState>) -> Result<String, CmdE
     let frame = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
     let png = export_png(frame.width, frame.height, &frame.bgra, &AnnotationScene::default())
         .map_err(CmdError::Any)?;
-    let blob = state.store.put_blob(&png).map_err(|e| CmdError::Any(e.to_string()))?;
-    let mut item = asterism_clipboard::NormalizedContent::Image {
-        png: Vec::new(),
-        width: frame.width,
-        height: frame.height,
-        dedup_tag: asterism_crypto::local_dedup_tag(&png),
-        flags: asterism_core::ContentFlags::REMOTE_ALLOWED,
-        source_app: Some("asterism".into()),
-    }
-    .into_item(state.identity.device_id, asterism_platform::now_ms());
-    item.kind = asterism_core::ContentKind::Screenshot;
-    item.payload_ref = asterism_core::PayloadRef::Blob { blob_id: blob };
-    item.logical_size = png.len() as u64;
-    item.payload_size = png.len() as u64;
     insert_screenshot(&state, png, frame.width, frame.height)
 }
 
