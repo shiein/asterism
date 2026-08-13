@@ -1,11 +1,55 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use asterism_core::content::sanitize_relative_path;
+use asterism_core::content::{FileManifest, sanitize_relative_path};
 
 use crate::error::{Result, SyncError};
 
 const MAGIC: &[u8; 4] = b"ASF1";
+const BUNDLE_MAGIC: &[u8; 4] = b"ASB2";
+
+pub fn pack_file_bundle(manifest: &FileManifest, root: &Path) -> Result<Vec<u8>> {
+    let manifest_json = serde_json::to_vec(manifest)
+        .map_err(|err| SyncError::Protocol(format!("encode file manifest: {err}")))?;
+    let manifest_len = u32::try_from(manifest_json.len())
+        .map_err(|_| SyncError::Protocol("file manifest is too large".into()))?;
+    let archive = pack_tree(root)?;
+    let mut out = Vec::with_capacity(8 + manifest_json.len() + archive.len());
+    out.extend_from_slice(BUNDLE_MAGIC);
+    out.extend_from_slice(&manifest_len.to_le_bytes());
+    out.extend_from_slice(&manifest_json);
+    out.extend_from_slice(&archive);
+    Ok(out)
+}
+
+pub fn unpack_file_bundle(bytes: &[u8], dest: &Path) -> Result<(FileManifest, Vec<PathBuf>)> {
+    if bytes.len() < 8 || &bytes[..4] != BUNDLE_MAGIC {
+        return Err(SyncError::Protocol("bad file bundle magic".into()));
+    }
+    let manifest_len = u32::from_le_bytes(bytes[4..8].try_into().expect("fixed slice")) as usize;
+    let archive_offset =
+        8usize
+            .checked_add(manifest_len)
+            .filter(|offset| *offset <= bytes.len())
+            .ok_or_else(|| SyncError::Protocol("truncated file bundle manifest".into()))?;
+    let manifest: FileManifest = serde_json::from_slice(&bytes[8..archive_offset])
+        .map_err(|err| SyncError::Protocol(format!("decode file manifest: {err}")))?;
+    validate_manifest(&manifest)?;
+    let roots = unpack_tree(&bytes[archive_offset..], dest)?;
+    Ok((manifest, roots))
+}
+
+fn validate_manifest(manifest: &FileManifest) -> Result<()> {
+    for entry in &manifest.entries {
+        sanitize_relative_path(&entry.relative_path)
+            .map_err(|err| SyncError::Failed(err.to_string()))?;
+    }
+    for entry in &manifest.unsupported {
+        sanitize_relative_path(&entry.relative_path)
+            .map_err(|err| SyncError::Failed(err.to_string()))?;
+    }
+    Ok(())
+}
 
 /// 将缓存目录打成自描述归档，不跟随 symlink。
 pub fn pack_tree(root: &Path) -> Result<Vec<u8>> {
@@ -118,5 +162,30 @@ mod tests {
         unpack_tree(&packed, out.path()).unwrap();
         assert_eq!(std::fs::read(out.path().join("a.txt")).unwrap(), b"hi");
         assert_eq!(std::fs::read(out.path().join("sub/b.txt")).unwrap(), b"there");
+    }
+
+    #[test]
+    fn file_bundle_preserves_manifest_and_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hi").unwrap();
+        let manifest = asterism_core::FileManifest {
+            id: asterism_core::ManifestId::new(),
+            root_name: "a.txt".into(),
+            entries: vec![asterism_core::FileEntry {
+                relative_path: "a.txt".into(),
+                size: 2,
+                kind: asterism_core::FileEntryKind::File,
+                blob_id: None,
+            }],
+            unsupported: Vec::new(),
+        };
+        let packed = pack_file_bundle(&manifest, dir.path()).unwrap();
+        let out = tempfile::tempdir().unwrap();
+
+        let (restored, roots) = unpack_file_bundle(&packed, out.path()).unwrap();
+
+        assert_eq!(restored, manifest);
+        assert_eq!(roots, vec![out.path().join("a.txt")]);
+        assert_eq!(std::fs::read(&roots[0]).unwrap(), b"hi");
     }
 }

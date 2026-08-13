@@ -18,7 +18,7 @@ use asterism_sync::pairing::PairingFinish;
 use asterism_sync::protocol::{Envelope, ItemOffer, ItemReady, LanItem, MessageBody};
 use asterism_sync::{
     DeviceCert, decode_package, decrypt_blob_chunks, encode_package, encrypt_blob_chunks, pack,
-    pack_tree, unpack_body, unpack_meta, unpack_tree,
+    pack_file_bundle, unpack_body, unpack_file_bundle, unpack_meta, unpack_tree,
 };
 use mdns_sd::ServiceEvent;
 use parking_lot::Mutex;
@@ -282,9 +282,9 @@ fn apply_lan(
     }
     let metadata: ItemMetadata = serde_json::from_str(&lan_item.metadata_json).unwrap_or_default();
     let kind = ContentKind::parse(&lan_item.offer.kind).unwrap_or(ContentKind::Text);
-    let item =
+    let (item, manifest) =
         build_item(from, kind, lan_item.offer.flags, tag, metadata, payload, store, paths, true)?;
-    persist_item(store, item.clone(), None)?;
+    persist_item(store, item.clone(), manifest)?;
     if let Ok(content) = item_to_clipboard(&item, store, paths) {
         guard.remember(item.id, content.dedup_tag());
         let _ = NativeClipboard.write(&content);
@@ -302,32 +302,13 @@ fn build_item(
     store: &Store,
     paths: &AppPaths,
     from_lan: bool,
-) -> anyhow::Result<ContentItem> {
+) -> anyhow::Result<(ContentItem, Option<FileManifest>)> {
     let id = asterism_core::ContentId::new();
     let flags = ContentFlags::from_bits_truncate(flags) | ContentFlags::FROM_REMOTE;
     let now = asterism_platform::now_ms();
     match kind {
-        ContentKind::Text => Ok(ContentItem {
-            id,
-            origin_device_id: origin,
-            kind,
-            created_at_ms: now,
-            logical_size: bytes.len() as u64,
-            payload_size: bytes.len() as u64,
-            dedup_tag: tag,
-            flags,
-            status: if from_lan {
-                asterism_core::ContentStatus::DeliveredToPeer
-            } else {
-                asterism_core::ContentStatus::SyncedToHub
-            },
-            metadata,
-            payload_ref: PayloadRef::Inline { bytes: bytes::Bytes::from(bytes) },
-            encrypted_metadata: bytes::Bytes::new(),
-        }),
-        ContentKind::Image | ContentKind::Screenshot | ContentKind::Gif | ContentKind::Video => {
-            let blob = store.put_blob(&bytes)?;
-            Ok(ContentItem {
+        ContentKind::Text => Ok((
+            ContentItem {
                 id,
                 origin_device_id: origin,
                 kind,
@@ -336,43 +317,66 @@ fn build_item(
                 payload_size: bytes.len() as u64,
                 dedup_tag: tag,
                 flags,
-                status: asterism_core::ContentStatus::SyncedToHub,
+                status: if from_lan {
+                    asterism_core::ContentStatus::DeliveredToPeer
+                } else {
+                    asterism_core::ContentStatus::SyncedToHub
+                },
                 metadata,
-                payload_ref: PayloadRef::Blob { blob_id: blob },
+                payload_ref: PayloadRef::Inline { bytes: bytes::Bytes::from(bytes) },
                 encrypted_metadata: bytes::Bytes::new(),
-            })
+            },
+            None,
+        )),
+        ContentKind::Image | ContentKind::Screenshot | ContentKind::Gif | ContentKind::Video => {
+            let blob = store.put_blob(&bytes)?;
+            Ok((
+                ContentItem {
+                    id,
+                    origin_device_id: origin,
+                    kind,
+                    created_at_ms: now,
+                    logical_size: bytes.len() as u64,
+                    payload_size: bytes.len() as u64,
+                    dedup_tag: tag,
+                    flags,
+                    status: asterism_core::ContentStatus::SyncedToHub,
+                    metadata,
+                    payload_ref: PayloadRef::Blob { blob_id: blob },
+                    encrypted_metadata: bytes::Bytes::new(),
+                },
+                None,
+            ))
         }
         ContentKind::Files => {
             let cache = paths.item_cache(id);
-            let unpacked = unpack_tree(&bytes, &cache)?;
-            metadata.local_cache_rel = Some(id.to_string());
-            let _ = unpacked;
-            let _manifest = FileManifest {
-                id: asterism_core::ManifestId::new(),
-                root_name: metadata
-                    .files
-                    .as_ref()
-                    .map(|f| f.root_name.clone())
-                    .unwrap_or_else(|| "files".into()),
-                entries: Vec::new(),
-                unsupported: Vec::new(),
+            let manifest = match unpack_file_bundle(&bytes, &cache) {
+                Ok((manifest, _)) => manifest,
+                Err(_) => {
+                    let roots = unpack_tree(&bytes, &cache)?;
+                    asterism_clipboard::preflight_paths(&roots)?
+                }
             };
-            Ok(ContentItem {
-                id,
-                origin_device_id: origin,
-                kind,
-                created_at_ms: now,
-                logical_size: bytes.len() as u64,
-                payload_size: bytes.len() as u64,
-                dedup_tag: tag,
-                flags,
-                status: asterism_core::ContentStatus::SyncedToHub,
-                metadata,
-                payload_ref: PayloadRef::FileManifest {
-                    manifest_id: asterism_core::ManifestId::new(),
+            metadata.local_cache_rel = Some(id.to_string());
+            metadata.files = Some(manifest.summary());
+            let manifest_id = manifest.id;
+            Ok((
+                ContentItem {
+                    id,
+                    origin_device_id: origin,
+                    kind,
+                    created_at_ms: now,
+                    logical_size: bytes.len() as u64,
+                    payload_size: bytes.len() as u64,
+                    dedup_tag: tag,
+                    flags,
+                    status: asterism_core::ContentStatus::SyncedToHub,
+                    metadata,
+                    payload_ref: PayloadRef::FileManifest { manifest_id },
+                    encrypted_metadata: bytes::Bytes::new(),
                 },
-                encrypted_metadata: bytes::Bytes::new(),
-            })
+                Some(manifest),
+            ))
         }
         other => anyhow::bail!("unsupported kind {other}"),
     }
@@ -526,7 +530,7 @@ async fn apply_remote(
         return Ok(());
     }
     let kind = ContentKind::parse(&dto.kind).unwrap_or(ContentKind::Text);
-    let item = build_item(
+    let (item, manifest) = build_item(
         dto.origin_device_id,
         kind,
         dto.flags,
@@ -537,7 +541,7 @@ async fn apply_remote(
         paths,
         false,
     )?;
-    persist_item(store, item.clone(), None)?;
+    persist_item(store, item.clone(), manifest)?;
     if let Ok(content) = item_to_clipboard(&item, store, paths) {
         guard.remember(item.id, content.dedup_tag());
         let _ = NativeClipboard.write(&content);
@@ -553,14 +557,19 @@ fn load_payload(
     match &item.payload_ref {
         PayloadRef::Inline { bytes } => Ok(Some(bytes.to_vec())),
         PayloadRef::Blob { blob_id } => Ok(Some(store.get_blob(blob_id)?)),
-        PayloadRef::FileManifest { .. } => {
+        PayloadRef::FileManifest { manifest_id } => {
             let cache = item
                 .metadata
                 .local_cache_rel
                 .as_ref()
                 .map(|rel| paths.cache_dir.join("items").join(rel))
                 .unwrap_or_else(|| paths.item_cache(item.id));
-            if cache.exists() { Ok(Some(pack_tree(&cache)?)) } else { Ok(None) }
+            if cache.exists() {
+                let manifest = store.load_manifest(*manifest_id)?;
+                Ok(Some(pack_file_bundle(&manifest, &cache)?))
+            } else {
+                Ok(None)
+            }
         }
     }
 }
@@ -620,6 +629,7 @@ pub async fn start_pairing_code(settings: &SyncSettings) -> anyhow::Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asterism_clipboard::NormalizedContent;
 
     #[test]
     fn pairing_wrap_recovers_avk() {
@@ -630,5 +640,47 @@ mod tests {
         let encoded = hex::encode(serde_json::to_vec(&wrapped).unwrap());
         let actual = unwrap_pairing_avk(code, &encoded).unwrap();
         assert_eq!(actual.as_bytes(), expected.as_bytes());
+    }
+
+    #[test]
+    fn received_file_bundle_rebuilds_native_clipboard_item() {
+        let root = std::env::temp_dir()
+            .join(format!("asterism-received-files-{}", asterism_core::ContentId::new()));
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("note.txt"), b"hello").unwrap();
+        let manifest = asterism_clipboard::preflight_paths(&[source.join("note.txt")]).unwrap();
+        let bundle = pack_file_bundle(&manifest, &source).unwrap();
+        let paths = AppPaths {
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            config_dir: root.join("config"),
+        };
+        paths.ensure().unwrap();
+        let store = Store::open(&paths.data_dir).unwrap();
+
+        let (item, received_manifest) = build_item(
+            asterism_core::DeviceId::new(),
+            ContentKind::Files,
+            ContentFlags::REMOTE_ALLOWED.bits(),
+            [7; 32],
+            ItemMetadata::default(),
+            bundle,
+            &store,
+            &paths,
+            false,
+        )
+        .unwrap();
+        persist_item(&store, item.clone(), received_manifest).unwrap();
+        let clipboard = item_to_clipboard(&item, &store, &paths).unwrap();
+
+        let NormalizedContent::Files { paths: files, manifest: restored, .. } = clipboard else {
+            panic!("expected files clipboard item");
+        };
+        assert_eq!(restored, manifest);
+        assert_eq!(files.len(), 1);
+        assert_eq!(std::fs::read(&files[0]).unwrap(), b"hello");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
