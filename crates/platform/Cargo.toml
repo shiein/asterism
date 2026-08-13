@@ -1,0 +1,21 @@
+[package]
+name = "asterism-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "OS paths, network change hooks, and best-effort foreground process"
+
+[dependencies]
+asterism-core.workspace = true
+directories.workspace = true
+hostname = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace"] }
+objc2-foundation = { version = "0.3", features = ["NSString"] }
