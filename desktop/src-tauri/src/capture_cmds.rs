@@ -103,7 +103,8 @@ pub async fn record_gif(
 fn record_gif_inner(seconds: u32, fps: u16) -> Result<(Vec<u8>, u32, u32), CmdError> {
     let backend = XcapBackend;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
-    let monitor = monitors.first().ok_or_else(|| CmdError::Any("no monitor".into()))?;
+    let monitor = asterism_capture::preferred_monitor(&monitors)
+        .ok_or_else(|| CmdError::Any("no monitor".into()))?;
     let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
     let sel = crate::overlay_cli::select_region_subprocess(&first).map_err(|e| CmdError::Any(e.to_string()))?;
     let session = OverlaySession { frame: first.clone(), selection: sel };
@@ -146,7 +147,8 @@ fn record_video_inner(
     let backend = XcapBackend;
     backend.permission_preflight().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
-    let monitor = monitors.first().ok_or_else(|| CmdError::Any("no monitor".into()))?;
+    let monitor = asterism_capture::preferred_monitor(&monitors)
+        .ok_or_else(|| CmdError::Any("no monitor".into()))?;
     let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
     let sel = crate::overlay_cli::select_region_subprocess(&first).map_err(|e| CmdError::Any(e.to_string()))?;
     let session = OverlaySession { frame: first, selection: sel };
@@ -221,7 +223,8 @@ pub async fn scroll_capture(state: State<'_, DesktopState>, frames: u32) -> Resu
 fn scroll_capture_inner(frames: u32) -> Result<(Vec<u8>, u32, u32), CmdError> {
     let backend = XcapBackend;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
-    let monitor = monitors.first().ok_or_else(|| CmdError::Any("no monitor".into()))?;
+    let monitor = asterism_capture::preferred_monitor(&monitors)
+        .ok_or_else(|| CmdError::Any("no monitor".into()))?;
     let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
     let sel = crate::overlay_cli::select_region_subprocess(&first).map_err(|e| CmdError::Any(e.to_string()))?;
     let mut engine = asterism_capture::ScrollCaptureEngine::default();

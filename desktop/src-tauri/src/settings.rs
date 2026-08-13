@@ -40,16 +40,42 @@ impl SyncSettings {
     }
 
     pub fn load(config_dir: &Path) -> Self {
+        match Self::try_load(config_dir) {
+            Ok(settings) => settings,
+            Err(err) => {
+                tracing::error!(error = %err, "refusing to overwrite a corrupt sync.toml");
+                Self::default()
+            }
+        }
+    }
+
+    pub fn try_load(config_dir: &Path) -> std::io::Result<Self> {
         let path = Self::path(config_dir);
-        let Ok(raw) = std::fs::read_to_string(path) else {
-            return Self::default();
-        };
-        toml::from_str(&raw).unwrap_or_default()
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = std::fs::read_to_string(&path)?;
+        toml::from_str(&raw).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid sync.toml: {err}"),
+            )
+        })
     }
 
     pub fn save(&self, config_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(config_dir)?;
-        std::fs::write(Self::path(config_dir), toml::to_string_pretty(self).unwrap_or_default())
+        let path = Self::path(config_dir);
+        let bytes = toml::to_string_pretty(self).map_err(|err| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
+        })?;
+        asterism_platform::atomic::atomic_write(&path, bytes.as_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
     }
 
     pub fn hub_ready(&self) -> bool {

@@ -134,6 +134,31 @@ impl CaptureBackend for XcapBackend {
     }
 }
 
+fn cursor_point() -> Option<(i32, i32)> {
+    #[cfg(target_os = "macos")]
+    {
+        return crate::macos_perm::cursor_point();
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// 优先光标所在屏，否则主屏（list_monitors 已把 primary 排到前面）。
+pub fn preferred_monitor(monitors: &[MonitorInfo]) -> Option<&MonitorInfo> {
+    if let Some((x, y)) = cursor_point()
+        && let Some(hit) = monitors.iter().find(|m| contains_point(m, x, y))
+    {
+        return Some(hit);
+    }
+    monitors.first()
+}
+
+fn contains_point(monitor: &MonitorInfo, x: i32, y: i32) -> bool {
+    let (ox, oy) = monitor.origin_physical;
+    let (w, h) = monitor.capture_size;
+    x >= ox && y >= oy && x < ox.saturating_add(w as i32) && y < oy.saturating_add(h as i32)
+}
+
 fn to_info(m: &Monitor) -> MonitorInfo {
     let id = m.id().unwrap_or(0);
     let name = m.name().unwrap_or_default();

@@ -64,17 +64,29 @@ impl BlobStore {
         Ok(())
     }
 
-    pub fn remove_orphans(&self, referenced: &std::collections::HashSet<String>) -> Result<u64> {
+    pub fn remove_orphans(
+        &self,
+        referenced: &std::collections::HashSet<String>,
+        min_age: std::time::Duration,
+    ) -> Result<u64> {
         let root = self.root.join("blobs");
         if !root.exists() {
             return Ok(0);
         }
+        let now = std::time::SystemTime::now();
         let mut removed = 0u64;
         visit_blob_files(&root, &mut |path, name| {
-            if !referenced.contains(name) {
-                let _ = fs::remove_file(path);
-                removed += 1;
+            if referenced.contains(name) {
+                return;
             }
+            let Ok(meta) = fs::metadata(path) else { return };
+            let Ok(modified) = meta.modified() else { return };
+            let age = now.duration_since(modified).unwrap_or_default();
+            if age < min_age {
+                return;
+            }
+            let _ = fs::remove_file(path);
+            removed += 1;
         })?;
         Ok(removed)
     }

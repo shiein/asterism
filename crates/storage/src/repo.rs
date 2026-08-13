@@ -83,16 +83,68 @@ pub fn insert_item(
     Ok(())
 }
 
+pub fn reserve_blob(conn: &Connection, blob_id: &BlobId, now_ms: i64) -> Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO blob_refs (blob_id, ref_count, created_at_ms, last_released_at_ms)
+        VALUES (?1, 0, ?2, NULL)
+        ON CONFLICT(blob_id) DO NOTHING
+        "#,
+        params![blob_id.as_str(), now_ms],
+    )?;
+    Ok(())
+}
+
 fn bump_blob_ref(conn: &Connection, blob_id: &BlobId, now_ms: i64) -> Result<()> {
     conn.execute(
         r#"
         INSERT INTO blob_refs (blob_id, ref_count, created_at_ms, last_released_at_ms)
         VALUES (?1, 1, ?2, NULL)
-        ON CONFLICT(blob_id) DO UPDATE SET ref_count = ref_count + 1
+        ON CONFLICT(blob_id) DO UPDATE SET
+            ref_count = ref_count + 1,
+            last_released_at_ms = CASE WHEN ref_count + 1 > 0 THEN NULL ELSE last_released_at_ms END
         "#,
         params![blob_id.as_str(), now_ms],
     )?;
     Ok(())
+}
+
+pub fn get_cursor(conn: &Connection, scope: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT cursor FROM sync_cursors WHERE scope = ?1",
+        [scope],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(StorageError::from)
+}
+
+pub fn set_cursor(conn: &Connection, scope: &str, cursor: &str, now_ms: i64) -> Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO sync_cursors (scope, cursor, updated_at_ms) VALUES (?1, ?2, ?3)
+        ON CONFLICT(scope) DO UPDATE SET cursor = excluded.cursor, updated_at_ms = excluded.updated_at_ms
+        "#,
+        params![scope, cursor, now_ms],
+    )?;
+    Ok(())
+}
+
+pub fn list_cache_pins(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT metadata_json FROM content_items WHERE payload_kind = 'file_manifest'",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut pins = Vec::new();
+    for row in rows {
+        let json = row?;
+        if let Ok(meta) = serde_json::from_str::<ItemMetadata>(&json)
+            && let Some(rel) = meta.local_cache_rel
+        {
+            pins.push(rel);
+        }
+    }
+    Ok(pins)
 }
 
 pub fn get_item(conn: &Connection, id: ContentId) -> Result<ContentItem> {

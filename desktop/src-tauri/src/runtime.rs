@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::mpsc;
 
 use asterism_clipboard::files::materialize_to_cache;
 use asterism_clipboard::normalize::NormalizedContent;
@@ -22,6 +23,7 @@ pub struct DesktopState {
     pub paths: AppPaths,
     pub clipboard: NativeClipboard,
     pub vault: parking_lot::RwLock<LocalVault>,
+    pub avk: Arc<parking_lot::RwLock<asterism_crypto::AccountVaultKey>>,
     pub sync: SyncHandle,
     #[allow(dead_code)]
     pub watcher: WatcherHandle,
@@ -61,7 +63,26 @@ impl DesktopState {
         );
         let sync_watch = sync.clone();
 
-        let avk = asterism_crypto::AccountVaultKey::from_bytes(*vault.avk.as_bytes());
+        let avk = Arc::new(parking_lot::RwLock::new(asterism_crypto::AccountVaultKey::from_bytes(
+            *vault.avk.as_bytes(),
+        )));
+        let avk_watch = Arc::clone(&avk);
+        let (file_tx, file_rx) = mpsc::channel::<NormalizedContent>();
+        {
+            let store = Arc::clone(&store_task);
+            let paths = paths_task.clone();
+            let sync = sync_watch.clone();
+            let app = app_task.clone();
+            let avk = Arc::clone(&avk_watch);
+            std::thread::Builder::new()
+                .name("asterism-files".into())
+                .spawn(move || {
+                    while let Ok(content) = file_rx.recv() {
+                        persist_captured(&store, &paths, device_id, &avk, &sync, &app, content);
+                    }
+                })
+                .ok();
+        }
         let watcher = spawn_watcher(
             WatcherConfig {
                 device_id,
@@ -72,32 +93,20 @@ impl DesktopState {
             Arc::clone(&guard_task),
             move |event| match event {
                 ClipboardEvent::Captured(content) => {
-                    let persist_one = {
-                        let store = Arc::clone(&store_task);
-                        let paths = paths_task.clone();
-                        let sync = sync_watch.clone();
-                        let app = app_task.clone();
-                        let avk = asterism_crypto::AccountVaultKey::from_bytes(*avk.as_bytes());
-                        move |content: NormalizedContent| {
-                            match persist(&store, &paths, device_id, &avk, content) {
-                                Ok(Some(item)) => {
-                                    sync.notify_local(item);
-                                    let _ = app.emit("history-changed", ());
-                                }
-                                Ok(None) => {}
-                                Err(err) => {
-                                    tracing::warn!(error = %err, "failed to persist clipboard item")
-                                }
-                            }
-                        }
-                    };
                     if matches!(content, NormalizedContent::Files { .. }) {
-                        std::thread::Builder::new()
-                            .name("asterism-files".into())
-                            .spawn(move || persist_one(content))
-                            .ok();
+                        if file_tx.send(content).is_err() {
+                            tracing::warn!("file persist worker stopped");
+                        }
                     } else {
-                        persist_one(content);
+                        persist_captured(
+                            &store_task,
+                            &paths_task,
+                            device_id,
+                            &avk_watch,
+                            &sync_watch,
+                            &app_task,
+                            content,
+                        );
                     }
                 }
                 ClipboardEvent::Ignored => {}
@@ -114,10 +123,31 @@ impl DesktopState {
             paths,
             clipboard: NativeClipboard,
             vault: parking_lot::RwLock::new(vault),
+            avk,
             sync,
             watcher,
             _crash: crash,
         })
+    }
+}
+
+fn persist_captured(
+    store: &Store,
+    paths: &AppPaths,
+    device_id: DeviceId,
+    avk: &parking_lot::RwLock<asterism_crypto::AccountVaultKey>,
+    sync: &crate::sync_engine::SyncHandle,
+    app: &AppHandle,
+    content: NormalizedContent,
+) {
+    let current = asterism_crypto::AccountVaultKey::from_bytes(*avk.read().as_bytes());
+    match persist(store, paths, device_id, &current, content) {
+        Ok(Some(item)) => {
+            sync.notify_local(item);
+            let _ = app.emit("history-changed", ());
+        }
+        Ok(None) => {}
+        Err(err) => tracing::warn!(error = %err, "failed to persist clipboard item"),
     }
 }
 
@@ -147,11 +177,36 @@ fn persist(
             item.payload_size = png.len() as u64;
             item
         }
-        NormalizedContent::Files { paths: sources, manifest, dedup_tag, flags, source_app } => {
+        NormalizedContent::Files { paths: sources, manifest: _, dedup_tag: _, flags, source_app } => {
+            let manifest = asterism_clipboard::preflight_paths(&sources)?;
+            let file_count = manifest.entries.iter().filter(|e| e.kind.is_file()).count() as u64;
+            let logical_size: u64 = manifest.entries.iter().map(|e| e.size).sum();
+            if logical_size > asterism_core::policy::LOCAL_MAX_MATERIALIZE_BYTES {
+                anyhow::bail!("file item exceeds local materialize limit");
+            }
+            let largest = manifest.entries.iter().map(|e| e.size).max().unwrap_or(0);
+            let remote = asterism_core::RemotePolicy::default();
+            let flags = if remote
+                .check_preflight_ext(ContentKind::Files, file_count, logical_size, largest)
+                .is_ok()
+            {
+                flags | ContentFlags::REMOTE_ALLOWED
+            } else {
+                flags
+            };
+            let fingerprint = {
+                let mut buf = Vec::new();
+                for entry in &manifest.entries {
+                    buf.extend_from_slice(entry.relative_path.as_bytes());
+                    buf.push(0);
+                    buf.extend_from_slice(&entry.size.to_le_bytes());
+                }
+                buf
+            };
             let mut item = NormalizedContent::Files {
                 paths: sources.clone(),
                 manifest: manifest.clone(),
-                dedup_tag,
+                dedup_tag: asterism_crypto::local_dedup_tag(&fingerprint),
                 flags,
                 source_app,
             }

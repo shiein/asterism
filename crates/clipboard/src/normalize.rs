@@ -8,7 +8,7 @@ use bytes::Bytes;
 
 use crate::capture::CapturedClipboard;
 use crate::error::{ClipboardError, Result};
-use crate::files::preflight_paths;
+
 use crate::image::normalize_png;
 use crate::sensitive::decide;
 
@@ -156,19 +156,18 @@ pub fn normalize(
     }
 
     if !captured.files.is_empty() {
-        let manifest = preflight_paths(&captured.files)?;
-        let file_count = manifest.entries.iter().filter(|e| e.kind.is_file()).count() as u64;
-        let logical_size: u64 = manifest.entries.iter().map(|e| e.size).sum();
-        if logical_size > asterism_core::policy::LOCAL_MAX_MATERIALIZE_BYTES {
-            return Err(ClipboardError::TooLarge);
-        }
-        let flags = remote_flags(decision.flags(), remote, ContentKind::Files, file_count, logical_size);
-        let fingerprint = manifest_fingerprint(&manifest);
+        // 预检可能枚举十万项，不能堵在 watcher 线程。persist 侧再做 preflight / policy。
+        let fingerprint = path_list_fingerprint(&captured.files);
         return Ok(Some(NormalizedContent::Files {
             paths: captured.files.clone(),
-            manifest,
+            manifest: asterism_core::FileManifest {
+                id: asterism_core::ManifestId::new(),
+                root_name: "pending".into(),
+                entries: Vec::new(),
+                unsupported: Vec::new(),
+            },
             dedup_tag: local_dedup_tag(&fingerprint),
-            flags,
+            flags: decision.flags(),
             source_app: captured.source_app.clone(),
         }));
     }
@@ -215,6 +214,15 @@ pub fn normalize(
     Err(ClipboardError::Unsupported)
 }
 
+fn path_list_fingerprint(paths: &[std::path::PathBuf]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for path in paths {
+        buf.extend_from_slice(path.to_string_lossy().as_bytes());
+        buf.push(0);
+    }
+    buf
+}
+
 fn remote_flags(
     base: ContentFlags,
     remote: &RemotePolicy,
@@ -222,22 +230,11 @@ fn remote_flags(
     file_count: u64,
     logical_size: u64,
 ) -> ContentFlags {
-    if remote.check_preflight(kind, file_count, logical_size).is_ok() {
+    if remote.check_preflight_ext(kind, file_count, logical_size, 0).is_ok() {
         base | ContentFlags::REMOTE_ALLOWED
     } else {
         base
     }
-}
-
-fn manifest_fingerprint(manifest: &asterism_core::FileManifest) -> Vec<u8> {
-    let mut buf = Vec::new();
-    for entry in &manifest.entries {
-        buf.extend_from_slice(entry.relative_path.as_bytes());
-        buf.push(0);
-        buf.extend_from_slice(&entry.size.to_le_bytes());
-        buf.push(0);
-    }
-    buf
 }
 
 #[cfg(test)]

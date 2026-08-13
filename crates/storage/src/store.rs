@@ -41,6 +41,15 @@ enum WriteOp {
         released_before_ms: i64,
         reply: SyncSender<Result<u64>>,
     },
+    PutBlob {
+        bytes: Vec<u8>,
+        reply: SyncSender<Result<BlobId>>,
+    },
+    SetCursor {
+        scope: String,
+        cursor: String,
+        reply: SyncSender<Result<()>>,
+    },
     Shutdown,
 }
 
@@ -156,7 +165,7 @@ impl Store {
     }
 
     pub fn put_blob(&self, bytes: &[u8]) -> Result<BlobId> {
-        self.blobs.put(bytes)
+        self.call(|reply| WriteOp::PutBlob { bytes: bytes.to_vec(), reply })
     }
 
     pub fn get_blob(&self, id: &BlobId) -> Result<Vec<u8>> {
@@ -171,7 +180,19 @@ impl Store {
 
     pub fn sweep_orphan_blobs(&self) -> Result<u64> {
         let known = self.readers.with(repo::all_blob_ids)?;
-        self.blobs.remove_orphans(&known)
+        self.blobs.remove_orphans(&known, Duration::from_secs(60 * 60))
+    }
+
+    pub fn hub_cursor(&self) -> Result<Option<String>> {
+        self.readers.with(|conn| repo::get_cursor(conn, "hub"))
+    }
+
+    pub fn set_hub_cursor(&self, cursor: &str) -> Result<()> {
+        self.call(|reply| WriteOp::SetCursor { scope: "hub".into(), cursor: cursor.to_string(), reply })
+    }
+
+    pub fn cache_pins(&self) -> Result<Vec<String>> {
+        self.readers.with(repo::list_cache_pins)
     }
 
     fn call<T>(&self, build: impl FnOnce(SyncSender<Result<T>>) -> WriteOp) -> Result<T> {
@@ -235,6 +256,18 @@ fn writer_loop(db: PathBuf, blobs: BlobStore, rx: Receiver<WriteOp>) {
                         tx.commit()?;
                         Ok(blob)
                     });
+                let _ = reply.send(result);
+            }
+            Ok(WriteOp::PutBlob { bytes, reply }) => {
+                let result = (|| {
+                    let id = blobs.put(&bytes)?;
+                    repo::reserve_blob(&conn, &id, crate::repo::now_ms_for_gc())?;
+                    Ok(id)
+                })();
+                let _ = reply.send(result);
+            }
+            Ok(WriteOp::SetCursor { scope, cursor, reply }) => {
+                let result = repo::set_cursor(&conn, &scope, &cursor, crate::repo::now_ms_for_gc());
                 let _ = reply.send(result);
             }
             Ok(WriteOp::GcBlobs { released_before_ms, reply }) => {
@@ -386,6 +419,16 @@ mod tests {
         assert!(store.blobs().exists(&blob));
         assert_eq!(store.gc_blobs(Duration::ZERO).unwrap(), 1);
         assert!(!store.blobs().exists(&blob));
+    }
+
+    #[test]
+    fn put_blob_without_insert_is_not_collected_or_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let blob = store.put_blob(b"fresh reserved blob").unwrap();
+        assert_eq!(store.gc_blobs(Duration::ZERO).unwrap(), 0);
+        assert_eq!(store.sweep_orphan_blobs().unwrap(), 0);
+        assert!(store.blobs().exists(&blob));
     }
 
     #[test]

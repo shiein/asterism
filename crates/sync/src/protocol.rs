@@ -76,6 +76,8 @@ pub struct ItemDelete {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LanCandidates {
     pub endpoints: Vec<String>,
+    #[serde(default)]
+    pub fingerprint_hex: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

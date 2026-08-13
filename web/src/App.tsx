@@ -15,51 +15,88 @@ function deviceId(): string {
   return id;
 }
 
+function mergeHistory(cached: HistoryItem[], incoming: HistoryItem[]): HistoryItem[] {
+  const byId = new Map(cached.map((it) => [it.id, it]));
+  for (const it of incoming) byId.set(it.id, it);
+  return [...byId.values()].sort((a, b) => a.created_at_ms - b.created_at_ms || a.id.localeCompare(b.id));
+}
+
 export function App() {
   const [base, setBase] = useState(window.location.origin);
   const [code, setCode] = useState("");
   const [recovery, setRecovery] = useState(loadUnlock() ?? "");
   const [token, setToken] = useState(localStorage.getItem("asterism.token") ?? "");
   const [items, setItems] = useState<HistoryItem[]>([]);
+  const [previews, setPreviews] = useState<Record<string, string>>({});
   const [query, setQuery] = useState("");
+  const [kindFilter, setKindFilter] = useState("");
   const [indexed, setIndexed] = useState(0);
+  const [decryptFailed, setDecryptFailed] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [vaultEpoch, setVaultEpoch] = useState(0);
 
   const api = useMemo(() => new HubApi(base, token || undefined), [base, token]);
   const index = useMemo(() => new LocalIndex(), []);
 
   useEffect(() => {
-    if (!token || !vaultReady()) return;
-    api
-      .allHistory()
-      .then(async (list) => {
-        index.clear();
+    if (!token) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const cached = (await loadShard<HistoryItem[]>("history")) ?? [];
+        const cursor = await loadShard<string>("cursor");
+        const page = await api.history(200, cursor);
+        const list = mergeHistory(cached, page);
+        if (cancelled) return;
         setItems([...list].reverse());
+        await saveShard("history", list);
+        const last = list.at(-1);
+        if (last) await saveShard("cursor", `${last.created_at_ms}:${last.id}`);
+
+        index.clear();
         const hex = loadUnlock();
+        let failed = 0;
+        const nextPreviews: Record<string, string> = {};
+        if (!hex || !vaultReady()) {
+          for (const it of list) index.add(it.id, it.kind);
+          setIndexed(index.size);
+          setDecryptFailed(0);
+          setPreviews({});
+          return;
+        }
         for (const it of list) {
-          let text = `${it.kind}`;
-          if (hex && it.encrypted_metadata) {
+          let text = it.kind;
+          if (it.encrypted_metadata) {
             try {
               const dec = await decryptPackage(hex, it.encrypted_metadata);
               text += " " + dec.meta;
-            } catch {
-              /* 密文不可解密时仍可按类型浏览 */
+              nextPreviews[it.id] = dec.meta;
+            } catch (err) {
+              failed += 1;
+              console.warn("decrypt failed", it.id, err);
             }
           }
           index.add(it.id, text);
         }
+        if (cancelled) return;
         setIndexed(index.size);
-        const last = list.at(-1);
-        void saveShard("cursor", last ? `${last.created_at_ms}:${last.id}` : null);
-        void saveShard("count", index.size);
-      })
-      .catch((e) => setError(String(e)));
-  }, [api, token, index]);
+        setDecryptFailed(failed);
+        setPreviews(nextPreviews);
+      } catch (e) {
+        if (!cancelled) setError(String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [api, token, index, vaultEpoch]);
 
   const hits = query.trim() ? new Set(index.search(query)) : null;
-  const visible = hits
-    ? items.filter((it) => hits.has(it.id) || it.kind.toLowerCase().includes(query.toLowerCase()))
-    : items;
+  const visible = items.filter((it) => {
+    if (kindFilter && it.kind !== kindFilter) return false;
+    if (!hits) return true;
+    return hits.has(it.id) || it.kind.toLowerCase().includes(query.toLowerCase());
+  });
 
   async function pair() {
     setError(null);
@@ -81,7 +118,23 @@ export function App() {
   function unlock() {
     persistUnlock(recovery);
     if (!vaultReady()) setError("Recovery Key 必须是 64 位 hex");
-    else setError(null);
+    else {
+      setError(null);
+      setVaultEpoch((n) => n + 1);
+    }
+  }
+
+  async function copyItem(it: HistoryItem) {
+    const text = previews[it.id];
+    if (!text) {
+      setError("该条目尚未解密，无法复制正文");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   return (
@@ -110,8 +163,8 @@ export function App() {
             setToken("");
             localStorage.removeItem("asterism.token");
             setItems([]);
+            setPreviews({});
             void clearIndex();
-            void loadShard("cursor");
           }}
         >
           退出
@@ -119,8 +172,20 @@ export function App() {
       </section>
 
       {error && <p className="error">{error}</p>}
-      <p className="muted">已建立 {indexed} / {items.length} 条历史索引</p>
+      <p className="muted">
+        已建立 {indexed} / {items.length} 条历史索引
+        {decryptFailed > 0 ? ` · ${decryptFailed} 条解密失败` : ""}
+      </p>
       <input className="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索已索引历史" />
+      <select value={kindFilter} onChange={(e) => setKindFilter(e.target.value)}>
+        <option value="">全部类型</option>
+        <option value="text">text</option>
+        <option value="image">image</option>
+        <option value="screenshot">screenshot</option>
+        <option value="files">files</option>
+        <option value="gif">gif</option>
+        <option value="video">video</option>
+      </select>
 
       <ul className="list">
         {visible.map((it) => (
@@ -128,6 +193,8 @@ export function App() {
             <strong>{it.kind}</strong>
             <span>{new Date(it.created_at_ms).toLocaleString()}</span>
             <span>{it.logical_size} B</span>
+            {previews[it.id] && <p className="muted">{previews[it.id].slice(0, 160)}</p>}
+            <button onClick={() => void copyItem(it)}>复制</button>
             <button onClick={() => api.deleteHistory(it.id).then(() => setItems((xs) => xs.filter((x) => x.id !== it.id)))}>
               删除
             </button>

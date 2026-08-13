@@ -140,7 +140,7 @@ pub async fn capture_fullscreen(state: State<'_, DesktopState>) -> Result<String
         let backend = XcapBackend;
         backend.permission_preflight().map_err(|e| e.to_string())?;
         let monitors = backend.list_monitors().map_err(|e| e.to_string())?;
-        let monitor = monitors.first().ok_or_else(|| "no monitor".to_string())?;
+        let monitor = asterism_capture::preferred_monitor(&monitors).ok_or_else(|| "no monitor".to_string())?;
         let frame = backend.capture_display(monitor).map_err(|e| e.to_string())?;
         let png = export_png(frame.width, frame.height, &frame.bgra, &AnnotationScene::default())?;
         Ok::<_, String>((png, frame.width, frame.height))
@@ -157,6 +157,7 @@ pub fn insert_screenshot(
     width: u32,
     height: u32,
 ) -> Result<String, CmdError> {
+    let local_tag = asterism_crypto::local_dedup_tag(&png);
     let blob = state.store.put_blob(&png).map_err(|e| CmdError::Any(e.to_string()))?;
     let mut item = asterism_clipboard::NormalizedContent::Image {
         png: Vec::new(),
@@ -172,6 +173,18 @@ pub fn insert_screenshot(
     item.logical_size = png.len() as u64;
     item.payload_size = png.len() as u64;
     let id = state.store.insert(item.clone(), None).map_err(|e| CmdError::Any(e.to_string()))?;
+    let written = asterism_clipboard::NormalizedContent::Image {
+        png,
+        width,
+        height,
+        dedup_tag: local_tag,
+        flags: item.flags,
+        source_app: item.metadata.source_app.clone(),
+    };
+    state.guard.remember(item.id, local_tag);
+    if let Err(err) = state.clipboard.write(&written) {
+        tracing::warn!(error = %err, "failed to write screenshot to clipboard");
+    }
     state.sync.notify_local(item);
     Ok(id.to_string())
 }
@@ -182,7 +195,7 @@ pub async fn capture_region(state: State<'_, DesktopState>) -> Result<String, Cm
         let backend = XcapBackend;
         backend.permission_preflight().map_err(|e| e.to_string())?;
         let monitors = backend.list_monitors().map_err(|e| e.to_string())?;
-        let monitor = monitors.first().ok_or_else(|| "no monitor".to_string())?;
+        let monitor = asterism_capture::preferred_monitor(&monitors).ok_or_else(|| "no monitor".to_string())?;
         let frame = backend.capture_display(monitor).map_err(|e| e.to_string())?;
         let selection = crate::overlay_cli::select_region_subprocess(&frame).map_err(|e| e.to_string())?;
         let Some(selection) = selection else {
@@ -322,6 +335,7 @@ fn persist_and_activate_vault(
     };
     local_vault.save(&state.paths.config_dir).map_err(|e| CmdError::Any(e.to_string()))?;
     *state.vault.write() = local_vault;
+    *state.avk.write() = asterism_crypto::AccountVaultKey::from_bytes(*vault.as_bytes());
     state.sync.replace_vault(vault);
     Ok(())
 }

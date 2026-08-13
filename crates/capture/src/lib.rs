@@ -11,6 +11,8 @@ pub mod scroll;
 pub mod macos_perm;
 
 pub use annotation::{Annotation, AnnotationKind, AnnotationScene, export_png};
-pub use backend::{CaptureError, CapturedFrame, MonitorInfo, WindowInfo, XcapBackend};
+pub use backend::{
+    CaptureError, CapturedFrame, MonitorInfo, WindowInfo, XcapBackend, preferred_monitor,
+};
 pub use overlay::{FastOverlay, OverlayEvent, OverlaySession, Selection, select_region};
 pub use scroll::{ScrollCaptureEngine, StitchFrame};

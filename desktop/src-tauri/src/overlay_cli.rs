@@ -1,27 +1,33 @@
+use std::io::{Read, Write};
+
 use asterism_capture::backend::{CapturedFrame, MonitorInfo};
 use asterism_capture::{Selection, select_region};
 
 /// 独立进程入口：当前进程没有 Tauri/tao 事件循环，可以安全地跑 winit EventLoop。
+/// 冻结帧走 stdin，避免 4K BGRA 落盘。
 pub fn run_overlay_select() -> i32 {
     let args: Vec<String> = std::env::args().collect();
     let Some(idx) = args.iter().position(|a| a == "--overlay-select") else {
         eprintln!("missing --overlay-select");
         return 2;
     };
-    let path = args.get(idx + 1);
-    let width = args.get(idx + 2).and_then(|s| s.parse().ok());
-    let height = args.get(idx + 3).and_then(|s| s.parse().ok());
-    let (Some(path), Some(width), Some(height)) = (path, width, height) else {
-        eprintln!("usage: --overlay-select FRAME.bgra WIDTH HEIGHT");
+    let width = args.get(idx + 1).and_then(|s| s.parse().ok());
+    let height = args.get(idx + 2).and_then(|s| s.parse().ok());
+    let (Some(width), Some(height)) = (width, height) else {
+        eprintln!("usage: --overlay-select WIDTH HEIGHT < frame.bgra");
         return 2;
     };
-    let bgra = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            eprintln!("read frame: {err}");
-            return 1;
-        }
-    };
+    let expected = (width as usize).saturating_mul(height as usize).saturating_mul(4);
+    let mut bgra = Vec::new();
+    if let Err(err) = std::io::stdin().read_to_end(&mut bgra) {
+        eprintln!("read frame: {err}");
+        return 1;
+    }
+    if bgra.len() < expected {
+        eprintln!("truncated frame: {} < {expected}", bgra.len());
+        return 1;
+    }
+    bgra.truncate(expected);
     let frame = CapturedFrame {
         width,
         height,
@@ -58,17 +64,20 @@ pub fn run_overlay_select() -> i32 {
 }
 
 pub fn select_region_subprocess(frame: &CapturedFrame) -> anyhow::Result<Option<Selection>> {
-    let dir = private_overlay_dir()?;
-    let frame_path = dir.join("frame.bgra");
-    std::fs::write(&frame_path, &frame.bgra)?;
     let exe = std::env::current_exe()?;
-    let output = std::process::Command::new(exe)
+    let mut child = std::process::Command::new(exe)
         .arg("--overlay-select")
-        .arg(&frame_path)
         .arg(frame.width.to_string())
         .arg(frame.height.to_string())
-        .output()?;
-    let _ = std::fs::remove_file(&frame_path);
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    {
+        let stdin = child.stdin.as_mut().ok_or_else(|| anyhow::anyhow!("overlay stdin"))?;
+        stdin.write_all(&frame.bgra)?;
+    }
+    let output = child.wait_with_output()?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("overlay process failed: {err}");
@@ -79,15 +88,4 @@ pub fn select_region_subprocess(frame: &CapturedFrame) -> anyhow::Result<Option<
         return Ok(None);
     }
     Ok(Some(serde_json::from_str(text)?))
-}
-
-fn private_overlay_dir() -> anyhow::Result<std::path::PathBuf> {
-    let dir = std::env::temp_dir().join(format!("asterism-overlay-{}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(dir)
 }

@@ -109,6 +109,16 @@ impl RemotePolicy {
         file_count: u64,
         logical_size: u64,
     ) -> Result<()> {
+        self.check_preflight_ext(kind, file_count, logical_size, 0)
+    }
+
+    pub fn check_preflight_ext(
+        &self,
+        kind: ContentKind,
+        file_count: u64,
+        logical_size: u64,
+        largest_file: u64,
+    ) -> Result<()> {
         if !self.allows_kind(kind) {
             return Err(CoreError::PolicyRejected("kind disabled for remote"));
         }
@@ -117,6 +127,9 @@ impl RemotePolicy {
         }
         if logical_size > self.limits.max_item_bytes {
             return Err(CoreError::PolicyRejected("item size exceeds remote limit"));
+        }
+        if largest_file > self.limits.max_file_bytes {
+            return Err(CoreError::PolicyRejected("file exceeds max_file_bytes"));
         }
         Ok(())
     }
@@ -170,6 +183,13 @@ mod tests {
     fn remote_preflight_rejects_oversize_before_read() {
         let policy = RemotePolicy::default();
         let err = policy.check_preflight(ContentKind::Files, 1, policy.limits.max_item_bytes + 1);
+        assert!(err.is_err());
+        let err = policy.check_preflight_ext(
+            ContentKind::Files,
+            1,
+            1024,
+            policy.limits.max_file_bytes + 1,
+        );
         assert!(err.is_err());
     }
 }
