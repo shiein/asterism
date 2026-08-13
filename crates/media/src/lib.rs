@@ -5,6 +5,9 @@ pub mod avi;
 pub mod gifenc;
 pub mod video;
 
+#[cfg(target_os = "macos")]
+pub mod macos;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

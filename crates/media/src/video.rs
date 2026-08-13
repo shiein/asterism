@@ -30,5 +30,5 @@ pub mod windows_mf {
 
 #[cfg(target_os = "macos")]
 pub mod macos_vt {
-    //! ScreenCaptureKit → VideoToolbox / AVAssetWriter
+    pub use crate::macos::MacOsRecording;
 }

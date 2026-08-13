@@ -52,6 +52,8 @@ pub struct XcapBackend;
 
 impl CaptureBackend for XcapBackend {
     fn permission_preflight(&self) -> Result<(), CaptureError> {
+        #[cfg(target_os = "macos")]
+        crate::macos_perm::ensure_screen_access()?;
         Monitor::all().map(|_| ()).map_err(|e| {
             let msg = e.to_string();
             if msg.to_ascii_lowercase().contains("permission") || msg.contains("denied") {

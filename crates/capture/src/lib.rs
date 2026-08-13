@@ -7,6 +7,9 @@ pub mod backend;
 pub mod overlay;
 pub mod scroll;
 
+#[cfg(target_os = "macos")]
+pub mod macos_perm;
+
 pub use annotation::{Annotation, AnnotationKind, AnnotationScene, export_png};
 pub use backend::{CaptureError, CapturedFrame, MonitorInfo, WindowInfo, XcapBackend};
 pub use overlay::{FastOverlay, OverlayEvent, OverlaySession, Selection, select_region};

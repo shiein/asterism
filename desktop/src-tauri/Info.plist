@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Asterism records the microphone when you choose microphone or both audio sources.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Asterism captures system audio via ScreenCaptureKit when you choose system audio.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Asterism may inject scroll events for automatic scrolling capture.</string>
+</dict>
+</plist>

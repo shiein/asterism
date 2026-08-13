@@ -1,9 +1,13 @@
 use asterism_capture::backend::CaptureBackend;
 use asterism_capture::{AnnotationScene, OverlaySession, XcapBackend, export_png, select_region};
 use asterism_core::ContentKind;
+use asterism_media::AudioSource;
 use asterism_media::VideoFrame;
+#[cfg(not(target_os = "macos"))]
 use asterism_media::avi::AviMjpeg;
 use asterism_media::gifenc::GifSession;
+#[cfg(target_os = "macos")]
+use asterism_media::macos::MacOsRecording;
 use tauri::State;
 
 use crate::commands::{CmdError, insert_screenshot};
@@ -83,28 +87,66 @@ pub fn record_video(
     state: State<'_, DesktopState>,
     seconds: u32,
     fps: u32,
+    audio: Option<String>,
 ) -> Result<String, CmdError> {
     let backend = XcapBackend;
+    backend.permission_preflight().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitor = monitors.first().ok_or_else(|| CmdError::Any("no monitor".into()))?;
     let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
     let sel = select_region(&first).map_err(|e| CmdError::Any(e.to_string()))?;
     let session = OverlaySession { frame: first, selection: sel };
     let (w, h, _) = session.crop_bgra().ok_or_else(|| CmdError::Any("need selection".into()))?;
-    let mut avi = AviMjpeg::new(w, h, fps.clamp(10, 30));
-    let frames = (seconds.max(1) * fps.max(10)).min(300);
-    for i in 0..frames {
-        let frame = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-        let sess = OverlaySession { frame, selection: session.selection.clone() };
-        if let Some((cw, ch, bgra)) = sess.crop_bgra() {
-            let vf =
-                VideoFrame { timestamp_us: u64::from(i) * 33_000, width: cw, height: ch, bgra };
-            let _ = avi.push(&vf);
+    let fps = fps.clamp(10, 60);
+    let frames = (seconds.max(1) * fps).min(600);
+    let audio = match audio.as_deref() {
+        Some("mic") => AudioSource::Microphone,
+        Some("system") => AudioSource::System,
+        Some("both") => AudioSource::Both,
+        _ => AudioSource::None,
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut rec =
+            MacOsRecording::start(w, h, fps, audio).map_err(|e| CmdError::Any(e.to_string()))?;
+        for i in 0..frames {
+            let frame =
+                backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
+            let sess = OverlaySession { frame, selection: session.selection.clone() };
+            if let Some((cw, ch, bgra)) = sess.crop_bgra() {
+                let vf = VideoFrame {
+                    timestamp_us: u64::from(i) * 1_000_000 / u64::from(fps),
+                    width: cw,
+                    height: ch,
+                    bgra,
+                };
+                rec.push(&vf).map_err(|e| CmdError::Any(e.to_string()))?;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1000 / u64::from(fps)));
         }
-        std::thread::sleep(std::time::Duration::from_millis(1000 / u64::from(fps.max(10))));
+        let bytes = rec.finish().map_err(|e| CmdError::Any(e.to_string()))?;
+        insert_blob(&state, bytes, w, h, ContentKind::Video)
     }
-    let bytes = avi.finish().map_err(|e| CmdError::Any(e.to_string()))?;
-    insert_blob(&state, bytes, w, h, ContentKind::Video)
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = audio;
+        let mut avi = AviMjpeg::new(w, h, fps.clamp(10, 30));
+        for i in 0..frames {
+            let frame =
+                backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
+            let sess = OverlaySession { frame, selection: session.selection.clone() };
+            if let Some((cw, ch, bgra)) = sess.crop_bgra() {
+                let vf =
+                    VideoFrame { timestamp_us: u64::from(i) * 33_000, width: cw, height: ch, bgra };
+                let _ = avi.push(&vf);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1000 / u64::from(fps.max(10))));
+        }
+        let bytes = avi.finish().map_err(|e| CmdError::Any(e.to_string()))?;
+        insert_blob(&state, bytes, w, h, ContentKind::Video)
+    }
 }
 
 #[tauri::command]
@@ -116,7 +158,11 @@ pub fn scroll_capture(state: State<'_, DesktopState>, frames: u32) -> Result<Str
     let sel = select_region(&first).map_err(|e| CmdError::Any(e.to_string()))?;
     let mut engine = asterism_capture::ScrollCaptureEngine::default();
     let n = frames.clamp(2, 40);
-    for _ in 0..n {
+    for i in 0..n {
+        if i > 0 {
+            asterism_capture::ScrollCaptureEngine::inject_scroll(-80);
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
         let frame = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
         let sess = OverlaySession { frame: frame.clone(), selection: sel.clone() };
         if let Some((w, h, bgra)) = sess.crop_bgra() {

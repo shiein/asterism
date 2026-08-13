@@ -40,6 +40,15 @@ impl ScrollCaptureEngine {
         self.low_confidence_streak >= 3
     }
 
+    /// macOS 自动滚动：注入 CGEvent 滚轮。Windows 由 SendInput 在平台模块补。
+    pub fn inject_scroll(delta: i32) {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            macos_scroll(delta);
+        }
+        let _ = delta;
+    }
+
     pub fn flatten(&self) -> Option<StitchFrame> {
         if self.tiles.is_empty() {
             return None;
@@ -69,6 +78,28 @@ impl ScrollCaptureEngine {
             y += h;
         }
         Some(StitchFrame { width, height: y.max(1), bgra })
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn macos_scroll(delta: i32) {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventCreateScrollWheelEvent(
+            source: *mut std::ffi::c_void,
+            units: u32,
+            wheel_count: u32,
+            wheel1: i32,
+        ) -> *mut std::ffi::c_void;
+        fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
+        fn CFRelease(cf: *mut std::ffi::c_void);
+    }
+    unsafe {
+        let ev = CGEventCreateScrollWheelEvent(std::ptr::null_mut(), 0, 1, delta);
+        if !ev.is_null() {
+            CGEventPost(0, ev);
+            CFRelease(ev);
+        }
     }
 }
 

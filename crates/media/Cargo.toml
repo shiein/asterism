@@ -11,3 +11,6 @@ asterism-core.workspace = true
 gif = "0.13"
 image.workspace = true
 thiserror.workspace = true
+
+[build-dependencies]
+cc = "1.2"
