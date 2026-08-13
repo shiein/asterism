@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Serialize;
 
-use crate::server::AppState;
+use crate::state::HubState;
 
 #[derive(Serialize)]
 struct HealthBody {
@@ -16,7 +18,7 @@ pub async fn healthz() -> impl IntoResponse {
     Json(HealthBody { status: "ok", service: "asterism-hub" })
 }
 
-pub async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn readyz(State(state): State<Arc<HubState>>) -> impl IntoResponse {
     if state.config.db_path().exists() {
         (StatusCode::OK, Json(HealthBody { status: "ready", service: "asterism-hub" }))
     } else {

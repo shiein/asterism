@@ -15,19 +15,23 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::config::HubConfig;
-use crate::{api, health, web};
+use crate::state::HubState;
+use crate::{api, auth, blob, device, health, history, relay, web};
 
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_CHUNK_BYTES: usize = 2 * 1024 * 1024;
 
-#[derive(Clone)]
-pub struct AppState {
-    pub config: Arc<HubConfig>,
-}
-
 pub async fn run(config: HubConfig) -> Result<()> {
     std::fs::create_dir_all(config.blob_root())?;
     crate::db::migrate(&config.db_path())?;
+    let conn = rusqlite::Connection::open(config.db_path())?;
+    conn.execute_batch(
+        r#"
+        PRAGMA journal_mode=WAL;
+        PRAGMA busy_timeout=5000;
+        PRAGMA foreign_keys=ON;
+        "#,
+    )?;
 
     let tls = crate::tls::load_server_config(&config.tls.cert, &config.tls.key)?;
     let acceptor = TlsAcceptor::from(tls);
@@ -35,7 +39,7 @@ pub async fn run(config: HubConfig) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "asterism-hub listening (https)");
 
-    let state = AppState { config: Arc::new(config) };
+    let state = HubState::new(config, conn);
     let app = router(state);
 
     loop {
@@ -63,24 +67,22 @@ pub async fn run(config: HubConfig) -> Result<()> {
     }
 }
 
-fn router(state: AppState) -> Router {
+fn router(state: Arc<HubState>) -> Router {
     Router::new()
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
-        .route("/api/v1/auth/session", post(api::not_implemented))
-        .route("/api/v1/pairing/start", post(api::not_implemented))
-        .route("/api/v1/pairing/finish", post(api::not_implemented))
-        .route("/api/v1/devices", get(api::not_implemented))
-        .route("/api/v1/devices/{id}", delete(api::not_implemented))
-        .route("/api/v1/history", get(api::not_implemented))
-        .route("/api/v1/history/{id}", delete(api::not_implemented))
-        .route("/api/v1/blobs", post(api::not_implemented))
-        .route(
-            "/api/v1/blobs/{id}/chunks/{index}",
-            put(api::not_implemented).get(api::not_implemented),
-        )
-        .route("/api/v1/blobs/{id}/commit", post(api::not_implemented))
-        .route("/ws/v1/device", get(api::not_implemented))
+        .route("/api/v1/auth/session", post(auth::session))
+        .route("/api/v1/pairing/start", post(auth::pairing_start))
+        .route("/api/v1/pairing/finish", post(auth::pairing_finish))
+        .route("/api/v1/devices", get(device::list))
+        .route("/api/v1/devices/{id}", delete(device::revoke))
+        .route("/api/v1/history", get(history::list).post(history::create))
+        .route("/api/v1/history/{id}", delete(history::delete))
+        .route("/api/v1/blobs", post(blob::begin))
+        .route("/api/v1/blobs/{id}/chunks/{index}", put(blob::put_chunk).get(blob::get_chunk))
+        .route("/api/v1/blobs/{id}/commit", post(blob::commit))
+        .route("/ws/v1/device", get(relay::ws))
+        .route("/api/v1/signaling/{*rest}", get(api::not_implemented))
         .fallback(web::index)
         .layer(TraceLayer::new_for_http())
         .layer(RequestBodyLimitLayer::new(MAX_CHUNK_BYTES))

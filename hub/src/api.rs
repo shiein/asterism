@@ -12,6 +12,6 @@ struct ErrorBody {
 pub async fn not_implemented() -> impl IntoResponse {
     (
         StatusCode::NOT_IMPLEMENTED,
-        Json(ErrorBody { error: "not implemented in phase 1", phase: "hub_api" }),
+        Json(ErrorBody { error: "reserved signaling endpoint", phase: "v1" }),
     )
 }
