@@ -1,0 +1,49 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node / frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+.turbo/
+.pnpm-store/
+
+# Tauri / desktop
+desktop/src-tauri/gen/
+desktop/src-tauri/target/
+desktop/src-tauri/WixTools/
+*.app
+*.dmg
+*.exe
+*.msi
+*.nsis
+
+# Hub / local runtime
+/data/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+*.pem
+*.key
+!deploy/**/*.example
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Coverage / benches
+coverage/
+lcov.info
+tarpaulin-report.html
