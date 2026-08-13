@@ -8,8 +8,10 @@ description = "OS paths, network change hooks, and best-effort foreground proces
 
 [dependencies]
 asterism-core.workspace = true
+asterism-crypto.workspace = true
 directories.workspace = true
 hostname = "0.4"
+if-addrs = "0.13"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -19,3 +21,11 @@ tracing.workspace = true
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace"] }
 objc2-foundation = { version = "0.3", features = ["NSString"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }

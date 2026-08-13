@@ -73,8 +73,16 @@ fn run_loop<B: ClipboardBackend>(
     running: &AtomicBool,
     on_event: &impl Fn(ClipboardEvent),
 ) -> Result<()> {
+    #[cfg(windows)]
+    let win_signal = crate::windows::spawn_update_signal();
     let mut last = backend.change_token().unwrap_or(0);
     while running.load(Ordering::Relaxed) {
+        #[cfg(windows)]
+        {
+            // 主路径：WM_CLIPBOARDUPDATE。超时仅用于线程退出与漏事件兜底。
+            let _ = win_signal.recv_timeout(config.poll_interval);
+        }
+        #[cfg(not(windows))]
         thread::sleep(config.poll_interval);
         let token = match backend.change_token() {
             Ok(t) => t,

@@ -4,6 +4,7 @@
 //! WebView 不得直接访问本 crate。
 
 pub mod blob;
+pub mod cleanup;
 pub mod error;
 pub mod paths;
 pub mod repo;

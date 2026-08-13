@@ -5,11 +5,13 @@
 pub mod aead;
 pub mod error;
 pub mod hash;
+pub mod item;
 pub mod keys;
 
 pub use aead::{CHUNK_SIZE, EncryptedChunk, decrypt_chunk, encrypt_chunk, encrypt_small};
 pub use error::CryptoError;
 pub use hash::{blake3_bytes, blake3_reader};
+pub use item::{EncryptedPayload, decrypt_metadata, encrypt_metadata};
 pub use keys::{
     AccountVaultKey, DeviceIdentity, ItemKey, RecoveryKey, WrappedItemKey, derive_search_cache_key,
     local_dedup_tag, unwrap_item_key, wrap_item_key,

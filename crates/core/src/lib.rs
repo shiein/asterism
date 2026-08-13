@@ -4,6 +4,7 @@
 //! 本 crate 不依赖 SQLite、网络或平台 API。
 
 pub mod action;
+pub mod builtin_actions;
 pub mod content;
 pub mod device;
 pub mod error;
