@@ -31,6 +31,7 @@ pub enum SyncCmd {
     LocalItem(Box<ContentItem>),
     ReplaceVault(AccountVaultKey),
     Reload,
+    DeleteRemote(asterism_core::ContentId),
 }
 
 #[derive(Clone)]
@@ -52,6 +53,10 @@ impl SyncHandle {
 
     pub fn replace_vault(&self, vault: AccountVaultKey) {
         let _ = self.tx.send(SyncCmd::ReplaceVault(vault));
+    }
+
+    pub fn notify_deleted(&self, id: asterism_core::ContentId) {
+        let _ = self.tx.send(SyncCmd::DeleteRemote(id));
     }
 }
 
@@ -148,10 +153,12 @@ async fn run_loop(
     loop {
         tokio::select! {
             accepted = accept_opt(listener.as_ref(), &cert, &trust) => {
-                if let Ok((mut stream, _)) = accepted {
+                if let Ok((mut stream, _, peer_fp)) = accepted {
                     match asterism_sync::lan_item::recv_lan_item(&mut stream, identity.device_id, true).await {
                         Ok((from, lan_item, payload)) => {
-                            if !trust.lock().contains_device(from) {
+                            let trusted = peer_fp
+                                .is_some_and(|fp| trust.lock().is_trusted(from, fp));
+                            if !trusted {
                                 tracing::warn!(%from, "rejected lan item from untrusted device");
                             } else if let Err(err) = apply_lan(&store, &paths, &guard, from, lan_item, payload, settings.lock().auto_receive) {
                                 tracing::warn!(error = %err, "lan apply");
@@ -177,7 +184,16 @@ async fn run_loop(
                     SyncCmd::ReplaceVault(next) => {
                         vault = next;
                     }
+                    SyncCmd::DeleteRemote(id) => {
+                        remember_tombstone(&store, id);
+                        if let Err(err) = flush_tombstones(&store, &settings).await {
+                            tracing::warn!(error = %err, "hub delete failed");
+                        }
+                    }
                     SyncCmd::Reload => {
+                        if let Err(err) = flush_tombstones(&store, &settings).await {
+                            tracing::warn!(error = %err, "hub delete retry");
+                        }
                         refresh_trust(&identity, &settings, &trust, &paths).await;
                         exchange_candidates(&identity, &cert, &settings, &peers, &paths).await;
                         retry_pending(&identity, &vault, &store, &paths, &settings, &on_change).await;
@@ -194,6 +210,9 @@ async fn run_loop(
             _ = tokio::time::sleep(Duration::from_secs(8)) => {
                 refresh_trust(&identity, &settings, &trust, &paths).await;
                 exchange_candidates(&identity, &cert, &settings, &peers, &paths).await;
+                if let Err(err) = flush_tombstones(&store, &settings).await {
+                    tracing::debug!(error = %err, "hub delete retry");
+                }
                 retry_pending(&identity, &vault, &store, &paths, &settings, &on_change).await;
                 if let Err(err) = pull_hub(&identity, &vault, &store, &paths, &guard, &settings, &mut last_cursor, &mut failed_remote, &on_change).await {
                     tracing::debug!(error = %err, "hub pull");
@@ -261,18 +280,25 @@ async fn publish_one(
     }
     store.set_status(item.id, ContentStatus::Uploading)?;
     let result = publish(identity, vault, store, paths, settings, item).await;
-    let status = if result.is_ok() { ContentStatus::SyncedToHub } else { ContentStatus::Failed };
+    let status = match &result {
+        Ok(true) => ContentStatus::SyncedToHub,
+        Ok(false) => ContentStatus::Local,
+        Err(_) => ContentStatus::Failed,
+    };
     store.set_status(item.id, status)?;
     on_change();
-    result
+    result.map(|_| ())
 }
 
 async fn accept_opt(
     listener: Option<&tokio::net::TcpListener>,
     cert: &DeviceCert,
     trust: &Arc<Mutex<TrustStore>>,
-) -> anyhow::Result<(tokio_rustls::server::TlsStream<tokio::net::TcpStream>, std::net::SocketAddr)>
-{
+) -> anyhow::Result<(
+    tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    std::net::SocketAddr,
+    Option<[u8; 32]>,
+)> {
     match listener {
         Some(listener) => {
             let fps = trust.lock().fingerprints();
@@ -462,8 +488,10 @@ fn apply_lan(
         Some(lan_item.offer.logical_size),
         Some(lan_item.offer.payload_size),
     )?;
-    persist_item(store, item.clone(), manifest)?;
-    if auto_receive && let Ok(content) = item_to_clipboard(&item, store, paths) {
+    if persist_new(store, item.clone(), manifest)?
+        && auto_receive
+        && let Ok(content) = item_to_clipboard(&item, store, paths)
+    {
         guard.remember(item.id, content.dedup_tag());
         let _ = NativeClipboard.write(&content);
     }
@@ -613,10 +641,10 @@ async fn publish(
     paths: &AppPaths,
     settings: &Arc<Mutex<SyncSettings>>,
     item: &ContentItem,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let snap = settings.lock().clone();
     if !snap.hub_ready() {
-        return Ok(());
+        return Ok(false);
     }
     let payload = load_payload(item, store, paths)?;
     if matches!(item.payload_ref, PayloadRef::FileManifest { .. }) && payload.is_none() {
@@ -678,7 +706,7 @@ async fn publish(
             .await;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 async fn pull_hub(
@@ -705,27 +733,29 @@ async fn pull_hub(
             Ok(None) => {}
             Err(err) => {
                 tracing::warn!(id = %dto.id, error = %err, "retry remote item failed");
-                failed_remote.push(dto);
+                remember_failed(failed_remote, dto);
             }
         }
     }
-    let items = client.history(last_cursor.as_deref(), 50).await?;
     persist_hub_pin(settings, paths, &client);
-    for dto in items {
-        let next_cursor = format!("{}:{}", dto.created_at_ms, dto.id);
-        match apply_remote(vault, store, paths, guard, &client, dto.clone(), false).await {
-            Ok(Some(item)) => {
-                newest = Some(item);
-                persist_cursor(store, last_cursor, next_cursor);
-                on_change();
-            }
-            Ok(None) => {
-                persist_cursor(store, last_cursor, next_cursor);
-            }
-            Err(err) => {
-                tracing::warn!(id = %dto.id, error = %err, "remote item failed; will retry");
-                failed_remote.push(dto);
-                break;
+    if failed_remote.is_empty() {
+        let items = client.history(last_cursor.as_deref(), 50).await?;
+        for dto in items {
+            let next_cursor = format!("{}:{}", dto.created_at_ms, dto.id);
+            match apply_remote(vault, store, paths, guard, &client, dto.clone(), false).await {
+                Ok(Some(item)) => {
+                    newest = Some(item);
+                    persist_cursor(store, last_cursor, next_cursor);
+                    on_change();
+                }
+                Ok(None) => {
+                    persist_cursor(store, last_cursor, next_cursor);
+                }
+                Err(err) => {
+                    tracing::warn!(id = %dto.id, error = %err, "remote item failed; will retry");
+                    remember_failed(failed_remote, dto);
+                    break;
+                }
             }
         }
     }
@@ -738,6 +768,64 @@ async fn pull_hub(
         let _ = NativeClipboard.write(&content);
     }
     Ok(())
+}
+
+const TOMBSTONE_SCOPE: &str = "hub_tombstones";
+
+fn remember_tombstone(store: &Store, id: asterism_core::ContentId) {
+    let hex_id = hex::encode(id.as_bytes());
+    let mut ids = load_tombstones(store);
+    if !ids.iter().any(|existing| existing == &hex_id) {
+        ids.push(hex_id);
+        save_tombstones(store, &ids);
+    }
+}
+
+fn load_tombstones(store: &Store) -> Vec<String> {
+    store
+        .kv_get(TOMBSTONE_SCOPE)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_tombstones(store: &Store, ids: &[String]) {
+    let encoded = serde_json::to_string(ids).unwrap_or_else(|_| "[]".into());
+    if let Err(err) = store.kv_set(TOMBSTONE_SCOPE, &encoded) {
+        tracing::warn!(error = %err, "persist hub tombstones");
+    }
+}
+
+async fn flush_tombstones(
+    store: &Store,
+    settings: &Arc<Mutex<SyncSettings>>,
+) -> anyhow::Result<()> {
+    let snap = settings.lock().clone();
+    if !snap.hub_ready() {
+        return Ok(());
+    }
+    let pending = load_tombstones(store);
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let client = client(&snap)?;
+    let mut remain = Vec::new();
+    for id in pending {
+        if let Err(err) = client.delete_history(&id).await {
+            tracing::warn!(id, error = %err, "hub delete item failed");
+            remain.push(id);
+        }
+    }
+    save_tombstones(store, &remain);
+    if remain.is_empty() { Ok(()) } else { Err(anyhow::anyhow!("hub still has pending deletes")) }
+}
+
+fn remember_failed(failed: &mut Vec<HistoryDto>, dto: HistoryDto) {
+    if failed.iter().any(|existing| existing.id == dto.id) {
+        return;
+    }
+    failed.push(dto);
 }
 
 fn persist_cursor(store: &Store, last_cursor: &mut Option<String>, next: String) {
@@ -812,12 +900,30 @@ async fn apply_remote(
         Some(dto.logical_size),
         Some(dto.payload_size),
     )?;
-    persist_item(store, item.clone(), manifest)?;
+    if !persist_new(store, item.clone(), manifest)? {
+        return Ok(None);
+    }
     if write_clipboard && let Ok(content) = item_to_clipboard(&item, store, paths) {
         _guard.remember(item.id, content.dedup_tag());
         let _ = NativeClipboard.write(&content);
     }
     Ok(Some(item))
+}
+
+fn persist_new(
+    store: &Store,
+    item: ContentItem,
+    manifest: Option<FileManifest>,
+) -> anyhow::Result<bool> {
+    let id = item.id;
+    if store.contains(id)? {
+        return Ok(false);
+    }
+    match persist_item(store, item, manifest) {
+        Ok(()) => Ok(true),
+        Err(_) if store.contains(id).unwrap_or(false) => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 fn load_payload(
@@ -966,6 +1072,77 @@ pub async fn start_pairing_code(
 mod tests {
     use super::*;
     use asterism_clipboard::NormalizedContent;
+
+    #[test]
+    fn persist_new_treats_existing_id_as_not_new() {
+        let root = std::env::temp_dir()
+            .join(format!("asterism-persist-new-{}", asterism_core::ContentId::new()));
+        let paths = AppPaths {
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            config_dir: root.join("config"),
+        };
+        paths.ensure().unwrap();
+        let store = Store::open(&paths.data_dir).unwrap();
+        let item = ContentItem {
+            id: asterism_core::ContentId::new(),
+            origin_device_id: asterism_core::DeviceId::new(),
+            kind: ContentKind::Text,
+            created_at_ms: 1,
+            logical_size: 1,
+            payload_size: 1,
+            dedup_tag: [2; 32],
+            flags: ContentFlags::REMOTE_ALLOWED,
+            status: asterism_core::ContentStatus::Local,
+            metadata: ItemMetadata::default(),
+            payload_ref: PayloadRef::Inline { bytes: bytes::Bytes::from_static(b"x") },
+            encrypted_metadata: bytes::Bytes::new(),
+        };
+        assert!(persist_new(&store, item.clone(), None).unwrap());
+        assert!(!persist_new(&store, item, None).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tombstones_round_trip_and_dedup() {
+        let root = std::env::temp_dir()
+            .join(format!("asterism-tombstone-{}", asterism_core::ContentId::new()));
+        let paths = AppPaths {
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            config_dir: root.join("config"),
+        };
+        paths.ensure().unwrap();
+        let store = Store::open(&paths.data_dir).unwrap();
+        let id = asterism_core::ContentId::new();
+        remember_tombstone(&store, id);
+        remember_tombstone(&store, id);
+        let listed = load_tombstones(&store);
+        assert_eq!(listed, vec![hex::encode(id.as_bytes())]);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remember_failed_dedups_by_item_id() {
+        let dto = HistoryDto {
+            id: "aa".into(),
+            origin_device_id: asterism_core::DeviceId::new(),
+            kind: "TEXT".into(),
+            created_at_ms: 1,
+            logical_size: 1,
+            payload_size: 1,
+            dedup_tag: String::new(),
+            flags: 0,
+            encrypted_metadata: String::new(),
+            blob_id: None,
+        };
+        let mut failed = Vec::new();
+        remember_failed(&mut failed, dto.clone());
+        remember_failed(&mut failed, dto);
+        assert_eq!(failed.len(), 1);
+    }
 
     #[test]
     fn pairing_wrap_recovers_avk() {

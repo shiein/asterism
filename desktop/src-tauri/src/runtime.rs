@@ -77,8 +77,17 @@ impl DesktopState {
             std::thread::Builder::new()
                 .name("asterism-files".into())
                 .spawn(move || {
+                    let mut last: Option<([u8; 32], std::time::Instant)> = None;
                     while let Ok(content) = file_rx.recv() {
+                        let tag = content.dedup_tag();
+                        if let Some((prev, at)) = last
+                            && prev == tag
+                            && at.elapsed() < std::time::Duration::from_millis(1500)
+                        {
+                            continue;
+                        }
                         persist_captured(&store, &paths, device_id, &avk, &sync, &app, content);
+                        last = Some((tag, std::time::Instant::now()));
                     }
                 })
                 .ok();

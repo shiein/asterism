@@ -69,11 +69,17 @@ pub async fn accept_direct(
     listener: &TcpListener,
     cert: &DeviceCert,
     trusted_fps: &[[u8; 32]],
-) -> Result<(tokio_rustls::server::TlsStream<TcpStream>, SocketAddr)> {
+) -> Result<(tokio_rustls::server::TlsStream<TcpStream>, SocketAddr, Option<[u8; 32]>)> {
     let (tcp, peer) = listener.accept().await?;
     let acceptor = TlsAcceptor::from(server_config(cert, trusted_fps)?);
     let tls = acceptor.accept(tcp).await.map_err(|e| SyncError::Tls(e.to_string()))?;
-    Ok((tls, peer))
+    let fingerprint = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .map(|der| crate::cert::fingerprint_of_der(der.as_ref()));
+    Ok((tls, peer, fingerprint))
 }
 
 /// Direct 必须再次验证证书指纹。Hub 交换 IP 不等于信任 IP。

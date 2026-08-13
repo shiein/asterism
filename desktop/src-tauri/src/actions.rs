@@ -33,6 +33,7 @@ pub fn execute(
         }
         ActionId::Delete => {
             state.store.delete(item.id)?;
+            state.sync.notify_deleted(item.id);
             Ok(builtin_actions::deleted(&item))
         }
         ActionId::Save => {

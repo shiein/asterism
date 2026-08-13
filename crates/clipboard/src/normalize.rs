@@ -208,7 +208,7 @@ pub fn files_local_dedup_tag(paths: &[std::path::PathBuf]) -> [u8; 32] {
 }
 
 fn path_list_fingerprint(paths: &[std::path::PathBuf]) -> Vec<u8> {
-    let mut sorted: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let mut sorted: Vec<String> = paths.iter().map(|p| stable_path_key(p)).collect();
     sorted.sort();
     let mut buf = Vec::new();
     for path in sorted {
@@ -216,6 +216,13 @@ fn path_list_fingerprint(paths: &[std::path::PathBuf]) -> Vec<u8> {
         buf.push(0);
     }
     buf
+}
+
+fn stable_path_key(path: &std::path::Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn remote_flags(
@@ -259,6 +266,21 @@ mod tests {
         let a = std::path::PathBuf::from("/tmp/a");
         let b = std::path::PathBuf::from("/tmp/b");
         assert_eq!(files_local_dedup_tag(&[a.clone(), b.clone()]), files_local_dedup_tag(&[b, a]));
+    }
+
+    #[test]
+    fn file_path_tag_collapses_macos_var_alias_when_target_exists() {
+        let tmp = std::env::temp_dir();
+        let via_tmp = tmp.join(format!("asterism-tag-{}", asterism_core::ContentId::new()));
+        std::fs::write(&via_tmp, b"x").unwrap();
+        let via_private = std::fs::canonicalize(&via_tmp).unwrap();
+        if via_tmp != via_private {
+            assert_eq!(
+                files_local_dedup_tag(std::slice::from_ref(&via_tmp)),
+                files_local_dedup_tag(std::slice::from_ref(&via_private))
+            );
+        }
+        let _ = std::fs::remove_file(via_tmp);
     }
 
     #[test]

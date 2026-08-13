@@ -103,8 +103,9 @@ pub async fn run(config: HubConfig) -> Result<()> {
             let hyper_service = hyper::service::service_fn(move |request: Request<Incoming>| {
                 app.clone().call(request)
             });
-            if let Err(err) =
-                Builder::new(TokioExecutor::new()).serve_connection(io, hyper_service).await
+            if let Err(err) = Builder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(io, hyper_service)
+                .await
             {
                 tracing::debug!(error = %err, %peer, "connection error");
             }

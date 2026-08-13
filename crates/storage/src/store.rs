@@ -188,9 +188,17 @@ impl Store {
     }
 
     pub fn set_hub_cursor(&self, cursor: &str) -> Result<()> {
+        self.kv_set("hub", cursor)
+    }
+
+    pub fn kv_get(&self, scope: &str) -> Result<Option<String>> {
+        self.readers.with(|conn| repo::get_cursor(conn, scope))
+    }
+
+    pub fn kv_set(&self, scope: &str, value: &str) -> Result<()> {
         self.call(|reply| WriteOp::SetCursor {
-            scope: "hub".into(),
-            cursor: cursor.to_string(),
+            scope: scope.to_string(),
+            cursor: value.to_string(),
             reply,
         })
     }

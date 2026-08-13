@@ -82,6 +82,14 @@ pub async fn list(
     Ok(Json(rows.collect::<Result<Vec<_>, _>>().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?))
 }
 
+fn decode_encrypted_metadata(raw: &str) -> Result<Vec<u8>, StatusCode> {
+    let meta = hex::decode(raw).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if meta.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(meta)
+}
+
 fn parse_cursor(raw: &str) -> Result<HistoryCursor, StatusCode> {
     if let Some((created, id)) = raw.split_once(':') {
         let created_at_ms = created.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -103,8 +111,11 @@ pub async fn create(
     let (account, device) =
         auth_token(&state, bearer(&headers), None).ok_or(StatusCode::UNAUTHORIZED)?;
     let id = hex::decode(&item.id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if id.len() != 16 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let dedup = hex::decode(&item.dedup_tag).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let meta = hex::decode(&item.encrypted_metadata).unwrap_or_default();
+    let meta = decode_encrypted_metadata(&item.encrypted_metadata)?;
     let mut db = state.db.lock();
     let tx = db.transaction().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let old_blob: Option<Option<String>> = tx
@@ -230,6 +241,13 @@ fn reconcile_blob_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_or_invalid_ciphertext_is_rejected() {
+        assert_eq!(decode_encrypted_metadata("").unwrap_err(), StatusCode::BAD_REQUEST);
+        assert_eq!(decode_encrypted_metadata("zz").unwrap_err(), StatusCode::BAD_REQUEST);
+        assert!(decode_encrypted_metadata("abcd").is_ok());
+    }
 
     #[test]
     fn cursor_keeps_timestamp_and_id_tie_breaker() {

@@ -10,6 +10,7 @@ description = "OS paths, network change hooks, and best-effort foreground proces
 asterism-core.workspace = true
 asterism-crypto.workspace = true
 directories.workspace = true
+fs4 = { version = "0.13", features = ["sync"] }
 hex.workspace = true
 hostname = "0.4"
 if-addrs = "0.13"

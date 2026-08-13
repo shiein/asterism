@@ -97,10 +97,20 @@ export function App() {
           }
           index.add(it.id, text);
         }
-        if (cancelled) return;
+        if (cancelled) {
+          for (const url of Object.values(nextPreviews)) {
+            if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+          }
+          return;
+        }
         setIndexed(index.size);
         setDecryptFailed(failed);
-        setPreviews(nextPreviews);
+        setPreviews((prev) => {
+          for (const url of Object.values(prev)) {
+            if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+          }
+          return nextPreviews;
+        });
       } catch (e) {
         if (!cancelled) setError(String(e));
       }

@@ -94,7 +94,9 @@ pub fn set_favorite(
 #[tauri::command]
 pub fn delete_item(state: State<'_, DesktopState>, id: String) -> Result<(), CmdError> {
     let id = id.parse::<ContentId>().map_err(|e| CmdError::Any(e.to_string()))?;
-    state.store.delete(id).map_err(|e| CmdError::Any(e.to_string()))
+    state.store.delete(id).map_err(|e| CmdError::Any(e.to_string()))?;
+    state.sync.notify_deleted(id);
+    Ok(())
 }
 
 #[tauri::command]
