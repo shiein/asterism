@@ -18,6 +18,29 @@ pub struct DeviceCert {
 }
 
 impl DeviceCert {
+    pub fn load_or_create(dir: &std::path::Path, device_name: &str) -> Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let cert_p = dir.join("device.cert.pem");
+        let key_p = dir.join("device.key.pem");
+        if cert_p.exists() && key_p.exists() {
+            let cert_pem = std::fs::read_to_string(cert_p)?;
+            let key_pem = std::fs::read_to_string(key_p)?;
+            return Self::from_pem(cert_pem, key_pem);
+        }
+        let cert = Self::generate(device_name)?;
+        std::fs::write(cert_p, &cert.cert_pem)?;
+        std::fs::write(key_p, &cert.key_pem)?;
+        Ok(cert)
+    }
+
+    pub fn from_pem(cert_pem: String, key_pem: String) -> Result<Self> {
+        let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| SyncError::Tls(e.to_string()))?;
+        let der = certs.first().ok_or_else(|| SyncError::Tls("empty cert".into()))?;
+        Ok(Self { fingerprint: fingerprint_of_der(der.as_ref()), cert_pem, key_pem })
+    }
+
     pub fn generate(device_name: &str) -> Result<Self> {
         let key = KeyPair::generate().map_err(|e| SyncError::Tls(e.to_string()))?;
         let mut params = CertificateParams::new(vec!["asterism.local".into(), "localhost".into()])

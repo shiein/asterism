@@ -25,6 +25,8 @@ pub enum MessageBody {
     ItemDelete(ItemDelete),
     LanCandidates(LanCandidates),
     SyncCursor(SyncCursor),
+    LanItem(LanItem),
+    AvkWrap(AvkWrap),
     Ping { nonce: u64 },
     Pong { nonce: u64 },
 }
@@ -80,6 +82,21 @@ pub struct LanCandidates {
 pub struct SyncCursor {
     pub scope: String,
     pub cursor: String,
+}
+
+/// LAN 上内容走 TLS，不经 Hub。随后跟 payload_len 字节正文。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LanItem {
+    pub offer: ItemOffer,
+    pub metadata_json: String,
+    pub payload_len: u64,
+}
+
+/// 配对码派生密钥包装的 AVK，Hub 只见密文。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AvkWrap {
+    pub pairing_code_hash: Vec<u8>,
+    pub wrapped_hex: String,
 }
 
 impl Envelope {

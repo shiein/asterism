@@ -32,6 +32,7 @@ impl LanEndpoint {
         props.insert("protocol_version".into(), PROTOCOL_VERSION.to_string());
         props.insert("device_id".into(), device_id.to_string());
         props.insert("port".into(), port.to_string());
+        props.insert("fp".into(), cert.fingerprint_hex());
         let info = ServiceInfo::new(
             SERVICE_TYPE,
             &device_id.to_string()[..8.min(device_id.to_string().len())],
@@ -102,11 +103,35 @@ pub async fn recv(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> Result<En
     read_envelope(stream).await
 }
 
-pub fn parse_mdns_device(info: &ServiceInfo) -> Option<(DeviceId, u16)> {
+#[derive(Clone, Debug)]
+pub struct DiscoveredPeer {
+    pub device_id: DeviceId,
+    pub port: u16,
+    pub fingerprint: Option<[u8; 32]>,
+    pub addresses: Vec<String>,
+}
+
+pub fn parse_mdns_device(info: &ServiceInfo) -> Option<DiscoveredPeer> {
     let props = info.get_properties();
-    let id = props.get("device_id")?.val_str().parse().ok()?;
+    let device_id = props.get("device_id")?.val_str().parse().ok()?;
     let port = props.get("port").and_then(|p| p.val_str().parse().ok()).unwrap_or(info.get_port());
-    Some((id, port))
+    let fingerprint = props.get("fp").and_then(|p| {
+        let raw = hex::decode(p.val_str()).ok()?;
+        (raw.len() == 32).then(|| {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&raw);
+            a
+        })
+    });
+    let addresses = info
+        .get_addresses()
+        .iter()
+        .map(|ip| match ip {
+            std::net::IpAddr::V4(v) => format!("{v}:{port}"),
+            std::net::IpAddr::V6(v) => format!("[{v}]:{port}"),
+        })
+        .collect();
+    Some(DiscoveredPeer { device_id, port, fingerprint, addresses })
 }
 
 impl Drop for LanEndpoint {
