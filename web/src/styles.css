@@ -5,6 +5,20 @@
   color: #edf0e8;
 }
 body { margin: 0; }
-.page { max-width: 640px; margin: 12vh auto; padding: 0 24px; }
+.page { max-width: 760px; margin: 6vh auto; padding: 0 24px 64px; }
 h1 { font-weight: 600; letter-spacing: -0.03em; }
 .muted { color: #9aa394; }
+.error { color: #e07a6a; }
+.panel { display: grid; gap: 10px; margin: 20px 0; }
+label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #9aa394; }
+input, button {
+  border: 1px solid #2c3328; background: #1b2018; color: #edf0e8;
+  padding: 8px 10px; border-radius: 8px;
+}
+button { cursor: pointer; }
+.search { width: 100%; margin: 12px 0; }
+.list { list-style: none; padding: 0; display: grid; gap: 8px; }
+.list li {
+  display: flex; gap: 12px; align-items: center; justify-content: space-between;
+  background: #1b2018; border: 1px solid #2c3328; border-radius: 10px; padding: 10px 12px;
+}

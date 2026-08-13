@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { copyItem, deleteItem, getIdentity, listHistory, setFavorite } from "../api";
+import { captureFullscreen, copyItem, deleteItem, getIdentity, listHistory, setFavorite } from "../api";
 import { useUiStore } from "../store";
 import type { ContentKind, HistoryItem } from "../types";
 
@@ -51,14 +51,23 @@ export function HistoryPage() {
             {identity.data?.deviceName ?? "本机"} · 本地历史 · Phase 1
           </p>
         </div>
-        <label className="search">
-          <span>搜索</span>
-          <input
-            value={query}
-            placeholder="文本或文件名"
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </label>
+        <div className="top-actions">
+          <button
+            onClick={() => {
+              void captureFullscreen().then(() => queryClient.invalidateQueries({ queryKey: ["history"] }));
+            }}
+          >
+            全屏截图
+          </button>
+          <label className="search">
+            <span>搜索</span>
+            <input
+              value={query}
+              placeholder="文本或文件名"
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </label>
+        </div>
       </header>
 
       <div className="filters">

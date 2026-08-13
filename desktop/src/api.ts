@@ -30,3 +30,11 @@ export function copyItem(id: string): Promise<void> {
 export function getIdentity(): Promise<DeviceIdentity> {
   return invoke("get_identity");
 }
+
+export function captureFullscreen(): Promise<string> {
+  return invoke("capture_fullscreen");
+}
+
+export function recoveryKey(): Promise<string> {
+  return invoke("recovery_key");
+}

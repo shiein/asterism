@@ -15,11 +15,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow.workspace = true
+asterism-capture.workspace = true
 asterism-clipboard.workspace = true
 asterism-core.workspace = true
 asterism-crypto.workspace = true
 asterism-platform.workspace = true
 asterism-storage.workspace = true
+asterism-sync.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }

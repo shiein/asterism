@@ -1,10 +1,16 @@
+use std::path::PathBuf;
+
+use asterism_capture::backend::CaptureBackend;
+use asterism_capture::{AnnotationScene, XcapBackend, export_png};
 use asterism_clipboard::ClipboardBackend;
+use asterism_core::action::ActionId;
 use asterism_core::content::{ContentFlags, ContentKind};
 use asterism_core::id::ContentId;
 use asterism_storage::HistoryQuery;
 use serde::Serialize;
 use tauri::State;
 
+use crate::actions;
 use crate::runtime::{DesktopState, item_to_clipboard};
 
 #[derive(Debug, thiserror::Error)]
@@ -105,6 +111,52 @@ pub fn get_identity(state: State<'_, DesktopState>) -> IdentityDto {
         account_id: state.identity.account_id.to_string(),
         device_name: state.identity.device_name.clone(),
     }
+}
+
+#[tauri::command]
+pub fn execute_action(
+    state: State<'_, DesktopState>,
+    action: String,
+    id: String,
+    save_path: Option<String>,
+) -> Result<String, CmdError> {
+    let action: ActionId =
+        serde_json::from_str(&format!("\"{action}\"")).map_err(|e| CmdError::Any(e.to_string()))?;
+    let id = id.parse::<ContentId>().map_err(|e| CmdError::Any(e.to_string()))?;
+    let result = actions::execute(&state, action, id, save_path.map(PathBuf::from))?;
+    Ok(format!("{result:?}"))
+}
+
+#[tauri::command]
+pub fn recovery_key(state: State<'_, DesktopState>) -> String {
+    state.vault.recovery_hex()
+}
+
+#[tauri::command]
+pub fn capture_fullscreen(state: State<'_, DesktopState>) -> Result<String, CmdError> {
+    let backend = XcapBackend;
+    backend.permission_preflight().map_err(|e| CmdError::Any(e.to_string()))?;
+    let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
+    let monitor = monitors.first().ok_or_else(|| CmdError::Any("no monitor".into()))?;
+    let frame = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
+    let png = export_png(frame.width, frame.height, &frame.bgra, &AnnotationScene::default())
+        .map_err(CmdError::Any)?;
+    let blob = state.store.put_blob(&png).map_err(|e| CmdError::Any(e.to_string()))?;
+    let mut item = asterism_clipboard::NormalizedContent::Image {
+        png: Vec::new(),
+        width: frame.width,
+        height: frame.height,
+        dedup_tag: asterism_crypto::local_dedup_tag(&png),
+        flags: asterism_core::ContentFlags::REMOTE_ALLOWED,
+        source_app: Some("asterism".into()),
+    }
+    .into_item(state.identity.device_id, asterism_platform::now_ms());
+    item.kind = asterism_core::ContentKind::Screenshot;
+    item.payload_ref = asterism_core::PayloadRef::Blob { blob_id: blob };
+    item.logical_size = png.len() as u64;
+    item.payload_size = png.len() as u64;
+    let id = state.store.insert(item, None).map_err(|e| CmdError::Any(e.to_string()))?;
+    Ok(id.to_string())
 }
 
 fn to_dto(item: asterism_core::ContentItem) -> HistoryItemDto {

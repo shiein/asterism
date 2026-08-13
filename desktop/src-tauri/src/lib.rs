@@ -1,3 +1,4 @@
+mod actions;
 mod commands;
 mod runtime;
 
@@ -26,6 +27,9 @@ pub fn run() {
             commands::delete_item,
             commands::copy_item,
             commands::get_identity,
+            commands::execute_action,
+            commands::recovery_key,
+            commands::capture_fullscreen,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Asterism desktop");

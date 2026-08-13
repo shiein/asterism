@@ -7,7 +7,8 @@ use asterism_clipboard::{
 };
 use asterism_core::content::{ContentFlags, ContentItem, ContentKind, PayloadRef};
 use asterism_core::id::DeviceId;
-use asterism_platform::{AppPaths, LocalIdentity};
+use asterism_platform::hardening::CrashGuard;
+use asterism_platform::{AppPaths, LocalIdentity, LocalVault};
 use asterism_storage::Store;
 use tauri::{AppHandle, Emitter};
 
@@ -17,13 +18,20 @@ pub struct DesktopState {
     pub identity: LocalIdentity,
     pub paths: AppPaths,
     pub clipboard: NativeClipboard,
+    pub vault: LocalVault,
+    _crash: CrashGuard,
 }
 
 impl DesktopState {
     pub fn start(app: AppHandle) -> anyhow::Result<Self> {
         let paths = AppPaths::detect();
         paths.ensure()?;
+        let (crash, unclean) = CrashGuard::acquire(&paths.data_dir)?;
+        if unclean {
+            tracing::warn!("previous session did not exit cleanly; temp capture purged");
+        }
         let identity = LocalIdentity::load_or_create(&paths.config_dir)?;
+        let vault = LocalVault::load_or_create(&paths.config_dir)?;
         let store = Store::open(&paths.data_dir)?;
         let guard = Arc::new(SelfWriteGuard::default());
 
@@ -59,7 +67,7 @@ impl DesktopState {
             },
         );
 
-        Ok(Self { store, guard, identity, paths, clipboard: NativeClipboard })
+        Ok(Self { store, guard, identity, paths, clipboard: NativeClipboard, vault, _crash: crash })
     }
 }
 
