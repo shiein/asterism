@@ -113,10 +113,29 @@ static NSURL *temp_url(NSString *ext) {
     return [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]];
 }
 
+static AVAssetTrack *first_track(AVAsset *asset, AVMediaType type) {
+    if (@available(macOS 12.0, *)) {
+        __block NSArray<AVAssetTrack *> *tracks = nil;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        [asset loadTracksWithMediaType:type
+                     completionHandler:^(NSArray<AVAssetTrack *> *loaded, NSError *error) {
+                         (void)error;
+                         tracks = loaded;
+                         dispatch_semaphore_signal(sem);
+                     }];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+        return tracks.firstObject;
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return [[asset tracksWithMediaType:type] firstObject];
+#pragma clang diagnostic pop
+}
+
 static int mux_tracks(NSURL *video, NSURL *mic, NSURL *sysAudio, NSURL *outURL, NSError **err) {
     AVMutableComposition *comp = [AVMutableComposition composition];
     AVURLAsset *vAsset = [AVURLAsset URLAssetWithURL:video options:nil];
-    AVAssetTrack *vTrack = [[vAsset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+    AVAssetTrack *vTrack = first_track(vAsset, AVMediaTypeVideo);
     if (!vTrack) {
         return -1;
     }
@@ -131,7 +150,7 @@ static int mux_tracks(NSURL *video, NSURL *mic, NSURL *sysAudio, NSURL *outURL, 
             return;
         }
         AVURLAsset *a = [AVURLAsset URLAssetWithURL:url options:nil];
-        AVAssetTrack *t = [[a tracksWithMediaType:AVMediaTypeAudio] firstObject];
+        AVAssetTrack *t = first_track(a, AVMediaTypeAudio);
         if (!t) {
             return;
         }
