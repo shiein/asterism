@@ -370,18 +370,18 @@ fn writer_loop(db: PathBuf, blobs: BlobStore, rx: Receiver<WriteOp>) {
                 let _ = reply.send(result);
             }
             Ok(WriteOp::EnsureCommitted { item, reply }) => {
-                let result =
-                    crate::outbox::latest_unacked(&conn, crate::EVENT_COMMITTED, item.id())
-                        .and_then(|existing| {
-                            if existing.is_some() {
-                                return Ok(());
-                            }
-                            crate::outbox::enqueue_committed(
-                                &conn,
-                                &item,
-                                crate::repo::now_ms_for_gc(),
-                            )
-                        });
+                let result = crate::outbox::latest_unacked(
+                    &conn,
+                    crate::EVENT_COMMITTED,
+                    item.id(),
+                    crate::CONSUMER_HUB,
+                )
+                .and_then(|existing| {
+                    if existing.is_some() {
+                        return Ok(());
+                    }
+                    crate::outbox::enqueue_committed(&conn, &item, crate::repo::now_ms_for_gc())
+                });
                 let _ = reply.send(result);
             }
             Ok(WriteOp::AckOutbox { id, consumer_id, reply }) => {
@@ -676,6 +676,76 @@ mod tests {
             store.pending_outbox_for(crate::EVENT_DELETED, crate::CONSUMER_HUB_DELETE, 50).unwrap();
         assert_eq!(deleted.len(), 50);
         assert!(deleted.iter().all(|event| event.event_type == crate::EVENT_DELETED));
+    }
+
+    #[test]
+    fn ensure_committed_reenqueues_after_hub_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let item = sample("local waiting for hub");
+        store.insert(item.clone(), None).unwrap();
+        let first =
+            store.pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_HUB, 10).unwrap();
+        assert_eq!(first.len(), 1);
+        store.ack_outbox_consumer(first[0].id, crate::CONSUMER_HUB).unwrap();
+        assert!(
+            store
+                .pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_HUB, 10)
+                .unwrap()
+                .is_empty()
+        );
+        store.ensure_committed(&item).unwrap();
+        let again =
+            store.pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_HUB, 10).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_ne!(again[0].id, first[0].id);
+    }
+
+    #[test]
+    fn lan_ack_does_not_complete_hub_consumer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let item = sample("dual consumer");
+        store.insert(item, None).unwrap();
+        let lan =
+            store.pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_LAN, 10).unwrap();
+        assert_eq!(lan.len(), 1);
+        assert!(store.ack_outbox_consumer(lan[0].id, crate::CONSUMER_LAN).unwrap());
+        assert!(
+            store
+                .pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_LAN, 10)
+                .unwrap()
+                .is_empty()
+        );
+        let hub =
+            store.pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_HUB, 10).unwrap();
+        assert_eq!(hub.len(), 1);
+        assert_eq!(hub[0].id, lan[0].id);
+    }
+
+    #[test]
+    fn lan_ack_survives_reopen_without_acking_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let item = sample("crash after lan ack");
+        let event_id = {
+            let store = Store::open(dir.path()).unwrap();
+            store.insert(item, None).unwrap();
+            let lan =
+                store.pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_LAN, 10).unwrap();
+            store.ack_outbox_consumer(lan[0].id, crate::CONSUMER_LAN).unwrap();
+            lan[0].id
+        };
+        let store = Store::open(dir.path()).unwrap();
+        assert!(
+            store
+                .pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_LAN, 10)
+                .unwrap()
+                .is_empty()
+        );
+        let hub =
+            store.pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_HUB, 10).unwrap();
+        assert_eq!(hub.len(), 1);
+        assert_eq!(hub[0].id, event_id);
     }
 
     #[test]

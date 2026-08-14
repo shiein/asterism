@@ -8,6 +8,8 @@ pub enum KernelError {
     ServiceConflict,
     #[error("required service is missing")]
     ServiceMissing,
+    #[error("permission denied: {0}")]
+    PermissionDenied(&'static str),
     #[error("scope is closed")]
     ScopeClosed,
     #[error("mount failed: {0}")]

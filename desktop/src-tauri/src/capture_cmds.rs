@@ -45,6 +45,10 @@ pub fn list_windows() -> Result<Vec<asterism_capture::WindowInfo>, CmdError> {
 
 #[tauri::command]
 pub fn capture_window(state: State<'_, DesktopState>, id: u32) -> Result<String, CmdError> {
+    let session = state.begin_capture();
+    if session.is_cancelled() {
+        return Err(CmdError::Any("cancelled".into()));
+    }
     let frame = XcapBackend.capture_window(id).map_err(|e| CmdError::Any(e.to_string()))?;
     let png = export_png(frame.width, frame.height, &frame.bgra, &AnnotationScene::default())
         .map_err(CmdError::Any)?;
@@ -76,14 +80,13 @@ fn load_image_item(
     item_id: &str,
 ) -> Result<(asterism_core::ContentId, Vec<u8>, u32, u32), CmdError> {
     let id = item_id.parse().map_err(|e: asterism_core::CoreError| CmdError::Any(e.to_string()))?;
-    let item = state.store.get(id).map_err(|e| CmdError::Any(e.to_string()))?;
-    let png = match item.payload_ref() {
-        asterism_core::PayloadRef::Blob { blob_id } => {
-            state.store.get_blob(blob_id).map_err(|e| CmdError::Any(e.to_string()))?
-        }
-        asterism_core::PayloadRef::Inline { bytes } => bytes.to_vec(),
-        _ => return Err(CmdError::Any("not an image".into())),
-    };
+    let lookup =
+        state.broker.grant_read(id).ok_or_else(|| CmdError::Any("read grant denied".into()))?;
+    let item = state.query().get(&lookup, id).map_err(|e| CmdError::Any(e.to_string()))?;
+    let grant =
+        state.broker.grant_read(id).ok_or_else(|| CmdError::Any("read grant denied".into()))?;
+    let png =
+        state.query().payload_bytes(&grant, &item).map_err(|e| CmdError::Any(e.to_string()))?;
     let img = image::load_from_memory(&png).map_err(|e| CmdError::Any(e.to_string()))?;
     Ok((id, png, img.width(), img.height()))
 }
@@ -94,26 +97,38 @@ pub async fn record_gif(
     seconds: u32,
     fps: u16,
 ) -> Result<String, CmdError> {
+    let session = state.begin_capture();
+    let token = session.cancel_token();
     let (bytes, w, h) =
-        tauri::async_runtime::spawn_blocking(move || record_gif_inner(seconds, fps))
+        tauri::async_runtime::spawn_blocking(move || record_gif_inner(seconds, fps, token))
             .await
             .map_err(|e| CmdError::Any(e.to_string()))??;
     insert_blob(&state, bytes, w, h, ContentKind::Gif, Some("image/gif"))
 }
 
-fn record_gif_inner(seconds: u32, fps: u16) -> Result<(Vec<u8>, u32, u32), CmdError> {
+fn record_gif_inner(
+    seconds: u32,
+    fps: u16,
+    token: asterism_kernel::CancelToken,
+) -> Result<(Vec<u8>, u32, u32), CmdError> {
+    if token.is_cancelled() {
+        return Err(CmdError::Any("cancelled".into()));
+    }
     let backend = XcapBackend;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitor = asterism_capture::preferred_monitor(&monitors)
         .ok_or_else(|| CmdError::Any("no monitor".into()))?;
     let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-    let sel = crate::overlay_cli::select_region_subprocess(&first)
+    let sel = crate::overlay_cli::select_region_subprocess(&first, Some(&token))
         .map_err(|e| CmdError::Any(e.to_string()))?;
     let session = OverlaySession { frame: first.clone(), selection: sel };
     let (w, h, _) = session.crop_bgra().ok_or_else(|| CmdError::Any("need selection".into()))?;
     let mut gif = GifSession::new(w, h, fps);
     let frames = (seconds.max(1) * u32::from(fps.clamp(8, 15))).min(150);
     for _ in 0..frames {
+        if token.is_cancelled() {
+            return Err(CmdError::Any("cancelled".into()));
+        }
         let frame = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
         let sess = OverlaySession { frame, selection: session.selection.clone() };
         if let Some((cw, ch, bgra)) = sess.crop_bgra() {
@@ -133,10 +148,13 @@ pub async fn record_video(
     fps: u32,
     audio: Option<String>,
 ) -> Result<String, CmdError> {
-    let (bytes, w, h, mime) =
-        tauri::async_runtime::spawn_blocking(move || record_video_inner(seconds, fps, audio))
-            .await
-            .map_err(|e| CmdError::Any(e.to_string()))??;
+    let session = state.begin_capture();
+    let token = session.cancel_token();
+    let (bytes, w, h, mime) = tauri::async_runtime::spawn_blocking(move || {
+        record_video_inner(seconds, fps, audio, token)
+    })
+    .await
+    .map_err(|e| CmdError::Any(e.to_string()))??;
     insert_blob(&state, bytes, w, h, ContentKind::Video, Some(mime))
 }
 
@@ -144,7 +162,11 @@ fn record_video_inner(
     seconds: u32,
     fps: u32,
     audio: Option<String>,
+    token: asterism_kernel::CancelToken,
 ) -> Result<(Vec<u8>, u32, u32, &'static str), CmdError> {
+    if token.is_cancelled() {
+        return Err(CmdError::Any("cancelled".into()));
+    }
     #[cfg(not(target_os = "macos"))]
     if audio.as_deref().is_some_and(|source| source != "none") {
         return Err(CmdError::Any("当前平台尚不支持带音频的视频录制；未创建任何录制结果".into()));
@@ -155,7 +177,7 @@ fn record_video_inner(
     let monitor = asterism_capture::preferred_monitor(&monitors)
         .ok_or_else(|| CmdError::Any("no monitor".into()))?;
     let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-    let sel = crate::overlay_cli::select_region_subprocess(&first)
+    let sel = crate::overlay_cli::select_region_subprocess(&first, Some(&token))
         .map_err(|e| CmdError::Any(e.to_string()))?;
     let session = OverlaySession { frame: first, selection: sel };
     let (w, h, _) = session.crop_bgra().ok_or_else(|| CmdError::Any("need selection".into()))?;
@@ -176,6 +198,9 @@ fn record_video_inner(
             MacOsRecording::start(w, h, fps, audio).map_err(|e| CmdError::Any(e.to_string()))?;
         let started = std::time::Instant::now();
         for i in 0..plan.frames {
+            if token.is_cancelled() {
+                return Err(CmdError::Any("cancelled".into()));
+            }
             sleep_until(plan.deadline(started, i));
             let frame =
                 backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
@@ -196,6 +221,9 @@ fn record_video_inner(
         let mut avi = AviMjpeg::new(w, h, fps);
         let started = std::time::Instant::now();
         for i in 0..plan.frames {
+            if token.is_cancelled() {
+                return Err(CmdError::Any("cancelled".into()));
+            }
             sleep_until(plan.deadline(started, i));
             let frame =
                 backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
@@ -223,23 +251,35 @@ pub async fn scroll_capture(
     state: State<'_, DesktopState>,
     frames: u32,
 ) -> Result<String, CmdError> {
-    let (png, w, h) = tauri::async_runtime::spawn_blocking(move || scroll_capture_inner(frames))
-        .await
-        .map_err(|e| CmdError::Any(e.to_string()))??;
+    let session = state.begin_capture();
+    let token = session.cancel_token();
+    let (png, w, h) =
+        tauri::async_runtime::spawn_blocking(move || scroll_capture_inner(frames, token))
+            .await
+            .map_err(|e| CmdError::Any(e.to_string()))??;
     crate::commands::insert_screenshot(&state, png, w, h)
 }
 
-fn scroll_capture_inner(frames: u32) -> Result<(Vec<u8>, u32, u32), CmdError> {
+fn scroll_capture_inner(
+    frames: u32,
+    token: asterism_kernel::CancelToken,
+) -> Result<(Vec<u8>, u32, u32), CmdError> {
+    if token.is_cancelled() {
+        return Err(CmdError::Any("cancelled".into()));
+    }
     let backend = XcapBackend;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitor = asterism_capture::preferred_monitor(&monitors)
         .ok_or_else(|| CmdError::Any("no monitor".into()))?;
     let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-    let sel = crate::overlay_cli::select_region_subprocess(&first)
+    let sel = crate::overlay_cli::select_region_subprocess(&first, Some(&token))
         .map_err(|e| CmdError::Any(e.to_string()))?;
     let mut engine = asterism_capture::ScrollCaptureEngine::default();
     let n = frames.clamp(2, 40);
     for i in 0..n {
+        if token.is_cancelled() {
+            return Err(CmdError::Any("cancelled".into()));
+        }
         if i > 0 {
             asterism_capture::ScrollCaptureEngine::inject_scroll(-80);
             std::thread::sleep(std::time::Duration::from_millis(120));

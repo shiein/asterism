@@ -29,7 +29,14 @@ impl<'a> ContentCommandService<'a> {
         Ok(())
     }
 
-    pub fn get(&self, id: ContentId) -> anyhow::Result<asterism_core::ContentItem> {
+    pub fn get(
+        &self,
+        grant: &asterism_plugin_api::ContentReadGrant,
+        id: ContentId,
+    ) -> anyhow::Result<asterism_core::ContentItem> {
+        if !grant.is_valid(id) {
+            anyhow::bail!("content read grant invalid");
+        }
         Ok(self.store().get(id)?)
     }
 

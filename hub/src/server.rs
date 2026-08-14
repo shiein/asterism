@@ -82,7 +82,7 @@ pub async fn run(config: HubConfig) -> Result<()> {
         }
     });
     let routes = Arc::new(HubRouter::new());
-    let mut registry = ServiceRegistry::new();
+    let registry = ServiceRegistry::new();
     registry.provide(Arc::clone(&routes)).map_err(|err| anyhow::anyhow!(err))?;
     let runtime =
         crate::host::hub_boot_plan().mount_with(registry).map_err(|err| anyhow::anyhow!(err))?;

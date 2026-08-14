@@ -3,6 +3,7 @@
 pub mod command;
 pub mod ingest;
 pub mod plugins;
+pub mod ports;
 pub mod query;
 
 pub use command::ContentCommandService;
@@ -11,6 +12,7 @@ pub use plugins::{
     CaptureApi, CapturePlugin, ClipboardPlugin, DomainFoundationPlugin, DomainRuntime, HistoryApi,
     HistoryPlugin, MediaApi, MediaPlugin, SyncPlugin,
 };
+pub use ports::DomainStore;
 pub use query::ContentQueryService;
 
 use asterism_kernel::BootPlan;

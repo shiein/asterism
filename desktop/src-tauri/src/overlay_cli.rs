@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 
 use asterism_capture::backend::{CapturedFrame, MonitorInfo};
 use asterism_capture::{Selection, select_region};
+use asterism_kernel::CancelToken;
 
 /// 独立进程入口：当前进程没有 Tauri/tao 事件循环，可以安全地跑 winit EventLoop。
 /// 冻结帧走 stdin，避免 4K BGRA 落盘。
@@ -65,7 +66,10 @@ pub fn run_overlay_select() -> i32 {
     }
 }
 
-pub fn select_region_subprocess(frame: &CapturedFrame) -> anyhow::Result<Option<Selection>> {
+pub fn select_region_subprocess(
+    frame: &CapturedFrame,
+    cancel: Option<&CancelToken>,
+) -> anyhow::Result<Option<Selection>> {
     let exe = std::env::current_exe()?;
     let child = std::process::Command::new(exe)
         .arg("--overlay-select")
@@ -79,20 +83,34 @@ pub fn select_region_subprocess(frame: &CapturedFrame) -> anyhow::Result<Option<
         .spawn()?;
     let mut lease = asterism_kernel::ChildProcessLease::new(child);
     {
-        let child = lease.child_mut().ok_or_else(|| anyhow::anyhow!("overlay child"))?;
-        let stdin = child.stdin.as_mut().ok_or_else(|| anyhow::anyhow!("overlay stdin"))?;
+        let mut stdin = lease.take_stdin().ok_or_else(|| anyhow::anyhow!("overlay stdin"))?;
         stdin.write_all(&frame.bgra)?;
     }
-    let child = lease.take().ok_or_else(|| anyhow::anyhow!("overlay child taken"))?;
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("overlay process failed: {err}");
+    let mut stdout = lease.take_stdout().ok_or_else(|| anyhow::anyhow!("overlay stdout"))?;
+    let mut stderr = lease.take_stderr().ok_or_else(|| anyhow::anyhow!("overlay stderr"))?;
+    loop {
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            drop(lease);
+            return Ok(None);
+        }
+        match lease.try_wait()? {
+            Some(status) => {
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+                stdout.read_to_end(&mut out)?;
+                stderr.read_to_end(&mut err)?;
+                if !status.success() {
+                    let err = String::from_utf8_lossy(&err);
+                    anyhow::bail!("overlay process failed: {err}");
+                }
+                let text = String::from_utf8_lossy(&out);
+                let text = text.trim();
+                if text.contains("\"cancelled\"") {
+                    return Ok(None);
+                }
+                return Ok(Some(serde_json::from_str(text)?));
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let text = text.trim();
-    if text.contains("\"cancelled\"") {
-        return Ok(None);
-    }
-    Ok(Some(serde_json::from_str(text)?))
 }

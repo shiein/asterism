@@ -4,7 +4,9 @@ pub mod action;
 pub mod grant;
 pub mod ids;
 
-pub use action::ActionRegistry;
+pub use action::{ActionDescriptor, ActionRegistry};
 pub use asterism_core::{ContentHandle, Provenance};
-pub use grant::{ContentCommandGrant, ContentReadGrant, PermissionBroker};
+pub use grant::{
+    ContentCommandGrant, ContentReadGrant, HistoryQueryGrant, PermissionBroker, SelectedPathGrant,
+};
 pub use ids::{ActionKey, PluginManifest, TrustTier};

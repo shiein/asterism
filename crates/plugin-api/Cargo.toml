@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 description = "Plugin contracts: namespaced IDs, grants, action host, manifests"
 
+[features]
+default = []
+host-issuer = []
+
 [dependencies]
 asterism-core.workspace = true
 asterism-kernel.workspace = true

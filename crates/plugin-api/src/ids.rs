@@ -79,3 +79,17 @@ mod tests {
         assert_eq!(ActionKey::from_user("asterism.history.delete").unwrap(), ActionKey::DELETE);
     }
 }
+
+#[cfg(test)]
+mod boundary_tests {
+    #[test]
+    fn plugin_api_does_not_depend_on_storage_or_crypto() {
+        let manifest = include_str!("../Cargo.toml");
+        for forbidden in ["asterism-storage", "asterism-crypto", "asterism-clipboard", "tauri"] {
+            assert!(
+                !manifest.contains(forbidden),
+                "plugin-api Cargo.toml must not depend on {forbidden}"
+            );
+        }
+    }
+}

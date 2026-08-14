@@ -1,8 +1,10 @@
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use asterism_core::ContentHandle;
 use asterism_core::content::ContentKind;
 use asterism_core::id::ContentId;
+use asterism_kernel::DeclaredPermissions;
 
 /// Permission 是需求；Grant 是本次调用实际拿到的范围。
 #[derive(Clone, Debug)]
@@ -49,6 +51,23 @@ impl ContentCommandGrant {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct HistoryQueryGrant {
+    _private: (),
+}
+
+#[derive(Clone, Debug)]
+pub struct SelectedPathGrant {
+    path: PathBuf,
+}
+
+impl SelectedPathGrant {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(any(test, feature = "host-issuer"))]
 const HOST_PERMISSIONS: &[&str] = &[
     "content.read",
     "content.favorite",
@@ -57,25 +76,31 @@ const HOST_PERMISSIONS: &[&str] = &[
     "clipboard.read",
     "history.query",
     "capture.screen",
+    "filesystem.write.selected",
+    "credential.account",
+    "storage.domain",
 ];
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct PermissionBroker {
     permissions: &'static [&'static str],
     host: bool,
 }
 
 impl PermissionBroker {
+    #[cfg(any(test, feature = "host-issuer"))]
     pub fn host() -> Self {
         Self { permissions: HOST_PERMISSIONS, host: true }
     }
 
-    pub fn for_plugin(permissions: &'static [&'static str]) -> Self {
-        Self { permissions, host: false }
+    /// 仅绑定 Mount 时声明的权限，调用方不能自行拼权限表。
+    pub fn for_declared(permissions: DeclaredPermissions) -> Self {
+        Self { permissions: permissions.as_slice(), host: false }
     }
 
-    pub fn for_manifest(manifest: &crate::PluginManifest) -> Self {
-        Self::for_plugin(manifest.permissions)
+    #[cfg(test)]
+    pub fn for_plugin(permissions: &'static [&'static str]) -> Self {
+        Self { permissions, host: false }
     }
 
     pub fn is_host(&self) -> bool {
@@ -95,6 +120,10 @@ impl PermissionBroker {
         self.grant_read(handle.id())
     }
 
+    pub fn grant_history(&self) -> Option<HistoryQueryGrant> {
+        self.allows("history.query").then_some(HistoryQueryGrant { _private: () })
+    }
+
     pub fn grant_copy(&self, id: ContentId, kind: ContentKind) -> Option<ContentReadGrant> {
         if !self.allows("clipboard.write") && !self.allows("content.read") {
             return None;
@@ -109,6 +138,10 @@ impl PermissionBroker {
 
     pub fn grant_host_transfer(&self, id: ContentId) -> Option<ContentReadGrant> {
         self.host.then(|| ContentReadGrant::issue(id, u64::MAX, Duration::from_secs(60)))
+    }
+
+    pub fn grant_write_selected(&self, path: PathBuf) -> Option<SelectedPathGrant> {
+        self.allows("filesystem.write.selected").then_some(SelectedPathGrant { path })
     }
 
     pub fn grant_command(
@@ -149,7 +182,8 @@ mod tests {
         assert!(plugin.grant_read(id).is_some());
         assert!(plugin.grant_command(id, false, true).is_none());
         assert!(plugin.grant_host_transfer(id).is_none());
-        assert!(PermissionBroker::default().grant_read(id).is_none());
+        assert!(plugin.grant_history().is_none());
+        assert!(plugin.grant_write_selected(PathBuf::from("/tmp/out")).is_none());
     }
 
     #[test]
@@ -159,5 +193,7 @@ mod tests {
         assert!(host.is_host());
         assert!(host.grant_host_transfer(id).is_some());
         assert!(host.grant_command(id, true, true).is_some());
+        assert!(host.grant_history().is_some());
+        assert!(host.grant_write_selected(PathBuf::from("/tmp/out")).is_some());
     }
 }

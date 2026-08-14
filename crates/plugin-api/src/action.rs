@@ -28,8 +28,17 @@ impl ActionRegistry {
         + Send
         + Sync
         + 'static,
-    ) {
-        self.handlers.lock().expect("action registry").insert(key, Arc::new(handler));
+    ) -> Result<(), ActionError> {
+        let mut handlers = self.handlers.lock().expect("action registry");
+        if handlers.contains_key(&key) {
+            return Err(ActionError::Failed(format!("action {} already registered", key.as_str())));
+        }
+        handlers.insert(key, Arc::new(handler));
+        Ok(())
+    }
+
+    pub fn unregister(&self, key: ActionKey) -> bool {
+        self.handlers.lock().expect("action registry").remove(&key).is_some()
     }
 
     pub fn execute(
@@ -51,6 +60,35 @@ impl ActionRegistry {
     pub fn contains(&self, key: ActionKey) -> bool {
         self.handlers.lock().expect("action registry").contains_key(&key)
     }
+
+    pub fn descriptors(&self) -> Vec<ActionDescriptor> {
+        let mut keys: Vec<_> =
+            self.handlers.lock().expect("action registry").keys().copied().collect();
+        keys.sort_by_key(|key| key.as_str());
+        keys.into_iter().map(ActionDescriptor::from_key).collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActionDescriptor {
+    pub key: ActionKey,
+    pub title: &'static str,
+}
+
+impl ActionDescriptor {
+    pub fn from_key(key: ActionKey) -> Self {
+        let title = match key {
+            ActionKey::COPY => "Copy",
+            ActionKey::SAVE => "Save",
+            ActionKey::DELETE => "Delete",
+            ActionKey::FAVORITE => "Favorite",
+            ActionKey::SEND => "Send",
+            ActionKey::CAPTURE_FULLSCREEN => "Screenshot",
+            ActionKey::CAPTURE_REGION => "Region",
+            other => other.as_str(),
+        };
+        Self { key, title }
+    }
 }
 
 #[cfg(test)]
@@ -67,11 +105,26 @@ mod tests {
     #[test]
     fn registered_action_runs() {
         let registry = ActionRegistry::new();
-        registry.register(ActionKey::COPY, |id, _| Ok(ActionResult::Copied { id }));
+        registry.register(ActionKey::COPY, |id, _| Ok(ActionResult::Copied { id })).unwrap();
         let id = ContentId::new();
         assert_eq!(
             registry.execute(ActionKey::COPY, id, None).unwrap(),
             ActionResult::Copied { id }
         );
+        assert_eq!(registry.descriptors()[0].key, ActionKey::COPY);
+        assert_eq!(registry.descriptors()[0].title, "Copy");
+    }
+
+    #[test]
+    fn duplicate_action_is_rejected_and_unregister_allows_remount() {
+        let registry = ActionRegistry::new();
+        registry.register(ActionKey::SAVE, |_, _| Err(ActionError::Unsupported)).unwrap();
+        assert!(registry.register(ActionKey::SAVE, |_, _| Err(ActionError::Unsupported)).is_err());
+        assert!(registry.unregister(ActionKey::SAVE));
+        registry
+            .register(ActionKey::SAVE, |_, path| {
+                Ok(ActionResult::Saved { path: path.unwrap_or_default() })
+            })
+            .unwrap();
     }
 }

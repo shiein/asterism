@@ -22,7 +22,7 @@ impl ScopeId {
 pub struct Scope {
     id: ScopeId,
     closed: Arc<AtomicBool>,
-    parent_closed: Option<Arc<AtomicBool>>,
+    ancestors: Vec<Arc<AtomicBool>>,
     children: Vec<Scope>,
 }
 
@@ -31,7 +31,7 @@ impl Scope {
         Self {
             id: ScopeId::next(),
             closed: Arc::new(AtomicBool::new(false)),
-            parent_closed: None,
+            ancestors: Vec::new(),
             children: Vec::new(),
         }
     }
@@ -42,7 +42,7 @@ impl Scope {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
-            || self.parent_closed.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire))
+            || self.ancestors.iter().any(|flag| flag.load(Ordering::Acquire))
     }
 
     pub fn child(&mut self) -> Result<&mut Scope> {
@@ -54,19 +54,21 @@ impl Scope {
     }
 
     pub fn cancel_token(&self) -> CancelToken {
-        CancelToken { closed: Arc::clone(&self.closed), parent_closed: self.parent_closed.clone() }
+        CancelToken { closed: Arc::clone(&self.closed), ancestors: self.ancestors.clone() }
     }
 
-    /// 独立 closed 标志；父 dispose 会取消，子 dispose 不会关闭父。
+    /// 独立 closed 标志；任意祖先 dispose 会取消，子 dispose 不会关闭父。
     pub fn fork(&self) -> Self {
         self.spawn_child()
     }
 
     fn spawn_child(&self) -> Self {
+        let mut ancestors = self.ancestors.clone();
+        ancestors.push(Arc::clone(&self.closed));
         Self {
             id: ScopeId::next(),
             closed: Arc::new(AtomicBool::new(false)),
-            parent_closed: Some(Arc::clone(&self.closed)),
+            ancestors,
             children: Vec::new(),
         }
     }
@@ -83,13 +85,13 @@ impl Scope {
 #[derive(Clone, Debug)]
 pub struct CancelToken {
     closed: Arc<AtomicBool>,
-    parent_closed: Option<Arc<AtomicBool>>,
+    ancestors: Vec<Arc<AtomicBool>>,
 }
 
 impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         self.closed.load(Ordering::Acquire)
-            || self.parent_closed.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire))
+            || self.ancestors.iter().any(|flag| flag.load(Ordering::Acquire))
     }
 }
 
@@ -130,5 +132,21 @@ mod tests {
         assert!(forked.is_closed());
         assert!(!root.is_closed());
         assert!(!root.cancel_token().is_cancelled());
+    }
+
+    #[test]
+    fn nested_fork_sees_root_dispose() {
+        let mut root = Scope::root();
+        let child = root.fork();
+        let grandchild = child.fork();
+        let grand_token = grandchild.cancel_token();
+        assert!(!grandchild.is_closed());
+        assert!(!grand_token.is_cancelled());
+        root.dispose();
+        assert!(child.is_closed());
+        assert!(grandchild.is_closed());
+        assert!(grand_token.is_cancelled());
+        assert!(!child.cancel_token().is_cancelled() || grandchild.is_closed());
+        assert!(child.cancel_token().is_cancelled());
     }
 }

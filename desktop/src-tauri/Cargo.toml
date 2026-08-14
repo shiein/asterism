@@ -30,7 +30,7 @@ asterism-clipboard.workspace = true
 asterism-core.workspace = true
 asterism-domain-runtime.workspace = true
 asterism-kernel.workspace = true
-asterism-plugin-api.workspace = true
+asterism-plugin-api = { workspace = true, features = ["host-issuer"] }
 asterism-crypto.workspace = true
 asterism-platform.workspace = true
 asterism-storage.workspace = true

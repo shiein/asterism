@@ -19,7 +19,31 @@ pub use error::{KernelError, Result};
 pub use graph::{PluginNode, resolve_boot_order};
 pub use health::{Health, HealthBoard};
 pub use ids::validate_plugin_id;
-pub use plugin::{KernelManifest, MountContext, Plugin, TrustTier, mount_plugin};
+pub use plugin::{
+    DeclaredPermissions, KernelManifest, MountContext, Plugin, TrustTier, mount_plugin,
+};
 pub use registry::ServiceRegistry;
 pub use scope::{CancelToken, Scope, ScopeId};
 pub use task::{ChildProcessLease, OsThreadLease, TaskGroup};
+
+#[cfg(test)]
+mod boundary_tests {
+    #[test]
+    fn kernel_crate_does_not_depend_on_domain_layers() {
+        let manifest = include_str!("../Cargo.toml");
+        for forbidden in [
+            "asterism-core",
+            "asterism-storage",
+            "asterism-crypto",
+            "asterism-clipboard",
+            "asterism-domain-runtime",
+            "asterism-plugin-api",
+            "tauri",
+        ] {
+            assert!(
+                !manifest.contains(forbidden),
+                "kernel Cargo.toml must not depend on {forbidden}"
+            );
+        }
+    }
+}

@@ -4,6 +4,7 @@ use asterism_clipboard::normalize::NormalizedContent;
 use asterism_clipboard::{NativeClipboard, SelfWriteGuard};
 use asterism_core::content::{ContentFlags, ContentItem, ContentKind, PayloadRef};
 use asterism_core::{ContentDraft, IngestionOutcome};
+use asterism_domain_runtime::DomainStore;
 use asterism_domain_runtime::{
     CapturePlugin, DomainFoundationPlugin, HistoryPlugin, Ingestion, MediaPlugin,
 };
@@ -14,30 +15,25 @@ use asterism_plugin_api::{ActionRegistry, ContentReadGrant, PermissionBroker};
 use asterism_storage::Store;
 use tauri::AppHandle;
 
+use crate::host::{HostAccount, HostClipboard, HostPaths};
 use crate::plugins::{DesktopActionPlugin, DesktopClipboardPlugin, DesktopSyncPlugin};
 use crate::settings::SyncSettings;
 use crate::sync_engine::SyncHandle;
 
 pub struct DesktopState {
-    /// 声明在前，保证 Drop 时最后拆 Runtime（先关 channel，再 join 线程）。
-    _runtime: MountedRuntime,
     _crash: CrashGuard,
-    pub store: Arc<Store>,
-    pub ingestion: Arc<Ingestion>,
-    #[allow(dead_code)]
-    pub broker: PermissionBroker,
-    pub guard: Arc<SelfWriteGuard>,
-    pub identity: LocalIdentity,
-    pub paths: AppPaths,
-    pub clipboard: NativeClipboard,
-    pub vault: parking_lot::RwLock<LocalVault>,
-    pub avk: Arc<parking_lot::RwLock<asterism_crypto::AccountVaultKey>>,
-    pub sync: SyncHandle,
-    #[allow(dead_code)]
-    pub cache_pin: Arc<parking_lot::RwLock<Option<String>>>,
-    pub actions: Arc<ActionRegistry>,
-    #[allow(dead_code)]
-    pub boot_order: Vec<&'static str>,
+    pub(crate) ingestion: Arc<Ingestion>,
+    pub(crate) broker: PermissionBroker,
+    pub(crate) guard: Arc<SelfWriteGuard>,
+    pub(crate) identity: LocalIdentity,
+    pub(crate) paths: AppPaths,
+    pub(crate) clipboard: NativeClipboard,
+    pub(crate) vault: parking_lot::RwLock<LocalVault>,
+    pub(crate) avk: Arc<parking_lot::RwLock<asterism_crypto::AccountVaultKey>>,
+    pub(crate) sync: SyncHandle,
+    pub(crate) actions: Arc<ActionRegistry>,
+    /// 最后析构：先释放 sender / handler，再撤销 Registry，最后 join 线程。
+    _runtime: MountedRuntime,
 }
 
 impl DesktopState {
@@ -60,50 +56,51 @@ impl DesktopState {
             Ingestion::new(Arc::clone(&store), paths.clone(), identity.device_id, Arc::clone(&avk));
         let settings = SyncSettings::load(&paths.config_dir);
 
-        let mut registry = ServiceRegistry::new();
+        let registry = ServiceRegistry::new();
         registry.provide(Arc::clone(&ingestion)).map_err(|err| anyhow::anyhow!(err))?;
         let actions = Arc::new(ActionRegistry::new());
         registry.provide(Arc::clone(&actions)).map_err(|err| anyhow::anyhow!(err))?;
+        registry
+            .provide(Arc::new(HostPaths { paths: paths.clone() }))
+            .map_err(|err| anyhow::anyhow!(err))?;
+        registry
+            .provide_gated(
+                Arc::new(HostClipboard {
+                    guard: Arc::clone(&guard),
+                    cache_pin: Arc::clone(&cache_pin),
+                }),
+                "clipboard.write",
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+        registry
+            .provide_gated(
+                Arc::new(HostAccount {
+                    identity: identity.clone(),
+                    vault: asterism_crypto::AccountVaultKey::from_bytes(*vault.avk.as_bytes()),
+                    settings,
+                }),
+                "credential.account",
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+        registry
+            .provide_gated(DomainStore::wrap(Arc::clone(&store)), "content.read")
+            .map_err(|err| anyhow::anyhow!(err))?;
 
         let mut plan = BootPlan::new("asterism-desktop");
         plan.push(DomainFoundationPlugin);
         plan.push(HistoryPlugin);
-        plan.push(DesktopSyncPlugin {
-            identity: identity.clone(),
-            vault: asterism_crypto::AccountVaultKey::from_bytes(*vault.avk.as_bytes()),
-            store: Arc::clone(&store),
-            ingestion: Arc::clone(&ingestion),
-            paths: paths.clone(),
-            guard: Arc::clone(&guard),
-            cache_pin: Arc::clone(&cache_pin),
-            settings,
-            app: app.clone(),
-        });
-        plan.push(DesktopClipboardPlugin {
-            ingestion: Arc::clone(&ingestion),
-            guard: Arc::clone(&guard),
-            cache_pin: Arc::clone(&cache_pin),
-            app: app.clone(),
-        });
+        plan.push(DesktopSyncPlugin { app: app.clone() });
+        plan.push(DesktopClipboardPlugin { app: app.clone() });
         plan.push(CapturePlugin);
         plan.push(MediaPlugin);
-        plan.push(DesktopActionPlugin {
-            ingestion: Arc::clone(&ingestion),
-            store: Arc::clone(&store),
-            paths: paths.clone(),
-            guard: Arc::clone(&guard),
-            cache_pin: Arc::clone(&cache_pin),
-        });
+        plan.push(DesktopActionPlugin);
         let runtime = plan.mount_with(registry).map_err(|err| anyhow::anyhow!(err))?;
         tracing::info!(order = ?runtime.boot_order(), "desktop boot plan");
-        let boot_order = runtime.boot_order().to_vec();
         let sync = runtime.registry.require::<SyncHandle>().map_err(|err| anyhow::anyhow!(err))?;
         let sync = (*sync).clone();
 
         Ok(Self {
-            _runtime: runtime,
             _crash: crash,
-            store,
             ingestion,
             broker: PermissionBroker::host(),
             guard,
@@ -113,14 +110,17 @@ impl DesktopState {
             vault: parking_lot::RwLock::new(vault),
             avk,
             sync,
-            cache_pin,
             actions,
-            boot_order,
+            _runtime: runtime,
         })
     }
 
     pub fn begin_capture(&self) -> CaptureSession {
-        CaptureSession { scope: self._runtime.scope.fork() }
+        CaptureSession { scope: self._runtime.scope.fork(), temps: Vec::new() }
+    }
+
+    pub fn query(&self) -> asterism_domain_runtime::ContentQueryService<'_> {
+        asterism_domain_runtime::ContentQueryService::new(&self.ingestion)
     }
 }
 
@@ -133,16 +133,6 @@ pub fn ingest_image(
     mime_hint: Option<&str>,
     producer: &str,
 ) -> anyhow::Result<asterism_core::ContentId> {
-    let _session = state.begin_capture();
-    let local_tag = asterism_crypto::local_dedup_tag(&png);
-    let content = NormalizedContent::Image {
-        png,
-        width,
-        height,
-        dedup_tag: local_tag,
-        flags: ContentFlags::REMOTE_ALLOWED,
-        source_app: Some("asterism".into()),
-    };
     let draft = ContentDraft {
         producer_plugin_id: producer.into(),
         source_device_id: state.identity.device_id,
@@ -154,7 +144,7 @@ pub fn ingest_image(
         kind_override: Some(kind),
         mime_hint: mime_hint.map(str::to_owned),
     };
-    match state.ingestion.submit_local(draft, content, false)? {
+    match state.ingestion.submit_image(draft, png, width, height)? {
         IngestionOutcome::Committed(id) => {
             state.sync.drain_outbox();
             Ok(id)
@@ -166,17 +156,48 @@ pub fn ingest_image(
 
 pub struct CaptureSession {
     scope: asterism_kernel::Scope,
+    temps: Vec<std::path::PathBuf>,
+}
+
+impl CaptureSession {
+    pub fn cancel_token(&self) -> asterism_kernel::CancelToken {
+        self.scope.cancel_token()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn track_temp(&mut self, path: std::path::PathBuf) {
+        self.temps.push(path);
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn temp_dir(&mut self, paths: &AppPaths) -> std::io::Result<std::path::PathBuf> {
+        let dir = paths.cache_dir.join("capture-sessions").join(self.scope.id().raw().to_string());
+        std::fs::create_dir_all(&dir)?;
+        self.track_temp(dir.clone());
+        Ok(dir)
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.scope.is_closed()
+    }
 }
 
 impl Drop for CaptureSession {
     fn drop(&mut self) {
         self.scope.dispose();
+        for path in self.temps.drain(..).rev() {
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 }
 
 pub fn item_to_clipboard(
     item: &ContentItem,
-    store: &Store,
+    store: &DomainStore,
     paths: &AppPaths,
     grant: &ContentReadGrant,
 ) -> anyhow::Result<NormalizedContent> {
@@ -279,7 +300,7 @@ pub fn item_to_clipboard(
     }
 }
 
-fn load_bytes(item: &ContentItem, store: &Store) -> anyhow::Result<Vec<u8>> {
+fn load_bytes(item: &ContentItem, store: &DomainStore) -> anyhow::Result<Vec<u8>> {
     match &item.payload_ref() {
         PayloadRef::Inline { bytes } => Ok(bytes.to_vec()),
         PayloadRef::Blob { blob_id } => Ok(store.get_blob(blob_id)?),
@@ -305,12 +326,6 @@ mod tests {
         let store = Store::open(&paths.data_dir).unwrap();
         let avk = Arc::new(parking_lot::RwLock::new(asterism_crypto::AccountVaultKey::generate()));
         let ingestion = Ingestion::new(Arc::clone(&store), paths.clone(), DeviceId::new(), avk);
-        let content = NormalizedContent::Text {
-            text: "copy again".into(),
-            dedup_tag: asterism_crypto::local_dedup_tag(b"copy again"),
-            flags: ContentFlags::REMOTE_ALLOWED,
-            source_app: None,
-        };
         let draft = |event: &str| ContentDraft {
             producer_plugin_id: "asterism.clipboard".into(),
             source_device_id: DeviceId::new(),
@@ -322,8 +337,8 @@ mod tests {
             kind_override: None,
             mime_hint: None,
         };
-        let first = ingestion.submit_local(draft("1"), content.clone(), false).unwrap();
-        let second = ingestion.submit_local(draft("2"), content, false).unwrap();
+        let first = ingestion.submit_text(draft("1"), "copy again".into()).unwrap();
+        let second = ingestion.submit_text(draft("2"), "copy again".into()).unwrap();
         assert!(matches!(first, IngestionOutcome::Committed(_)));
         assert!(matches!(second, IngestionOutcome::Committed(_)));
         assert_ne!(first, second);
@@ -358,18 +373,44 @@ mod tests {
             kind_override: None,
             mime_hint: None,
         };
-        let IngestionOutcome::Committed(id) = ingestion
-            .submit_files(draft, vec![src.clone()], ContentFlags::empty(), None, false)
-            .unwrap()
+        let IngestionOutcome::Committed(id) =
+            ingestion.submit_files(draft, vec![src.clone()], None).unwrap()
         else {
             panic!("expected commit");
         };
-        let item = asterism_domain_runtime::ContentCommandService::new(&ingestion).get(id).unwrap();
+        let grant = PermissionBroker::host().grant_read(id).unwrap();
+        let item = asterism_domain_runtime::ContentCommandService::new(&ingestion)
+            .get(&grant, id)
+            .unwrap();
         let grant = PermissionBroker::host().grant_copy(item.id(), item.kind()).unwrap();
-        let written = item_to_clipboard(&item, &store, &paths, &grant).unwrap();
+        let written =
+            item_to_clipboard(&item, &DomainStore::wrap(Arc::clone(&store)), &paths, &grant)
+                .unwrap();
         let file = paths.item_cache(id).join("note.txt");
         assert_eq!(written.dedup_tag(), asterism_clipboard::files_local_dedup_tag(&[file]));
         drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn capture_session_drop_removes_tracked_temp() {
+        let root = std::env::temp_dir()
+            .join(format!("asterism-capture-lease-{}", asterism_core::ContentId::new()));
+        let paths = AppPaths {
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            config_dir: root.join("config"),
+        };
+        paths.ensure().unwrap();
+        let dir = {
+            let mut session =
+                CaptureSession { scope: asterism_kernel::Scope::root(), temps: Vec::new() };
+            let dir = session.temp_dir(&paths).unwrap();
+            std::fs::write(dir.join("frame.bin"), b"x").unwrap();
+            assert!(dir.exists());
+            dir
+        };
+        assert!(!dir.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

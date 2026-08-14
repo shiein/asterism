@@ -245,14 +245,18 @@ pub fn latest_unacked(
     conn: &Connection,
     event_type: &str,
     aggregate_id: ContentId,
+    consumer_id: &str,
 ) -> Result<Option<i64>> {
     conn.query_row(
         r#"
-        SELECT id FROM domain_outbox
-        WHERE event_type = ?1 AND aggregate_id = ?2
-        ORDER BY id DESC LIMIT 1
+        SELECT o.id FROM domain_outbox o
+        LEFT JOIN domain_outbox_delivery d
+          ON d.event_id = o.event_id AND d.consumer_id = ?3
+        WHERE o.event_type = ?1 AND o.aggregate_id = ?2
+          AND d.acked_at_ms IS NULL
+        ORDER BY o.id DESC LIMIT 1
         "#,
-        params![event_type, aggregate_id.as_bytes().as_slice()],
+        params![event_type, aggregate_id.as_bytes().as_slice(), consumer_id],
         |row| row.get(0),
     )
     .optional()

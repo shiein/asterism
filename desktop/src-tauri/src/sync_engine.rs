@@ -11,8 +11,9 @@ use asterism_core::content::{
     ContentFlags, ContentItem, ContentKind, ContentStatus, FileManifest, ItemMetadata, PayloadRef,
 };
 use asterism_crypto::AccountVaultKey;
-use asterism_domain_runtime::{Ingestion, RemoteItemBody, RemoteItemSpec};
+use asterism_domain_runtime::{DomainStore, Ingestion, RemoteItemBody, RemoteItemSpec};
 use asterism_platform::{AppPaths, LocalIdentity, TrustStore};
+#[cfg(test)]
 use asterism_storage::Store;
 use asterism_sync::hub_client::{HistoryDto, HubClient};
 use asterism_sync::lan::{self, DiscoveredPeer};
@@ -65,7 +66,7 @@ impl SyncHandle {
 pub fn spawn(
     identity: LocalIdentity,
     vault: AccountVaultKey,
-    store: Arc<Store>,
+    store: Arc<DomainStore>,
     ingestion: Arc<Ingestion>,
     paths: AppPaths,
     guard: Arc<SelfWriteGuard>,
@@ -94,7 +95,7 @@ pub fn spawn(
 async fn run_loop(
     identity: LocalIdentity,
     mut vault: AccountVaultKey,
-    store: Arc<Store>,
+    store: Arc<DomainStore>,
     ingestion: Arc<Ingestion>,
     paths: AppPaths,
     guard: Arc<SelfWriteGuard>,
@@ -263,7 +264,7 @@ async fn run_loop(
 async fn consume_committed_outbox(
     identity: &LocalIdentity,
     vault: &AccountVaultKey,
-    store: &Store,
+    store: &DomainStore,
     paths: &AppPaths,
     settings: &Arc<Mutex<SyncSettings>>,
     cert: &DeviceCert,
@@ -277,7 +278,7 @@ async fn consume_committed_outbox(
 
 async fn consume_lan_outbox(
     identity: &LocalIdentity,
-    store: &Store,
+    store: &DomainStore,
     paths: &AppPaths,
     settings: &Arc<Mutex<SyncSettings>>,
     cert: &DeviceCert,
@@ -327,7 +328,7 @@ async fn consume_lan_outbox(
 async fn consume_hub_outbox(
     identity: &LocalIdentity,
     vault: &AccountVaultKey,
-    store: &Store,
+    store: &DomainStore,
     paths: &AppPaths,
     settings: &Arc<Mutex<SyncSettings>>,
     on_change: &impl Fn(),
@@ -346,8 +347,11 @@ async fn consume_hub_outbox(
     let snap = settings.lock().clone();
     for event in pending {
         let from_remote = event.payload().map(|payload| payload.from_remote).unwrap_or(false);
-        if from_remote || !snap.hub_url.as_ref().is_some_and(|url| !url.is_empty()) {
+        if from_remote {
             let _ = store.ack_outbox_consumer(event.id, asterism_storage::CONSUMER_HUB);
+            continue;
+        }
+        if !snap.hub_url.as_ref().is_some_and(|url| !url.is_empty()) {
             continue;
         }
         let item = match store.get(event.aggregate_id) {
@@ -394,7 +398,7 @@ async fn consume_hub_outbox(
     }
 }
 
-fn backfill_unsynced(store: &Store) {
+fn backfill_unsynced(store: &DomainStore) {
     let pending = match store.pending_sync(200) {
         Ok(items) => items,
         Err(err) => {
@@ -412,7 +416,7 @@ fn backfill_unsynced(store: &Store) {
 async fn publish_one(
     identity: &LocalIdentity,
     vault: &AccountVaultKey,
-    store: &Store,
+    store: &DomainStore,
     paths: &AppPaths,
     settings: &Arc<Mutex<SyncSettings>>,
     item: &ContentItem,
@@ -489,7 +493,7 @@ async fn push_lan(
     trust: &Arc<Mutex<TrustStore>>,
     local: asterism_core::DeviceId,
     item: &ContentItem,
-    store: &Store,
+    store: &DomainStore,
     paths: &AppPaths,
 ) -> anyhow::Result<()> {
     let snapshot: Vec<DiscoveredPeer> = peers.lock().values().cloned().collect();
@@ -600,7 +604,7 @@ fn parse_fp(hex_str: &str) -> Option<[u8; 32]> {
 
 fn apply_lan(
     ingestion: &Ingestion,
-    store: &Store,
+    store: &DomainStore,
     paths: &AppPaths,
     guard: &SelfWriteGuard,
     cache_pin: &parking_lot::RwLock<Option<String>>,
@@ -618,7 +622,7 @@ fn apply_lan(
     }
     let metadata: ItemMetadata = serde_json::from_str(&lan_item.metadata_json).unwrap_or_default();
     let kind = ContentKind::parse(&lan_item.offer.kind).unwrap_or(ContentKind::Text);
-    let (item, manifest) = build_item(
+    let Some((item, _)) = persist_item(
         ingestion,
         lan_item.offer.item_id,
         from,
@@ -632,9 +636,11 @@ fn apply_lan(
         None,
         Some(lan_item.offer.logical_size),
         Some(lan_item.offer.payload_size),
-    )?;
-    if persist_new(ingestion, item.clone(), manifest)?
-        && auto_receive
+    )?
+    else {
+        return Ok(());
+    };
+    if auto_receive
         && let Ok(content) = item_to_clipboard(&item, store, paths, &host_read_grant(item.id()))
     {
         guard.remember(item.id(), content.dedup_tag());
@@ -647,7 +653,7 @@ fn apply_lan(
     Ok(())
 }
 
-fn build_item(
+fn persist_item(
     ingestion: &Ingestion,
     id: asterism_core::ContentId,
     origin: asterism_core::DeviceId,
@@ -661,7 +667,7 @@ fn build_item(
     created_at_ms: Option<i64>,
     logical_size: Option<u64>,
     payload_size: Option<u64>,
-) -> anyhow::Result<(ContentItem, Option<FileManifest>)> {
+) -> anyhow::Result<Option<(ContentItem, Option<FileManifest>)>> {
     let spec = RemoteItemSpec {
         id,
         origin,
@@ -674,7 +680,7 @@ fn build_item(
         logical_size,
         payload_size,
     };
-    match kind {
+    let body = match kind {
         ContentKind::Files => {
             let cache = paths.item_cache(id);
             let manifest = match unpack_file_bundle(&bytes, &cache) {
@@ -684,10 +690,11 @@ fn build_item(
                     asterism_clipboard::preflight_paths(&roots)?
                 }
             };
-            ingestion.assemble_remote(spec, RemoteItemBody::Files(manifest))
+            RemoteItemBody::Files(manifest)
         }
-        _ => ingestion.assemble_remote(spec, RemoteItemBody::Bytes(bytes)),
-    }
+        _ => RemoteItemBody::Bytes(bytes),
+    };
+    ingestion.persist_remote_item(spec, body)
 }
 
 fn client(settings: &SyncSettings) -> anyhow::Result<HubClient> {
@@ -734,7 +741,7 @@ pub fn persist_hub_pin_settings(
 async fn publish(
     identity: &LocalIdentity,
     vault: &AccountVaultKey,
-    store: &Store,
+    store: &DomainStore,
     paths: &AppPaths,
     settings: &Arc<Mutex<SyncSettings>>,
     item: &ContentItem,
@@ -801,7 +808,7 @@ async fn pull_hub(
     identity: &LocalIdentity,
     vault: &AccountVaultKey,
     ingestion: &Ingestion,
-    store: &Store,
+    store: &DomainStore,
     paths: &AppPaths,
     guard: &SelfWriteGuard,
     cache_pin: &parking_lot::RwLock<Option<String>>,
@@ -868,7 +875,7 @@ async fn pull_hub(
 const TOMBSTONE_SCOPE: &str = "hub_tombstones";
 
 #[cfg(test)]
-fn remember_tombstone(store: &Store, id: asterism_core::ContentId) {
+fn remember_tombstone(store: &DomainStore, id: asterism_core::ContentId) {
     let hex_id = hex::encode(id.as_bytes());
     let mut ids = load_tombstones(store);
     if !ids.iter().any(|existing| existing == &hex_id) {
@@ -877,7 +884,7 @@ fn remember_tombstone(store: &Store, id: asterism_core::ContentId) {
     }
 }
 
-fn load_tombstones(store: &Store) -> Vec<String> {
+fn load_tombstones(store: &DomainStore) -> Vec<String> {
     store
         .kv_get(TOMBSTONE_SCOPE)
         .ok()
@@ -886,7 +893,7 @@ fn load_tombstones(store: &Store) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn save_tombstones(store: &Store, ids: &[String]) {
+fn save_tombstones(store: &DomainStore, ids: &[String]) {
     let encoded = serde_json::to_string(ids).unwrap_or_else(|_| "[]".into());
     if let Err(err) = store.kv_set(TOMBSTONE_SCOPE, &encoded) {
         tracing::warn!(error = %err, "persist hub tombstones");
@@ -894,20 +901,11 @@ fn save_tombstones(store: &Store, ids: &[String]) {
 }
 
 async fn flush_tombstones(
-    store: &Store,
+    store: &DomainStore,
     settings: &Arc<Mutex<SyncSettings>>,
 ) -> anyhow::Result<()> {
     let snap = settings.lock().clone();
     if !snap.hub_url.as_ref().is_some_and(|url| !url.is_empty()) {
-        if let Ok(pending) = store.pending_outbox_for(
-            asterism_storage::EVENT_DELETED,
-            asterism_storage::CONSUMER_HUB_DELETE,
-            50,
-        ) {
-            for event in pending {
-                let _ = store.ack_outbox_consumer(event.id, asterism_storage::CONSUMER_HUB_DELETE);
-            }
-        }
         return Ok(());
     }
     if !snap.hub_ready() {
@@ -965,7 +963,7 @@ fn remember_failed(failed: &mut Vec<HistoryDto>, dto: HistoryDto) {
 
 const FAILED_REMOTE_SCOPE: &str = "hub_failed_remote";
 
-fn load_failed_remote(store: &Store) -> Vec<HistoryDto> {
+fn load_failed_remote(store: &DomainStore) -> Vec<HistoryDto> {
     store
         .kv_get(FAILED_REMOTE_SCOPE)
         .ok()
@@ -974,7 +972,7 @@ fn load_failed_remote(store: &Store) -> Vec<HistoryDto> {
         .unwrap_or_default()
 }
 
-fn save_failed_remote(store: &Store, failed: &[HistoryDto]) {
+fn save_failed_remote(store: &DomainStore, failed: &[HistoryDto]) {
     match serde_json::to_string(failed) {
         Ok(raw) => {
             if let Err(err) = store.kv_set(FAILED_REMOTE_SCOPE, &raw) {
@@ -985,7 +983,7 @@ fn save_failed_remote(store: &Store, failed: &[HistoryDto]) {
     }
 }
 
-fn persist_cursor(store: &Store, last_cursor: &mut Option<String>, next: String) {
+fn persist_cursor(store: &DomainStore, last_cursor: &mut Option<String>, next: String) {
     *last_cursor = Some(next.clone());
     if let Err(err) = store.set_hub_cursor(&next) {
         tracing::warn!(error = %err, "persist hub cursor");
@@ -1037,7 +1035,7 @@ impl Drop for TemporaryFile {
     }
 }
 
-fn build_file_item_from_archive(
+fn persist_file_item_from_archive(
     ingestion: &Ingestion,
     id: asterism_core::ContentId,
     origin: asterism_core::DeviceId,
@@ -1049,10 +1047,10 @@ fn build_file_item_from_archive(
     created_at_ms: i64,
     logical_size: u64,
     payload_size: u64,
-) -> anyhow::Result<(ContentItem, Option<FileManifest>)> {
+) -> anyhow::Result<Option<(ContentItem, Option<FileManifest>)>> {
     let cache = paths.item_cache(id);
     let (manifest, _) = unpack_file_bundle_reader(std::fs::File::open(archive)?, &cache)?;
-    ingestion.assemble_remote(
+    ingestion.persist_remote_item(
         RemoteItemSpec {
             id,
             origin,
@@ -1072,7 +1070,7 @@ fn build_file_item_from_archive(
 async fn apply_remote(
     vault: &AccountVaultKey,
     ingestion: &Ingestion,
-    store: &Store,
+    store: &DomainStore,
     paths: &AppPaths,
     _guard: &SelfWriteGuard,
     client: &HubClient,
@@ -1133,8 +1131,8 @@ async fn apply_remote(
     {
         tag.copy_from_slice(&decoded);
     }
-    let (item, manifest) = match payload {
-        RemotePayload::Bytes(bytes) => build_item(
+    let persisted = match payload {
+        RemotePayload::Bytes(bytes) => persist_item(
             ingestion,
             remote_id,
             dto.origin_device_id,
@@ -1149,7 +1147,7 @@ async fn apply_remote(
             Some(dto.logical_size),
             Some(dto.payload_size),
         )?,
-        RemotePayload::StagedFile(file) => build_file_item_from_archive(
+        RemotePayload::StagedFile(file) => persist_file_item_from_archive(
             ingestion,
             remote_id,
             dto.origin_device_id,
@@ -1163,9 +1161,9 @@ async fn apply_remote(
             dto.payload_size,
         )?,
     };
-    if !persist_new(ingestion, item.clone(), manifest)? {
+    let Some((item, _)) = persisted else {
         return Ok(None);
-    }
+    };
     if write_clipboard
         && let Ok(content) = item_to_clipboard(&item, store, paths, &host_read_grant(item.id()))
     {
@@ -1179,14 +1177,6 @@ fn host_read_grant(id: asterism_core::ContentId) -> ContentReadGrant {
     asterism_plugin_api::PermissionBroker::host()
         .grant_host_transfer(id)
         .expect("host broker issues transfer grant")
-}
-
-fn persist_new(
-    ingestion: &Ingestion,
-    item: ContentItem,
-    manifest: Option<FileManifest>,
-) -> anyhow::Result<bool> {
-    ingestion.commit_remote(item, manifest)
 }
 
 enum PayloadSource {
@@ -1254,7 +1244,7 @@ async fn upload_payload_chunks(
 
 fn load_payload(
     item: &ContentItem,
-    store: &Store,
+    store: &DomainStore,
     paths: &AppPaths,
 ) -> anyhow::Result<PayloadSource> {
     match &item.payload_ref() {
@@ -1408,6 +1398,10 @@ mod tests {
     use super::*;
     use asterism_clipboard::NormalizedContent;
 
+    fn domain(store: &Arc<Store>) -> Arc<DomainStore> {
+        DomainStore::wrap(Arc::clone(store))
+    }
+
     #[test]
     fn persist_new_treats_existing_id_as_not_new() {
         let root = std::env::temp_dir()
@@ -1422,25 +1416,22 @@ mod tests {
         let avk = Arc::new(parking_lot::RwLock::new(AccountVaultKey::generate()));
         let ingestion =
             Ingestion::new(Arc::clone(&store), paths.clone(), asterism_core::DeviceId::new(), avk);
-        let (item, _) = ingestion
-            .assemble_remote(
-                RemoteItemSpec {
-                    id: asterism_core::ContentId::new(),
-                    origin: asterism_core::DeviceId::new(),
-                    kind: ContentKind::Text,
-                    flags: ContentFlags::empty(),
-                    tag: [2; 32],
-                    metadata: ItemMetadata::default(),
-                    from_lan: false,
-                    created_at_ms: Some(1),
-                    logical_size: Some(1),
-                    payload_size: Some(1),
-                },
-                RemoteItemBody::Bytes(b"x".to_vec()),
-            )
-            .unwrap();
-        assert!(persist_new(&ingestion, item.clone(), None).unwrap());
-        assert!(!persist_new(&ingestion, item, None).unwrap());
+        let spec = RemoteItemSpec {
+            id: asterism_core::ContentId::new(),
+            origin: asterism_core::DeviceId::new(),
+            kind: ContentKind::Text,
+            flags: ContentFlags::empty(),
+            tag: [2; 32],
+            metadata: ItemMetadata::default(),
+            from_lan: false,
+            created_at_ms: Some(1),
+            logical_size: Some(1),
+            payload_size: Some(1),
+        };
+        assert!(
+            ingestion.persist_remote(spec.clone(), RemoteItemBody::Bytes(b"x".to_vec())).unwrap()
+        );
+        assert!(!ingestion.persist_remote(spec, RemoteItemBody::Bytes(b"x".to_vec())).unwrap());
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1459,26 +1450,23 @@ mod tests {
         let avk = Arc::new(parking_lot::RwLock::new(AccountVaultKey::generate()));
         let ingestion =
             Ingestion::new(Arc::clone(&store), paths.clone(), asterism_core::DeviceId::new(), avk);
-        let (item, _) = ingestion
-            .assemble_remote(
-                RemoteItemSpec {
-                    id: asterism_core::ContentId::new(),
-                    origin: asterism_core::DeviceId::new(),
-                    kind: ContentKind::Text,
-                    flags: ContentFlags::empty(),
-                    tag: [3; 32],
-                    metadata: ItemMetadata::default(),
-                    from_lan: false,
-                    created_at_ms: Some(1),
-                    logical_size: Some(1),
-                    payload_size: Some(1),
-                },
-                RemoteItemBody::Bytes(b"x".to_vec()),
-            )
-            .unwrap();
-        ingestion.commit_remote(item.clone(), None).unwrap();
+        let spec = RemoteItemSpec {
+            id: asterism_core::ContentId::new(),
+            origin: asterism_core::DeviceId::new(),
+            kind: ContentKind::Text,
+            flags: ContentFlags::empty(),
+            tag: [3; 32],
+            metadata: ItemMetadata::default(),
+            from_lan: false,
+            created_at_ms: Some(1),
+            logical_size: Some(1),
+            payload_size: Some(1),
+        };
+        let item_id = spec.id;
+        assert!(ingestion.persist_remote(spec, RemoteItemBody::Bytes(b"x".to_vec())).unwrap());
+        let item = store.get(item_id).unwrap();
         store.delete(item.id()).unwrap();
-        assert!(load_tombstones(&store).is_empty());
+        assert!(load_tombstones(&domain(&store)).is_empty());
         let types: Vec<_> =
             store.pending_outbox(10).unwrap().into_iter().map(|event| event.event_type).collect();
         assert!(types.iter().any(|ty| ty == asterism_storage::EVENT_COMMITTED));
@@ -1499,9 +1487,9 @@ mod tests {
         paths.ensure().unwrap();
         let store = Store::open(&paths.data_dir).unwrap();
         let id = asterism_core::ContentId::new();
-        remember_tombstone(&store, id);
-        remember_tombstone(&store, id);
-        let listed = load_tombstones(&store);
+        remember_tombstone(&domain(&store), id);
+        remember_tombstone(&domain(&store), id);
+        let listed = load_tombstones(&domain(&store));
         assert_eq!(listed, vec![hex::encode(id.as_bytes())]);
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
@@ -1544,10 +1532,10 @@ mod tests {
             encrypted_metadata: "ciphertext".into(),
             blob_id: None,
         };
-        save_failed_remote(&store, std::slice::from_ref(&dto));
+        save_failed_remote(&domain(&store), std::slice::from_ref(&dto));
         drop(store);
         let reopened = Store::open(&root).unwrap();
-        assert_eq!(load_failed_remote(&reopened)[0].id, dto.id);
+        assert_eq!(load_failed_remote(&domain(&reopened))[0].id, dto.id);
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1585,7 +1573,7 @@ mod tests {
         let ingestion =
             Ingestion::new(Arc::clone(&store), paths.clone(), asterism_core::DeviceId::new(), avk);
 
-        let (item, received_manifest) = build_item(
+        let Some((item, _)) = persist_item(
             &ingestion,
             asterism_core::ContentId::new(),
             asterism_core::DeviceId::new(),
@@ -1600,10 +1588,11 @@ mod tests {
             None,
             None,
         )
-        .unwrap();
-        ingestion.commit_remote(item.clone(), received_manifest).unwrap();
+        .unwrap() else {
+            panic!("expected new remote file item");
+        };
         let clipboard =
-            item_to_clipboard(&item, &store, &paths, &host_read_grant(item.id())).unwrap();
+            item_to_clipboard(&item, &domain(&store), &paths, &host_read_grant(item.id())).unwrap();
 
         let NormalizedContent::Files { paths: files, manifest: restored, .. } = clipboard else {
             panic!("expected files clipboard item");
@@ -1651,7 +1640,7 @@ mod tests {
                 }),
             )
             .unwrap();
-        assert!(load_payload(&item, &store, &paths).is_err());
+        assert!(load_payload(&item, &domain(&store), &paths).is_err());
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

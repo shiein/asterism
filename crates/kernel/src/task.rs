@@ -45,7 +45,9 @@ impl Default for TaskGroup {
 
 impl Drop for TaskGroup {
     fn drop(&mut self) {
-        self.threads.clear();
+        while let Some(lease) = self.threads.pop() {
+            drop(lease);
+        }
     }
 }
 
@@ -105,6 +107,25 @@ impl ChildProcessLease {
 
     pub fn take(&mut self) -> Option<Child> {
         self.child.take()
+    }
+
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self.child.as_mut() {
+            Some(child) => child.try_wait(),
+            None => Ok(None),
+        }
+    }
+
+    pub fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.child.as_mut().and_then(|child| child.stdin.take())
+    }
+
+    pub fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.as_mut().and_then(|child| child.stdout.take())
+    }
+
+    pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.as_mut().and_then(|child| child.stderr.take())
     }
 }
 

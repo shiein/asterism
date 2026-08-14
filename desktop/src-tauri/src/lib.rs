@@ -3,6 +3,7 @@
 mod actions;
 mod capture_cmds;
 mod commands;
+mod host;
 mod overlay_cli;
 mod plugins;
 mod runtime;
@@ -39,6 +40,7 @@ pub fn run() {
             commands::copy_item,
             commands::get_identity,
             commands::execute_action,
+            commands::list_actions,
             commands::recovery_key,
             commands::capture_fullscreen,
             commands::capture_region,

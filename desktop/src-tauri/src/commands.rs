@@ -82,15 +82,22 @@ pub fn list_history(
         })
         .transpose()?
         .map_or((None, None), |(ms, id)| (Some(ms), Some(id)));
+    let grant = state
+        .broker
+        .grant_history()
+        .ok_or_else(|| CmdError::Any("history query grant denied".into()))?;
     let items = asterism_domain_runtime::ContentQueryService::new(&state.ingestion)
-        .history(HistoryQuery {
-            kind,
-            favorite_only,
-            query,
-            limit: limit.unwrap_or(80),
-            before_ms,
-            before_id,
-        })
+        .history(
+            &grant,
+            HistoryQuery {
+                kind,
+                favorite_only,
+                query,
+                limit: limit.unwrap_or(80),
+                before_ms,
+                before_id,
+            },
+        )
         .map_err(|e| CmdError::Any(e.to_string()))?;
     Ok(items.into_iter().map(to_dto).collect())
 }
@@ -102,8 +109,12 @@ pub fn set_favorite(
     favorite: bool,
 ) -> Result<(), CmdError> {
     let id = id.parse::<ContentId>().map_err(|e| CmdError::Any(e.to_string()))?;
+    let lookup = state
+        .broker
+        .grant_read(id)
+        .ok_or_else(|| CmdError::Any("content read grant denied".into()))?;
     let item = asterism_domain_runtime::ContentCommandService::new(&state.ingestion)
-        .get(id)
+        .get(&lookup, id)
         .map_err(|e| CmdError::Any(e.to_string()))?;
     let current = item.flags().contains(asterism_core::ContentFlags::FAVORITE);
     if current != favorite {
@@ -148,6 +159,23 @@ pub fn execute_action(
     Ok(format!("{result:?}"))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionDescriptorDto {
+    pub id: String,
+    pub title: String,
+}
+
+#[tauri::command]
+pub fn list_actions(state: State<'_, DesktopState>) -> Vec<ActionDescriptorDto> {
+    state
+        .actions
+        .descriptors()
+        .into_iter()
+        .map(|item| ActionDescriptorDto { id: item.key.as_str().into(), title: item.title.into() })
+        .collect()
+}
+
 #[tauri::command]
 pub fn recovery_key(state: State<'_, DesktopState>) -> String {
     state.vault.read().recovery_hex()
@@ -155,13 +183,21 @@ pub fn recovery_key(state: State<'_, DesktopState>) -> String {
 
 #[tauri::command]
 pub async fn capture_fullscreen(state: State<'_, DesktopState>) -> Result<String, CmdError> {
-    let (png, width, height) = tauri::async_runtime::spawn_blocking(|| {
+    let session = state.begin_capture();
+    let token = session.cancel_token();
+    let (png, width, height) = tauri::async_runtime::spawn_blocking(move || {
+        if token.is_cancelled() {
+            return Err("cancelled".into());
+        }
         let backend = XcapBackend;
         backend.permission_preflight().map_err(|e| e.to_string())?;
         let monitors = backend.list_monitors().map_err(|e| e.to_string())?;
         let monitor = asterism_capture::preferred_monitor(&monitors)
             .ok_or_else(|| "no monitor".to_string())?;
         let frame = backend.capture_display(monitor).map_err(|e| e.to_string())?;
+        if token.is_cancelled() {
+            return Err("cancelled".into());
+        }
         let png = export_png(frame.width, frame.height, &frame.bgra, &AnnotationScene::default())?;
         Ok::<_, String>((png, frame.width, frame.height))
     })
@@ -204,20 +240,25 @@ pub fn insert_screenshot(
 
 #[tauri::command]
 pub async fn capture_region(state: State<'_, DesktopState>) -> Result<String, CmdError> {
-    let (png, w, h) = tauri::async_runtime::spawn_blocking(|| {
+    let session = state.begin_capture();
+    let token = session.cancel_token();
+    let (png, w, h) = tauri::async_runtime::spawn_blocking(move || {
+        if token.is_cancelled() {
+            return Err("cancelled".into());
+        }
         let backend = XcapBackend;
         backend.permission_preflight().map_err(|e| e.to_string())?;
         let monitors = backend.list_monitors().map_err(|e| e.to_string())?;
         let monitor = asterism_capture::preferred_monitor(&monitors)
             .ok_or_else(|| "no monitor".to_string())?;
         let frame = backend.capture_display(monitor).map_err(|e| e.to_string())?;
-        let selection =
-            crate::overlay_cli::select_region_subprocess(&frame).map_err(|e| e.to_string())?;
+        let selection = crate::overlay_cli::select_region_subprocess(&frame, Some(&token))
+            .map_err(|e| e.to_string())?;
         let Some(selection) = selection else {
             return Err("cancelled".into());
         };
-        let session = OverlaySession { frame, selection: Some(selection) };
-        let (w, h, bgra) = session.crop_bgra().ok_or_else(|| "empty selection".to_string())?;
+        let overlay = OverlaySession { frame, selection: Some(selection) };
+        let (w, h, bgra) = overlay.crop_bgra().ok_or_else(|| "empty selection".to_string())?;
         let png = export_png(w, h, &bgra, &AnnotationScene::default())?;
         Ok::<_, String>((png, w, h))
     })

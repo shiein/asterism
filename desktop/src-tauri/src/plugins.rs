@@ -9,27 +9,18 @@ use asterism_clipboard::{
 use asterism_core::action::{ActionError, ActionId, ActionResult};
 use asterism_core::builtin_actions;
 use asterism_core::{ContentDraft, ContentId, IngestionOutcome};
-use asterism_domain_runtime::{HistoryApi, Ingestion};
+use asterism_domain_runtime::{DomainStore, HistoryApi, Ingestion};
 use asterism_kernel::{Health, KernelManifest, MountContext, OsThreadLease, Plugin, Result};
-use asterism_platform::{AppPaths, LocalIdentity};
+use asterism_platform::AppPaths;
 use asterism_plugin_api::{ActionKey, ActionRegistry, PermissionBroker, PluginManifest, TrustTier};
-use asterism_storage::Store;
 use parking_lot::{Mutex, RwLock};
 use tauri::{AppHandle, Emitter};
 
+use crate::host::{HostAccount, HostClipboard, HostPaths};
 use crate::runtime::item_to_clipboard;
-use crate::settings::SyncSettings;
 use crate::sync_engine::{self, SyncHandle};
 
 pub struct DesktopSyncPlugin {
-    pub identity: LocalIdentity,
-    pub vault: asterism_crypto::AccountVaultKey,
-    pub store: Arc<Store>,
-    pub ingestion: Arc<Ingestion>,
-    pub paths: asterism_platform::AppPaths,
-    pub guard: Arc<SelfWriteGuard>,
-    pub cache_pin: Arc<RwLock<Option<String>>>,
-    pub settings: SyncSettings,
     pub app: AppHandle,
 }
 
@@ -38,7 +29,7 @@ impl DesktopSyncPlugin {
         id: "asterism.sync",
         trust_tier: TrustTier::RequiredBuiltin,
         requires: &["asterism.domain"],
-        permissions: &["content.read"],
+        permissions: &["content.read", "clipboard.write", "credential.account"],
     };
 }
 
@@ -48,16 +39,21 @@ impl Plugin for DesktopSyncPlugin {
     }
 
     fn mount(&self, ctx: &mut MountContext<'_>) -> Result<()> {
+        let account = ctx.require::<HostAccount>()?;
+        let paths = ctx.require::<HostPaths>()?;
+        let clip = ctx.require::<HostClipboard>()?;
+        let domain = ctx.require::<DomainStore>()?;
+        let ingestion = ctx.require::<Ingestion>()?;
         let app = self.app.clone();
         let (handle, thread) = sync_engine::spawn(
-            self.identity.clone(),
-            self.vault.clone(),
-            Arc::clone(&self.store),
-            Arc::clone(&self.ingestion),
-            self.paths.clone(),
-            Arc::clone(&self.guard),
-            Arc::clone(&self.cache_pin),
-            self.settings.clone(),
+            account.identity.clone(),
+            account.vault.clone(),
+            domain,
+            ingestion,
+            paths.paths.clone(),
+            Arc::clone(&clip.guard),
+            Arc::clone(&clip.cache_pin),
+            account.settings.clone(),
             move || {
                 let _ = app.emit("history-changed", ());
             },
@@ -71,9 +67,6 @@ impl Plugin for DesktopSyncPlugin {
 }
 
 pub struct DesktopClipboardPlugin {
-    pub ingestion: Arc<Ingestion>,
-    pub guard: Arc<SelfWriteGuard>,
-    pub cache_pin: Arc<RwLock<Option<String>>>,
     pub app: AppHandle,
 }
 
@@ -92,17 +85,18 @@ impl Plugin for DesktopClipboardPlugin {
     }
 
     fn mount(&self, ctx: &mut MountContext<'_>) -> Result<()> {
+        let clip = ctx.require::<HostClipboard>()?;
         let sync = ctx.require::<SyncHandle>()?;
-        let ingestion = Arc::clone(&self.ingestion);
+        let ingestion = ctx.require::<Ingestion>()?;
         let app = self.app.clone();
-        let cache_pin = Arc::clone(&self.cache_pin);
+        let cache_pin = Arc::clone(&clip.cache_pin);
         let (file_tx, file_rx) = mpsc::channel::<CapturedClipboard>();
         let file_lease = {
             let ingestion = Arc::clone(&ingestion);
             let sync = sync.clone();
             let app = app.clone();
             let cache_pin = Arc::clone(&cache_pin);
-            let guard = Arc::clone(&self.guard);
+            let guard = Arc::clone(&clip.guard);
             let thread = std::thread::Builder::new()
                 .name("asterism-files".into())
                 .spawn(move || {
@@ -116,7 +110,7 @@ impl Plugin for DesktopClipboardPlugin {
         let file_tx = Arc::new(Mutex::new(Some(file_tx)));
         let file_tx_watch = Arc::clone(&file_tx);
         let ingest_watch = Arc::clone(&ingestion);
-        let guard = Arc::clone(&self.guard);
+        let guard = Arc::clone(&clip.guard);
         let (watcher, watcher_thread) = spawn_watcher(
             WatcherConfig {
                 device_id: ingestion.device_id(),
@@ -124,7 +118,7 @@ impl Plugin for DesktopClipboardPlugin {
                 remote: asterism_core::RemotePolicy::default(),
                 ..WatcherConfig::default()
             },
-            Arc::clone(&self.guard),
+            Arc::clone(&clip.guard),
             move |event| match event {
                 ClipboardEvent::Captured { captured, .. } => {
                     if !captured.files.is_empty() {
@@ -155,20 +149,20 @@ impl Plugin for DesktopClipboardPlugin {
     }
 }
 
-pub struct DesktopActionPlugin {
-    pub ingestion: Arc<Ingestion>,
-    pub store: Arc<Store>,
-    pub paths: AppPaths,
-    pub guard: Arc<SelfWriteGuard>,
-    pub cache_pin: Arc<RwLock<Option<String>>>,
-}
+pub struct DesktopActionPlugin;
 
 impl DesktopActionPlugin {
     pub const MANIFEST: PluginManifest = PluginManifest {
         id: "asterism.actions",
         trust_tier: TrustTier::RequiredBuiltin,
         requires: &["asterism.history", "asterism.sync"],
-        permissions: &["content.read", "content.favorite", "content.delete", "clipboard.write"],
+        permissions: &[
+            "content.read",
+            "content.favorite",
+            "content.delete",
+            "clipboard.write",
+            "filesystem.write.selected",
+        ],
     };
 }
 
@@ -179,14 +173,16 @@ impl Plugin for DesktopActionPlugin {
 
     fn mount(&self, ctx: &mut MountContext<'_>) -> Result<()> {
         let _ = ctx.require::<HistoryApi>()?;
+        let paths = ctx.require::<HostPaths>()?;
+        let clip = ctx.require::<HostClipboard>()?;
         let sync = ctx.require::<SyncHandle>()?;
         let registry = ctx.require::<ActionRegistry>()?;
-        let broker = PermissionBroker::for_plugin(ctx.permissions());
-        let ingestion = Arc::clone(&self.ingestion);
-        let store = Arc::clone(&self.store);
-        let paths = self.paths.clone();
-        let guard = Arc::clone(&self.guard);
-        let cache_pin = Arc::clone(&self.cache_pin);
+        let store = ctx.require::<DomainStore>()?;
+        let broker = PermissionBroker::for_declared(ctx.declared_permissions());
+        let ingestion = ctx.require::<Ingestion>()?;
+        let paths = paths.paths.clone();
+        let guard = Arc::clone(&clip.guard);
+        let cache_pin = Arc::clone(&clip.cache_pin);
 
         {
             let ingestion = Arc::clone(&ingestion);
@@ -195,36 +191,68 @@ impl Plugin for DesktopActionPlugin {
             let guard = Arc::clone(&guard);
             let cache_pin = Arc::clone(&cache_pin);
             let broker = broker.clone();
-            registry.register(ActionKey::COPY, move |item_id, _| {
-                copy_action(&ingestion, &store, &paths, &guard, &cache_pin, &broker, item_id)
+            let actions = Arc::clone(&registry);
+            registry
+                .register(ActionKey::COPY, move |item_id, _| {
+                    copy_action(&ingestion, &store, &paths, &guard, &cache_pin, &broker, item_id)
+                })
+                .map_err(|err| asterism_kernel::KernelError::Mount(err.to_string()))?;
+            ctx.on_drop(move || {
+                actions.unregister(ActionKey::COPY);
             });
         }
         {
             let ingestion = Arc::clone(&ingestion);
             let broker = broker.clone();
-            registry.register(ActionKey::FAVORITE, move |item_id, _| {
-                favorite_action(&ingestion, &broker, item_id)
+            let actions = Arc::clone(&registry);
+            registry
+                .register(ActionKey::FAVORITE, move |item_id, _| {
+                    favorite_action(&ingestion, &broker, item_id)
+                })
+                .map_err(|err| asterism_kernel::KernelError::Mount(err.to_string()))?;
+            ctx.on_drop(move || {
+                actions.unregister(ActionKey::FAVORITE);
             });
         }
         {
             let ingestion = Arc::clone(&ingestion);
             let broker = broker.clone();
             let sync = (*sync).clone();
-            registry.register(ActionKey::DELETE, move |item_id, _| {
-                delete_action(&ingestion, &broker, &sync, item_id)
+            let actions = Arc::clone(&registry);
+            registry
+                .register(ActionKey::DELETE, move |item_id, _| {
+                    delete_action(&ingestion, &broker, &sync, item_id)
+                })
+                .map_err(|err| asterism_kernel::KernelError::Mount(err.to_string()))?;
+            ctx.on_drop(move || {
+                actions.unregister(ActionKey::DELETE);
             });
         }
         {
-            let store = Arc::clone(&store);
             let paths = paths.clone();
             let ingestion = Arc::clone(&ingestion);
-            registry.register(ActionKey::SAVE, move |item_id, save_path| {
-                save_action(&ingestion, &store, &paths, item_id, save_path)
+            let broker = broker.clone();
+            let actions = Arc::clone(&registry);
+            registry
+                .register(ActionKey::SAVE, move |item_id, save_path| {
+                    save_action(&ingestion, &paths, &broker, item_id, save_path)
+                })
+                .map_err(|err| asterism_kernel::KernelError::Mount(err.to_string()))?;
+            ctx.on_drop(move || {
+                actions.unregister(ActionKey::SAVE);
             });
         }
-        registry.register(ActionKey::SEND, |_, _| {
-            Err(ActionError::Failed("send uses sync session".into()))
-        });
+        {
+            let actions = Arc::clone(&registry);
+            registry
+                .register(ActionKey::SEND, |_, _| {
+                    Err(ActionError::Failed("send uses sync session".into()))
+                })
+                .map_err(|err| asterism_kernel::KernelError::Mount(err.to_string()))?;
+            ctx.on_drop(move || {
+                actions.unregister(ActionKey::SEND);
+            });
+        }
         ctx.health().set(Self::MANIFEST.id, Health::Ready);
         Ok(())
     }
@@ -236,15 +264,16 @@ fn map_err(err: impl std::fmt::Display) -> ActionError {
 
 fn copy_action(
     ingestion: &Ingestion,
-    store: &Store,
+    store: &DomainStore,
     paths: &AppPaths,
     guard: &SelfWriteGuard,
     cache_pin: &RwLock<Option<String>>,
     broker: &PermissionBroker,
     item_id: ContentId,
 ) -> std::result::Result<ActionResult, ActionError> {
+    let lookup = broker.grant_read(item_id).ok_or(ActionError::Unsupported)?;
     let item = asterism_domain_runtime::ContentCommandService::new(ingestion)
-        .get(item_id)
+        .get(&lookup, item_id)
         .map_err(map_err)?;
     if !builtin_actions::supports(ActionId::Copy, &item) {
         return Err(ActionError::Unsupported);
@@ -265,8 +294,9 @@ fn favorite_action(
     broker: &PermissionBroker,
     item_id: ContentId,
 ) -> std::result::Result<ActionResult, ActionError> {
+    let lookup = broker.grant_read(item_id).ok_or(ActionError::Unsupported)?;
     let item = asterism_domain_runtime::ContentCommandService::new(ingestion)
-        .get(item_id)
+        .get(&lookup, item_id)
         .map_err(map_err)?;
     let next = !item.flags().contains(asterism_core::ContentFlags::FAVORITE);
     let command = broker.grant_command(item.id(), true, false).ok_or(ActionError::Unsupported)?;
@@ -282,8 +312,9 @@ fn delete_action(
     sync: &SyncHandle,
     item_id: ContentId,
 ) -> std::result::Result<ActionResult, ActionError> {
+    let lookup = broker.grant_read(item_id).ok_or(ActionError::Unsupported)?;
     let item = asterism_domain_runtime::ContentCommandService::new(ingestion)
-        .get(item_id)
+        .get(&lookup, item_id)
         .map_err(map_err)?;
     let command = broker.grant_command(item.id(), false, true).ok_or(ActionError::Unsupported)?;
     asterism_domain_runtime::ContentCommandService::new(ingestion)
@@ -295,48 +326,61 @@ fn delete_action(
 
 fn save_action(
     ingestion: &Ingestion,
-    store: &Store,
     paths: &AppPaths,
+    broker: &PermissionBroker,
     item_id: ContentId,
     save_path: Option<PathBuf>,
 ) -> std::result::Result<ActionResult, ActionError> {
+    let lookup = broker.grant_read(item_id).ok_or(ActionError::Unsupported)?;
     let item = asterism_domain_runtime::ContentCommandService::new(ingestion)
-        .get(item_id)
+        .get(&lookup, item_id)
         .map_err(map_err)?;
     if !builtin_actions::supports(ActionId::Save, &item) {
         return Err(ActionError::Unsupported);
     }
     let path = builtin_actions::require_save_path(save_path.as_ref())?;
+    let path_grant = broker.grant_write_selected(path.clone()).ok_or(ActionError::Unsupported)?;
+    let path = path_grant.path();
     match item.payload_ref() {
         asterism_core::content::PayloadRef::Inline { bytes } => {
-            std::fs::write(&path, bytes).map_err(|err| ActionError::Failed(err.to_string()))?;
+            std::fs::write(path, bytes).map_err(|err| ActionError::Failed(err.to_string()))?;
         }
-        asterism_core::content::PayloadRef::Blob { blob_id } => {
-            std::fs::write(&path, store.get_blob(blob_id).map_err(map_err)?)
-                .map_err(|err| ActionError::Failed(err.to_string()))?;
+        asterism_core::content::PayloadRef::Blob { .. } => {
+            let grant = broker.grant_read(item.id()).ok_or(ActionError::Unsupported)?;
+            let bytes = asterism_domain_runtime::ContentQueryService::new(ingestion)
+                .payload_bytes(&grant, &item)
+                .map_err(map_err)?;
+            std::fs::write(path, bytes).map_err(|err| ActionError::Failed(err.to_string()))?;
         }
         asterism_core::content::PayloadRef::FileManifest { .. } => {
             let cache = paths.item_cache(item.id());
-            if cache.exists() {
-                copy_dir(&cache, &path).map_err(|err| ActionError::Failed(err.to_string()))?;
+            if !cache.exists() {
+                return Err(ActionError::Failed("cached files missing".into()));
+            }
+            let copied =
+                copy_dir(&cache, path).map_err(|err| ActionError::Failed(err.to_string()))?;
+            if copied == 0 {
+                return Err(ActionError::Failed("cached files missing".into()));
             }
         }
     }
-    Ok(ActionResult::Saved { path })
+    Ok(ActionResult::Saved { path: path.to_path_buf() })
 }
 
-fn copy_dir(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+fn copy_dir(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<u64> {
     std::fs::create_dir_all(dest)?;
+    let mut copied = 0;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let to = dest.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &to)?;
+            copied += copy_dir(&entry.path(), &to)?;
         } else {
             std::fs::copy(entry.path(), to)?;
+            copied += 1;
         }
     }
-    Ok(())
+    Ok(copied)
 }
 
 fn submit_capture(

@@ -22,6 +22,22 @@ pub struct KernelManifest {
     pub trust_tier: TrustTier,
 }
 
+/// 仅能从 `MountContext` 取出的已声明权限。插件不能自行构造。
+#[derive(Clone, Copy, Debug)]
+pub struct DeclaredPermissions {
+    permissions: &'static [&'static str],
+}
+
+impl DeclaredPermissions {
+    fn from_manifest(permissions: &'static [&'static str]) -> Self {
+        Self { permissions }
+    }
+
+    pub fn as_slice(self) -> &'static [&'static str] {
+        self.permissions
+    }
+}
+
 pub trait Plugin: Send + Sync + 'static {
     fn manifest(&self) -> KernelManifest;
     fn id(&self) -> &'static str {
@@ -33,23 +49,20 @@ pub trait Plugin: Send + Sync + 'static {
     fn mount(&self, ctx: &mut MountContext<'_>) -> Result<()>;
 }
 
-type ServiceRevoke = Box<dyn FnOnce(&mut ServiceRegistry) + Send>;
-
 pub struct MountContext<'a> {
     plugin_id: &'static str,
     manifest: KernelManifest,
-    registry: &'a mut ServiceRegistry,
+    registry: &'a ServiceRegistry,
     scope: &'a Scope,
     tasks: &'a mut TaskGroup,
     health: &'a HealthBoard,
     effects: Vec<EffectGuard>,
-    revokes: Vec<ServiceRevoke>,
 }
 
 impl<'a> MountContext<'a> {
     fn new(
         manifest: KernelManifest,
-        registry: &'a mut ServiceRegistry,
+        registry: &'a ServiceRegistry,
         scope: &'a Scope,
         tasks: &'a mut TaskGroup,
         health: &'a HealthBoard,
@@ -62,7 +75,6 @@ impl<'a> MountContext<'a> {
             tasks,
             health,
             effects: Vec::new(),
-            revokes: Vec::new(),
         }
     }
 
@@ -76,6 +88,10 @@ impl<'a> MountContext<'a> {
 
     pub fn permissions(&self) -> &'static [&'static str] {
         self.manifest.permissions
+    }
+
+    pub fn declared_permissions(&self) -> DeclaredPermissions {
+        DeclaredPermissions::from_manifest(self.manifest.permissions)
     }
 
     pub fn trust_tier(&self) -> TrustTier {
@@ -99,15 +115,20 @@ impl<'a> MountContext<'a> {
     }
 
     pub fn provide<T: Send + Sync + 'static>(&mut self, service: Arc<T>) -> Result<()> {
-        self.registry.provide(service)?;
-        self.revokes.push(Box::new(|registry| {
-            let _ = registry.revoke::<T>();
+        self.registry.provide_from(service, self.plugin_id)?;
+        let registry = self.registry.clone();
+        self.effects.push(EffectGuard::new(move || {
+            registry.revoke::<T>();
         }));
         Ok(())
     }
 
     pub fn require<T: Send + Sync + 'static>(&self) -> Result<Arc<T>> {
-        self.registry.require()
+        self.registry.require_for::<T>(
+            self.plugin_id,
+            self.manifest.permissions,
+            self.manifest.requires,
+        )
     }
 
     pub fn on_drop(&mut self, undo: impl FnOnce() + Send + 'static) {
@@ -116,9 +137,10 @@ impl<'a> MountContext<'a> {
 }
 
 /// 装载插件：失败则逆序撤销已登记 Service 与 effect。
+/// 成功后 effect（含 Service 撤销）留在 MountGuard，销毁时统一撤销。
 pub fn mount_plugin(
     plugin: &dyn Plugin,
-    registry: &mut ServiceRegistry,
+    registry: &ServiceRegistry,
     scope: &Scope,
     tasks: &mut TaskGroup,
     health: &HealthBoard,
@@ -133,16 +155,9 @@ pub fn mount_plugin(
     }
     let mut ctx = MountContext::new(manifest, registry, scope, tasks, health);
     match plugin.mount(&mut ctx) {
-        Ok(()) => {
-            ctx.revokes.clear();
-            Ok(MountGuard::new(plugin.id(), std::mem::take(&mut ctx.effects)))
-        }
+        Ok(()) => Ok(MountGuard::new(plugin.id(), std::mem::take(&mut ctx.effects))),
         Err(err) => {
-            let revokes = std::mem::take(&mut ctx.revokes);
             drop(std::mem::take(&mut ctx.effects));
-            for revoke in revokes.into_iter().rev() {
-                revoke(registry);
-            }
             Err(KernelError::Mount(err.to_string()))
         }
     }
@@ -188,23 +203,24 @@ mod tests {
     }
 
     #[test]
-    fn successful_mount_keeps_service() {
-        let mut registry = ServiceRegistry::new();
+    fn successful_mount_revokes_service_when_guard_drops() {
+        let registry = ServiceRegistry::new();
         let scope = crate::scope::Scope::root();
         let mut tasks = crate::task::TaskGroup::new();
         let health = crate::HealthBoard::new();
-        let guard = mount_plugin(&Good, &mut registry, &scope, &mut tasks, &health).unwrap();
+        let guard = mount_plugin(&Good, &registry, &scope, &mut tasks, &health).unwrap();
         assert!(registry.require::<Ping>().is_ok());
         drop(guard);
+        assert!(registry.require::<Ping>().is_err());
     }
 
     #[test]
     fn failed_mount_revokes_provided_service() {
-        let mut registry = ServiceRegistry::new();
+        let registry = ServiceRegistry::new();
         let scope = crate::scope::Scope::root();
         let mut tasks = crate::task::TaskGroup::new();
         let health = crate::HealthBoard::new();
-        assert!(mount_plugin(&Boom, &mut registry, &scope, &mut tasks, &health).is_err());
+        assert!(mount_plugin(&Boom, &registry, &scope, &mut tasks, &health).is_err());
         assert!(registry.require::<Ping>().is_err());
     }
 
@@ -231,12 +247,26 @@ mod tests {
                 Err(KernelError::Mount("later step failed".into()))
             }
         }
-        let mut registry = ServiceRegistry::new();
+        let registry = ServiceRegistry::new();
         let plugin = Partial { undone: Arc::clone(&undone) };
         let scope = crate::scope::Scope::root();
         let mut tasks = crate::task::TaskGroup::new();
         let health = crate::HealthBoard::new();
-        assert!(mount_plugin(&plugin, &mut registry, &scope, &mut tasks, &health).is_err());
+        assert!(mount_plugin(&plugin, &registry, &scope, &mut tasks, &health).is_err());
         assert_eq!(undone.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn remount_after_guard_drop_succeeds() {
+        let registry = ServiceRegistry::new();
+        let scope = crate::scope::Scope::root();
+        let mut tasks = crate::task::TaskGroup::new();
+        let health = crate::HealthBoard::new();
+        let first = mount_plugin(&Good, &registry, &scope, &mut tasks, &health).unwrap();
+        drop(first);
+        let second = mount_plugin(&Good, &registry, &scope, &mut tasks, &health).unwrap();
+        assert!(registry.require::<Ping>().is_ok());
+        drop(second);
+        assert!(registry.require::<Ping>().is_err());
     }
 }

@@ -46,19 +46,36 @@ impl BootPlan {
 
     /// Host 先登记 sealed Service，再按依赖图装载插件。
     /// Scope / TaskGroup / HealthBoard 在 mount 之前创建，插件可在 mount 期间使用。
-    pub fn mount_with(self, mut registry: ServiceRegistry) -> Result<MountedRuntime> {
+    pub fn mount_with(self, registry: ServiceRegistry) -> Result<MountedRuntime> {
         let order = self.resolved_order()?;
-        let index: std::collections::HashMap<&'static str, Box<dyn Plugin>> =
+        let mut index: std::collections::HashMap<&'static str, Box<dyn Plugin>> =
             self.plugins.into_iter().map(|plugin| (plugin.id(), plugin)).collect();
-        let scope = Scope::root();
-        let mut tasks = TaskGroup::new();
-        let health = HealthBoard::new();
-        let mut guards = Vec::new();
+        let mut runtime = MountedRuntime {
+            name: self.name,
+            registry,
+            scope: Scope::root(),
+            tasks: TaskGroup::new(),
+            health: HealthBoard::new(),
+            guards: Vec::new(),
+            order: order.clone(),
+        };
         for id in &order {
-            let plugin = index.get(id).expect("resolved plugin");
-            guards.push(mount_plugin(plugin.as_ref(), &mut registry, &scope, &mut tasks, &health)?);
+            let plugin = index.remove(id).expect("resolved plugin");
+            match mount_plugin(
+                plugin.as_ref(),
+                &runtime.registry,
+                &runtime.scope,
+                &mut runtime.tasks,
+                &runtime.health,
+            ) {
+                Ok(guard) => runtime.guards.push(guard),
+                Err(err) => {
+                    drop(runtime);
+                    return Err(err);
+                }
+            }
         }
-        Ok(MountedRuntime { name: self.name, registry, scope, tasks, health, guards, order })
+        Ok(runtime)
     }
 }
 
@@ -78,6 +95,7 @@ impl Drop for MountedRuntime {
         while let Some(guard) = self.guards.pop() {
             drop(guard);
         }
+        self.registry.clear();
         let tasks = std::mem::take(&mut self.tasks);
         drop(tasks);
     }
@@ -87,6 +105,8 @@ impl Drop for MountedRuntime {
 mod tests {
     use super::*;
     use crate::plugin::MountContext;
+    use crate::task::OsThreadLease;
+    use std::sync::Arc;
 
     struct Domain;
     struct Clipboard;
@@ -132,5 +152,59 @@ mod tests {
         assert_eq!(runtime.boot_order(), ["asterism.domain", "asterism.clipboard"]);
         assert_eq!(runtime.health.get("asterism.domain"), Some(crate::Health::Ready));
         assert!(!runtime.scope.is_closed());
+    }
+
+    struct ChannelWorker;
+
+    impl Plugin for ChannelWorker {
+        fn manifest(&self) -> crate::KernelManifest {
+            crate::KernelManifest {
+                id: "asterism.worker",
+                requires: &[],
+                permissions: &[],
+                trust_tier: crate::TrustTier::RequiredBuiltin,
+            }
+        }
+        fn mount(&self, ctx: &mut MountContext<'_>) -> Result<()> {
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            ctx.provide(Arc::new(tx))?;
+            let thread = std::thread::spawn(move || {
+                let _ = rx.recv();
+            });
+            ctx.adopt_thread(OsThreadLease::from_join("asterism-test-channel", thread));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn drop_releases_registry_senders_before_joining() {
+        let mut plan = BootPlan::new("shutdown");
+        plan.push(ChannelWorker);
+        let runtime = plan.mount().unwrap();
+        drop(runtime);
+    }
+
+    struct BoomAfterWorker;
+
+    impl Plugin for BoomAfterWorker {
+        fn manifest(&self) -> crate::KernelManifest {
+            crate::KernelManifest {
+                id: "asterism.boom",
+                requires: &["asterism.worker"],
+                permissions: &[],
+                trust_tier: crate::TrustTier::RequiredBuiltin,
+            }
+        }
+        fn mount(&self, _ctx: &mut MountContext<'_>) -> Result<()> {
+            Err(crate::KernelError::Mount("later plugin failed".into()))
+        }
+    }
+
+    #[test]
+    fn failed_mount_after_channel_worker_does_not_deadlock() {
+        let mut plan = BootPlan::new("partial");
+        plan.push(ChannelWorker);
+        plan.push(BoomAfterWorker);
+        assert!(plan.mount().is_err());
     }
 }

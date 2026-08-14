@@ -81,7 +81,49 @@ impl Ingestion {
             draft.source_app = captured.source_app.clone();
         }
         draft.source_device_id = self.device_id;
-        self.submit_local(draft, content, false)
+        self.submit_local(draft, content)
+    }
+
+    pub fn submit_text(
+        &self,
+        draft: ContentDraft,
+        text: String,
+    ) -> anyhow::Result<IngestionOutcome> {
+        let source_app = draft.source_app.clone();
+        let Some(flags) = classify_local_text(&text, source_app.as_deref()) else {
+            return Ok(IngestionOutcome::RejectedPolicy);
+        };
+        self.submit_local(
+            draft,
+            NormalizedContent::Text {
+                dedup_tag: asterism_crypto::local_dedup_tag(text.as_bytes()),
+                text,
+                flags,
+                source_app,
+            },
+        )
+    }
+
+    pub fn submit_image(
+        &self,
+        draft: ContentDraft,
+        png: Vec<u8>,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<IngestionOutcome> {
+        let source_app = draft.source_app.clone();
+        let flags = classify_local_image(png.len() as u64);
+        self.submit_local(
+            draft,
+            NormalizedContent::Image {
+                dedup_tag: asterism_crypto::local_dedup_tag(&png),
+                png,
+                width,
+                height,
+                flags,
+                source_app,
+            },
+        )
     }
 
     pub fn paths(&self) -> &AppPaths {
@@ -121,17 +163,18 @@ impl Ingestion {
         DedupDecision::NewCapture
     }
 
-    pub fn submit_local(
+    pub(crate) fn submit_local(
         &self,
         draft: ContentDraft,
         content: NormalizedContent,
-        is_self_write: bool,
     ) -> anyhow::Result<IngestionOutcome> {
-        if let NormalizedContent::Files { paths, flags, source_app, .. } = content {
-            return self.submit_files(draft, paths, flags, source_app, is_self_write);
+        if let NormalizedContent::Files { paths, source_app, .. } = content {
+            return self.submit_files(draft, paths, source_app);
         }
-        let file_tag = None;
-        match self.decide(&draft, is_self_write, file_tag) {
+        let Some(content) = reseal_local_content(content, &draft) else {
+            return Ok(IngestionOutcome::RejectedPolicy);
+        };
+        match self.decide(&draft, false, None) {
             DedupDecision::NewCapture => {}
             other => return Ok(IngestionOutcome::Ignored(other)),
         }
@@ -152,17 +195,15 @@ impl Ingestion {
         &self,
         draft: ContentDraft,
         sources: Vec<std::path::PathBuf>,
-        flags: ContentFlags,
         source_app: Option<String>,
-        is_self_write: bool,
     ) -> anyhow::Result<IngestionOutcome> {
         let file_tag = asterism_clipboard::files_local_dedup_tag(&sources);
-        match self.decide(&draft, is_self_write, Some(file_tag)) {
+        match self.decide(&draft, false, Some(file_tag)) {
             DedupDecision::NewCapture => {}
             other => return Ok(IngestionOutcome::Ignored(other)),
         }
         let event_key = event_key(&draft);
-        let Some((mut item, manifest)) = self.materialize_files(sources, flags, source_app)? else {
+        let Some((mut item, manifest)) = self.materialize_files(sources, source_app)? else {
             return Ok(IngestionOutcome::RejectedPolicy);
         };
         apply_provenance(&mut item, &draft);
@@ -269,7 +310,29 @@ impl Ingestion {
         }
     }
 
-    pub fn commit_remote(
+    /// 远端/LAN 项的唯一持久化入口。调用方不得提交自行构造的 `ContentItem`。
+    pub fn persist_remote_item(
+        &self,
+        spec: RemoteItemSpec,
+        payload: RemoteItemBody,
+    ) -> anyhow::Result<Option<(ContentItem, Option<FileManifest>)>> {
+        let (item, manifest) = self.assemble_remote(spec, payload)?;
+        if self.commit_remote(item.clone(), manifest.clone())? {
+            Ok(Some((item, manifest)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn persist_remote(
+        &self,
+        spec: RemoteItemSpec,
+        payload: RemoteItemBody,
+    ) -> anyhow::Result<bool> {
+        Ok(self.persist_remote_item(spec, payload)?.is_some())
+    }
+
+    pub(crate) fn commit_remote(
         &self,
         item: ContentItem,
         manifest: Option<FileManifest>,
@@ -352,7 +415,6 @@ impl Ingestion {
     fn materialize_files(
         &self,
         sources: Vec<std::path::PathBuf>,
-        flags: ContentFlags,
         source_app: Option<String>,
     ) -> anyhow::Result<Option<(ContentItem, FileManifest)>> {
         let manifest = asterism_clipboard::preflight_paths(&sources)?;
@@ -363,14 +425,11 @@ impl Ingestion {
         }
         let largest = manifest.entries.iter().map(|e| e.size).max().unwrap_or(0);
         let remote = asterism_core::RemotePolicy::default();
-        let flags = if remote
-            .check_preflight_ext(ContentKind::Files, file_count, logical_size, largest)
-            .is_ok()
+        let mut flags = ContentFlags::empty();
+        if remote.check_preflight_ext(ContentKind::Files, file_count, logical_size, largest).is_ok()
         {
-            flags | ContentFlags::REMOTE_ALLOWED
-        } else {
-            flags
-        };
+            flags.insert(ContentFlags::REMOTE_ALLOWED);
+        }
         let fingerprint = {
             let mut buf = Vec::new();
             for entry in &manifest.entries {
@@ -405,6 +464,7 @@ fn event_key(draft: &ContentDraft) -> Option<String> {
     }
 }
 
+#[derive(Clone)]
 pub struct RemoteItemSpec {
     pub id: asterism_core::id::ContentId,
     pub origin: DeviceId,
@@ -452,6 +512,72 @@ fn apply_hmac(item: &mut ContentItem, avk: &AccountVaultKey) {
     item.set_dedup_tag(avk.dedup_tag(&item.dedup_tag()));
 }
 
+fn classify_local_text(text: &str, source_app: Option<&str>) -> Option<ContentFlags> {
+    let captured = asterism_clipboard::CapturedClipboard {
+        change_token: 0,
+        source_app: source_app.map(str::to_owned),
+        formats: Vec::new(),
+        text: Some(text.to_owned()),
+        image: None,
+        files: Vec::new(),
+        sensitive: false,
+    };
+    let decision =
+        asterism_clipboard::sensitive::decide(&captured, &asterism_core::CapturePolicy::default());
+    if decision.should_ignore() {
+        return None;
+    }
+    let mut flags = decision.flags();
+    flags.remove(ContentFlags::REMOTE_ALLOWED);
+    if asterism_core::RemotePolicy::default()
+        .check_preflight_ext(ContentKind::Text, 0, text.len() as u64, 0)
+        .is_ok()
+    {
+        flags.insert(ContentFlags::REMOTE_ALLOWED);
+    }
+    Some(flags)
+}
+
+fn classify_local_image(size: u64) -> ContentFlags {
+    let mut flags = ContentFlags::empty();
+    if asterism_core::RemotePolicy::default()
+        .check_preflight_ext(ContentKind::Image, 0, size, 0)
+        .is_ok()
+    {
+        flags.insert(ContentFlags::REMOTE_ALLOWED);
+    }
+    flags
+}
+
+fn reseal_local_content(
+    content: NormalizedContent,
+    draft: &ContentDraft,
+) -> Option<NormalizedContent> {
+    match content {
+        NormalizedContent::Text { text, source_app, .. } => {
+            let source_app = draft.source_app.clone().or(source_app);
+            let flags = classify_local_text(&text, source_app.as_deref())?;
+            Some(NormalizedContent::Text {
+                dedup_tag: asterism_crypto::local_dedup_tag(text.as_bytes()),
+                text,
+                flags,
+                source_app,
+            })
+        }
+        NormalizedContent::Image { png, width, height, source_app, .. } => {
+            Some(NormalizedContent::Image {
+                dedup_tag: asterism_crypto::local_dedup_tag(&png),
+                flags: classify_local_image(png.len() as u64),
+                source_app: draft.source_app.clone().or(source_app),
+                png,
+                width,
+                height,
+            })
+        }
+        NormalizedContent::Files { .. } => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,8 +622,8 @@ mod tests {
             flags: ContentFlags::REMOTE_ALLOWED,
             source_app: None,
         };
-        let first = ingestion.submit_local(draft("tok-1"), content.clone(), false).unwrap();
-        let second = ingestion.submit_local(draft("tok-1"), content, false).unwrap();
+        let first = ingestion.submit_local(draft("tok-1"), content.clone()).unwrap();
+        let second = ingestion.submit_local(draft("tok-1"), content).unwrap();
         assert!(matches!(first, IngestionOutcome::Committed(_)));
         assert_eq!(second, IngestionOutcome::Ignored(DedupDecision::SameSourceEvent));
     }
@@ -511,8 +637,8 @@ mod tests {
             flags: ContentFlags::REMOTE_ALLOWED,
             source_app: None,
         };
-        ingestion.submit_local(draft("tok-1"), content.clone(), false).unwrap();
-        ingestion.submit_local(draft("tok-2"), content, false).unwrap();
+        ingestion.submit_local(draft("tok-1"), content.clone()).unwrap();
+        ingestion.submit_local(draft("tok-2"), content).unwrap();
         assert_eq!(
             ingestion.store.history(asterism_storage::HistoryQuery::recent(10)).unwrap().len(),
             2
@@ -590,8 +716,7 @@ mod tests {
         draft.kind_hint = ContentKind::Gif;
         draft.kind_override = Some(ContentKind::Gif);
         draft.mime_hint = Some("image/gif".into());
-        let IngestionOutcome::Committed(id) =
-            ingestion.submit_local(draft, content, false).unwrap()
+        let IngestionOutcome::Committed(id) = ingestion.submit_local(draft, content).unwrap()
         else {
             panic!("expected commit");
         };
@@ -636,5 +761,60 @@ mod tests {
         assert!(item.flags().contains(ContentFlags::FROM_REMOTE));
         assert!(item.flags().contains(ContentFlags::REMOTE_ALLOWED));
         assert_eq!(item.status(), ContentStatus::DeliveredToPeer);
+    }
+
+    #[test]
+    fn submit_local_ignores_caller_flags_and_excluded_app() {
+        let (_dir, ingestion) = harness();
+        let content = NormalizedContent::Text {
+            text: "hello".into(),
+            dedup_tag: [0; 32],
+            flags: ContentFlags::empty(),
+            source_app: None,
+        };
+        let IngestionOutcome::Committed(id) =
+            ingestion.submit_local(draft("reseal-1"), content).unwrap()
+        else {
+            panic!("expected commit");
+        };
+        let item = ingestion.store().get(id).unwrap();
+        assert!(item.flags().contains(ContentFlags::REMOTE_ALLOWED));
+        assert!(!item.flags().contains(ContentFlags::SENSITIVE));
+
+        let mut excluded = draft("reseal-2");
+        excluded.source_app = Some("1password".into());
+        let outcome = ingestion
+            .submit_local(
+                excluded,
+                NormalizedContent::Text {
+                    text: "secret".into(),
+                    dedup_tag: [9; 32],
+                    flags: ContentFlags::REMOTE_ALLOWED,
+                    source_app: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome, IngestionOutcome::RejectedPolicy);
+    }
+
+    #[test]
+    fn persist_remote_is_idempotent() {
+        let (_dir, ingestion) = harness();
+        let spec = RemoteItemSpec {
+            id: ContentId::new(),
+            origin: DeviceId::new(),
+            kind: ContentKind::Text,
+            flags: ContentFlags::REMOTE_ALLOWED,
+            tag: [8; 32],
+            metadata: ItemMetadata::default(),
+            from_lan: false,
+            created_at_ms: Some(1),
+            logical_size: Some(1),
+            payload_size: Some(1),
+        };
+        assert!(
+            ingestion.persist_remote(spec.clone(), RemoteItemBody::Bytes(b"x".to_vec())).unwrap()
+        );
+        assert!(!ingestion.persist_remote(spec, RemoteItemBody::Bytes(b"x".to_vec())).unwrap());
     }
 }
