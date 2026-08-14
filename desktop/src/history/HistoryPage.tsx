@@ -1,7 +1,16 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { captureFullscreen, captureRegion, copyItem, deleteItem, getIdentity, listHistory, setFavorite } from "../api";
+import {
+  captureFullscreen,
+  captureRegion,
+  copyItem,
+  deleteItem,
+  getIdentity,
+  listActions,
+  listHistory,
+  setFavorite,
+} from "../api";
 import { useUiStore } from "../store";
 import type { ContentKind, HistoryItem } from "../types";
 
@@ -12,6 +21,9 @@ export function HistoryPage() {
   const { query, kind, favoriteOnly, setQuery, setKind, setFavoriteOnly } = useUiStore();
 
   const identity = useQuery({ queryKey: ["identity"], queryFn: getIdentity });
+  const catalog = useQuery({ queryKey: ["actions"], queryFn: listActions });
+  const actionIds = new Set((catalog.data ?? []).map((action) => action.id));
+  const showAction = (id: string) => !catalog.data || actionIds.has(id);
   const history = useInfiniteQuery({
     queryKey: ["history", query, kind, favoriteOnly],
     initialPageParam: undefined as string | undefined,
@@ -114,13 +126,19 @@ export function HistoryPage() {
             </div>
             <p className="preview">{previewOf(item)}</p>
             <div className="actions">
-              <button onClick={() => copy.mutate(item.id)}>复制</button>
-              <button onClick={() => fav.mutate({ id: item.id, favorite: !item.favorite })}>
-                {item.favorite ? "取消收藏" : "收藏"}
-              </button>
-              <button className="danger" onClick={() => remove.mutate(item.id)}>
-                删除
-              </button>
+              {showAction("asterism.history.copy") && (
+                <button onClick={() => copy.mutate(item.id)}>复制</button>
+              )}
+              {showAction("asterism.history.favorite") && (
+                <button onClick={() => fav.mutate({ id: item.id, favorite: !item.favorite })}>
+                  {item.favorite ? "取消收藏" : "收藏"}
+                </button>
+              )}
+              {showAction("asterism.history.delete") && (
+                <button className="danger" onClick={() => remove.mutate(item.id)}>
+                  删除
+                </button>
+              )}
             </div>
           </li>
         ))}

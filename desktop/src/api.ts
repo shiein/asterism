@@ -33,6 +33,10 @@ export function getIdentity(): Promise<DeviceIdentity> {
   return invoke("get_identity");
 }
 
+export function listActions(): Promise<Array<{ id: string; title: string }>> {
+  return invoke("list_actions");
+}
+
 export function captureFullscreen(): Promise<string> {
   return invoke("capture_fullscreen");
 }
