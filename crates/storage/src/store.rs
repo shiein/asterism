@@ -41,6 +41,10 @@ enum WriteOp {
         released_before_ms: i64,
         reply: SyncSender<Result<u64>>,
     },
+    GcOutbox {
+        retain_before_ms: i64,
+        reply: SyncSender<Result<u64>>,
+    },
     PutBlob {
         bytes: Vec<u8>,
         reply: SyncSender<Result<BlobId>>,
@@ -196,6 +200,12 @@ impl Store {
         let released_before_ms = crate::repo::now_ms_for_gc()
             .saturating_sub(i64::try_from(grace.as_millis()).unwrap_or(i64::MAX));
         self.call(|reply| WriteOp::GcBlobs { released_before_ms, reply })
+    }
+
+    pub fn gc_outbox(&self, grace: Duration) -> Result<u64> {
+        let retain_before_ms = crate::repo::now_ms_for_gc()
+            .saturating_sub(i64::try_from(grace.as_millis()).unwrap_or(i64::MAX));
+        self.call(|reply| WriteOp::GcOutbox { retain_before_ms, reply })
     }
 
     pub fn sweep_orphan_blobs(&self) -> Result<u64> {
@@ -396,6 +406,10 @@ fn writer_loop(db: PathBuf, blobs: BlobStore, rx: Receiver<WriteOp>) {
             Ok(WriteOp::RetryOutbox { id, consumer_id, delay_ms, reply }) => {
                 let available_at = crate::repo::now_ms_for_gc().saturating_add(delay_ms.max(0));
                 let result = crate::outbox::retry_consumer(&conn, id, &consumer_id, available_at);
+                let _ = reply.send(result);
+            }
+            Ok(WriteOp::GcOutbox { retain_before_ms, reply }) => {
+                let result = crate::outbox::gc_acked(&conn, retain_before_ms);
                 let _ = reply.send(result);
             }
             Ok(WriteOp::GcBlobs { released_before_ms, reply }) => {
@@ -676,6 +690,56 @@ mod tests {
             store.pending_outbox_for(crate::EVENT_DELETED, crate::CONSUMER_HUB_DELETE, 50).unwrap();
         assert_eq!(deleted.len(), 50);
         assert!(deleted.iter().all(|event| event.event_type == crate::EVENT_DELETED));
+    }
+
+    #[test]
+    fn gc_outbox_keeps_unacked_and_drops_fully_acked() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let item = sample("outbox gc");
+        store.insert(item.clone(), None).unwrap();
+        let pending =
+            store.pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_HUB, 10).unwrap();
+        assert_eq!(pending.len(), 1);
+        store.ack_outbox_consumer(pending[0].id, crate::CONSUMER_LAN).unwrap();
+        assert_eq!(store.gc_outbox(Duration::ZERO).unwrap(), 0);
+        assert_eq!(
+            store
+                .pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_HUB, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        store.ack_outbox_consumer(pending[0].id, crate::CONSUMER_HUB).unwrap();
+        assert!(store.gc_outbox(Duration::ZERO).unwrap() >= 1);
+        assert!(
+            store
+                .pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_HUB, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .pending_outbox_for(crate::EVENT_COMMITTED, crate::CONSUMER_LAN, 10)
+                .unwrap()
+                .is_empty()
+        );
+
+        let gone = sample("delete after ack");
+        store.insert(gone.clone(), None).unwrap();
+        store.delete(gone.id()).unwrap();
+        let deleted =
+            store.pending_outbox_for(crate::EVENT_DELETED, crate::CONSUMER_HUB_DELETE, 10).unwrap();
+        assert_eq!(deleted.len(), 1);
+        store.ack_outbox_consumer(deleted[0].id, crate::CONSUMER_HUB_DELETE).unwrap();
+        assert!(store.gc_outbox(Duration::from_secs(7 * 24 * 60 * 60)).unwrap() == 0);
+        assert!(store.gc_outbox(Duration::ZERO).unwrap() >= 1);
+        assert!(
+            store
+                .pending_outbox_for(crate::EVENT_DELETED, crate::CONSUMER_HUB_DELETE, 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

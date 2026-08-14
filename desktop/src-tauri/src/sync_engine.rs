@@ -239,6 +239,9 @@ async fn run_loop(
                 if let Err(err) = store.gc_blobs(Duration::from_secs(24 * 60 * 60)) {
                     tracing::warn!(error = %err, "local blob GC failed");
                 }
+                if let Err(err) = store.gc_outbox(Duration::from_secs(7 * 24 * 60 * 60)) {
+                    tracing::warn!(error = %err, "local outbox GC failed");
+                }
                 if let Err(err) = store.sweep_orphan_blobs() {
                     tracing::warn!(error = %err, "local orphan blob sweep failed");
                 }

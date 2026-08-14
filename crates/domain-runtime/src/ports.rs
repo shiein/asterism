@@ -89,6 +89,10 @@ impl DomainStore {
         self.inner.gc_blobs(grace)
     }
 
+    pub fn gc_outbox(&self, grace: Duration) -> Result<u64, StorageError> {
+        self.inner.gc_outbox(grace)
+    }
+
     pub fn sweep_orphan_blobs(&self) -> Result<u64, StorageError> {
         self.inner.sweep_orphan_blobs()
     }

@@ -241,6 +241,52 @@ impl OutboxEvent {
     }
 }
 
+/// 删除所有相关 consumer 均已 ACK、且最晚 ACK 早于 `retain_before_ms` 的事件。
+/// committed 事件要求 LAN 与 Hub 都已 ACK；deleted 事件要求 Hub delete 已 ACK。
+pub fn gc_acked(conn: &Connection, retain_before_ms: i64) -> Result<u64> {
+    let committed = conn.execute(
+        r#"
+        DELETE FROM domain_outbox
+        WHERE event_type = ?2
+          AND event_id IN (
+            SELECT o.event_id
+            FROM domain_outbox o
+            INNER JOIN domain_outbox_delivery lan
+              ON lan.event_id = o.event_id AND lan.consumer_id = ?3
+            INNER JOIN domain_outbox_delivery hub
+              ON hub.event_id = o.event_id AND hub.consumer_id = ?4
+            WHERE o.event_type = ?2
+              AND lan.acked_at_ms IS NOT NULL
+              AND hub.acked_at_ms IS NOT NULL
+              AND MAX(lan.acked_at_ms, hub.acked_at_ms) <= ?1
+          )
+        "#,
+        params![retain_before_ms, EVENT_COMMITTED, CONSUMER_LAN, CONSUMER_HUB],
+    )?;
+    let deleted = conn.execute(
+        r#"
+        DELETE FROM domain_outbox
+        WHERE event_type = ?2
+          AND event_id IN (
+            SELECT o.event_id
+            FROM domain_outbox o
+            INNER JOIN domain_outbox_delivery d
+              ON d.event_id = o.event_id AND d.consumer_id = ?3
+            WHERE o.event_type = ?2
+              AND d.acked_at_ms IS NOT NULL
+              AND d.acked_at_ms <= ?1
+          )
+        "#,
+        params![retain_before_ms, EVENT_DELETED, CONSUMER_HUB_DELETE],
+    )?;
+    let deliveries = conn.execute(
+        "DELETE FROM domain_outbox_delivery WHERE event_id NOT IN (SELECT event_id FROM domain_outbox)",
+        [],
+    )?;
+    Ok(u64::try_from(committed.saturating_add(deleted).saturating_add(deliveries))
+        .unwrap_or(u64::MAX))
+}
+
 pub fn latest_unacked(
     conn: &Connection,
     event_type: &str,
