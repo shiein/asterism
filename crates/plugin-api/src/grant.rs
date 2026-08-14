@@ -111,6 +111,14 @@ impl PermissionBroker {
         self.host || self.permissions.contains(&permission)
     }
 
+    fn max_bytes_for(kind: ContentKind) -> u64 {
+        match kind {
+            ContentKind::Files => u64::MAX,
+            ContentKind::Gif | ContentKind::Video => 2 * 1024 * 1024 * 1024,
+            _ => 64 * 1024 * 1024,
+        }
+    }
+
     pub fn grant_read(&self, id: ContentId) -> Option<ContentReadGrant> {
         self.allows("content.read")
             .then(|| ContentReadGrant::issue(id, 64 * 1024 * 1024, Duration::from_secs(60)))
@@ -128,12 +136,14 @@ impl PermissionBroker {
         if !self.allows("clipboard.write") && !self.allows("content.read") {
             return None;
         }
-        let max_bytes = match kind {
-            ContentKind::Files => u64::MAX,
-            ContentKind::Gif | ContentKind::Video => 2 * 1024 * 1024 * 1024,
-            _ => 64 * 1024 * 1024,
-        };
-        Some(ContentReadGrant::issue(id, max_bytes, Duration::from_secs(60)))
+        Some(ContentReadGrant::issue(id, Self::max_bytes_for(kind), Duration::from_secs(60)))
+    }
+
+    pub fn grant_save(&self, id: ContentId, kind: ContentKind) -> Option<ContentReadGrant> {
+        if !self.allows("content.read") || !self.allows("filesystem.write.selected") {
+            return None;
+        }
+        Some(ContentReadGrant::issue(id, Self::max_bytes_for(kind), Duration::from_secs(60)))
     }
 
     pub fn grant_host_transfer(&self, id: ContentId) -> Option<ContentReadGrant> {
@@ -184,6 +194,24 @@ mod tests {
         assert!(plugin.grant_host_transfer(id).is_none());
         assert!(plugin.grant_history().is_none());
         assert!(plugin.grant_write_selected(PathBuf::from("/tmp/out")).is_none());
+        assert!(plugin.grant_save(id, ContentKind::Gif).is_none());
+    }
+
+    #[test]
+    fn save_grant_matches_copy_limits_and_needs_both_permissions() {
+        let id = ContentId::new();
+        let save = PermissionBroker::for_plugin(&["content.read", "filesystem.write.selected"]);
+        let gif = save.grant_save(id, ContentKind::Gif).unwrap();
+        let copy = PermissionBroker::for_plugin(&["clipboard.write"])
+            .grant_copy(id, ContentKind::Gif)
+            .unwrap();
+        assert_eq!(gif.max_bytes(), copy.max_bytes());
+        assert_eq!(gif.max_bytes(), 2 * 1024 * 1024 * 1024);
+        assert!(
+            PermissionBroker::for_plugin(&["content.read"])
+                .grant_save(id, ContentKind::Gif)
+                .is_none()
+        );
     }
 
     #[test]

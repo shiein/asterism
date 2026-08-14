@@ -5,7 +5,49 @@ use asterism_core::content::{ContentItem, ContentStatus, FileManifest};
 use asterism_core::id::{BlobId, ContentId, ManifestId};
 use asterism_storage::{OutboxEvent, StorageError, Store};
 
-/// 密封存储句柄。插件与 Sync 只看见这组方法，拿不到 SQLite `Store`。
+pub trait ContentLookup {
+    fn get_blob(&self, id: &BlobId) -> Result<Vec<u8>, StorageError>;
+    fn load_manifest(&self, id: ManifestId) -> Result<FileManifest, StorageError>;
+}
+
+/// 历史/Action 可读的密封存储。不含 outbox / status / kv 写入口。
+pub struct DomainReadStore {
+    inner: Arc<Store>,
+}
+
+impl DomainReadStore {
+    pub fn wrap(store: Arc<Store>) -> Arc<Self> {
+        Arc::new(Self { inner: store })
+    }
+
+    pub fn get(&self, id: ContentId) -> Result<ContentItem, StorageError> {
+        self.inner.get(id)
+    }
+
+    pub fn contains(&self, id: ContentId) -> Result<bool, StorageError> {
+        self.inner.contains(id)
+    }
+
+    pub fn get_blob(&self, id: &BlobId) -> Result<Vec<u8>, StorageError> {
+        self.inner.get_blob(id)
+    }
+
+    pub fn load_manifest(&self, id: ManifestId) -> Result<FileManifest, StorageError> {
+        self.inner.load_manifest(id)
+    }
+}
+
+impl ContentLookup for DomainReadStore {
+    fn get_blob(&self, id: &BlobId) -> Result<Vec<u8>, StorageError> {
+        self.inner.get_blob(id)
+    }
+
+    fn load_manifest(&self, id: ManifestId) -> Result<FileManifest, StorageError> {
+        self.inner.load_manifest(id)
+    }
+}
+
+/// Sync 使用的密封存储。含 outbox 投递与状态写。
 pub struct DomainStore {
     inner: Arc<Store>,
 }
@@ -98,6 +140,26 @@ impl DomainStore {
     }
 }
 
+impl ContentLookup for DomainStore {
+    fn get_blob(&self, id: &BlobId) -> Result<Vec<u8>, StorageError> {
+        self.inner.get_blob(id)
+    }
+
+    fn load_manifest(&self, id: ManifestId) -> Result<FileManifest, StorageError> {
+        self.inner.load_manifest(id)
+    }
+}
+
+impl<T: ContentLookup + ?Sized> ContentLookup for Arc<T> {
+    fn get_blob(&self, id: &BlobId) -> Result<Vec<u8>, StorageError> {
+        (**self).get_blob(id)
+    }
+
+    fn load_manifest(&self, id: ManifestId) -> Result<FileManifest, StorageError> {
+        (**self).load_manifest(id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,7 +173,7 @@ mod tests {
     fn domain_store_does_not_expose_writer_insert() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let domain = DomainStore::wrap(store);
+        let domain = DomainReadStore::wrap(store);
         let item = ContentItem::from_trusted(
             ContentId::new(),
             DeviceId::new(),

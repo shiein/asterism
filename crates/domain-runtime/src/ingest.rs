@@ -112,6 +112,9 @@ impl Ingestion {
         height: u32,
     ) -> anyhow::Result<IngestionOutcome> {
         let source_app = draft.source_app.clone();
+        if excluded_source(source_app.as_deref()) {
+            return Ok(IngestionOutcome::RejectedPolicy);
+        }
         let flags = classify_local_image(png.len() as u64);
         self.submit_local(
             draft,
@@ -197,6 +200,10 @@ impl Ingestion {
         sources: Vec<std::path::PathBuf>,
         source_app: Option<String>,
     ) -> anyhow::Result<IngestionOutcome> {
+        let source_app = draft.source_app.clone().or(source_app);
+        if excluded_source(source_app.as_deref()) {
+            return Ok(IngestionOutcome::RejectedPolicy);
+        }
         let file_tag = asterism_clipboard::files_local_dedup_tag(&sources);
         match self.decide(&draft, false, Some(file_tag)) {
             DedupDecision::NewCapture => {}
@@ -538,6 +545,10 @@ fn classify_local_text(text: &str, source_app: Option<&str>) -> Option<ContentFl
     Some(flags)
 }
 
+fn excluded_source(source_app: Option<&str>) -> bool {
+    asterism_core::CapturePolicy::default().is_excluded_app(source_app)
+}
+
 fn classify_local_image(size: u64) -> ContentFlags {
     let mut flags = ContentFlags::empty();
     if asterism_core::RemotePolicy::default()
@@ -565,10 +576,14 @@ fn reseal_local_content(
             })
         }
         NormalizedContent::Image { png, width, height, source_app, .. } => {
+            let source_app = draft.source_app.clone().or(source_app);
+            if excluded_source(source_app.as_deref()) {
+                return None;
+            }
             Some(NormalizedContent::Image {
                 dedup_tag: asterism_crypto::local_dedup_tag(&png),
                 flags: classify_local_image(png.len() as u64),
-                source_app: draft.source_app.clone().or(source_app),
+                source_app,
                 png,
                 width,
                 height,
@@ -795,6 +810,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outcome, IngestionOutcome::RejectedPolicy);
+    }
+
+    #[test]
+    fn submit_image_and_files_reject_excluded_app() {
+        let (dir, ingestion) = harness();
+        let mut image = draft("img-excluded");
+        image.source_app = Some("1password".into());
+        image.kind_hint = ContentKind::Image;
+        assert_eq!(
+            ingestion.submit_image(image, vec![0x89, b'P', b'N', b'G'], 1, 1).unwrap(),
+            IngestionOutcome::RejectedPolicy
+        );
+
+        let src = dir.path().join("note.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let mut files = draft("files-excluded");
+        files.source_app = Some("bitwarden".into());
+        files.kind_hint = ContentKind::Files;
+        assert_eq!(
+            ingestion.submit_files(files, vec![src], None).unwrap(),
+            IngestionOutcome::RejectedPolicy
+        );
     }
 
     #[test]

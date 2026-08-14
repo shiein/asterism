@@ -4,10 +4,10 @@ use asterism_clipboard::normalize::NormalizedContent;
 use asterism_clipboard::{NativeClipboard, SelfWriteGuard};
 use asterism_core::content::{ContentFlags, ContentItem, ContentKind, PayloadRef};
 use asterism_core::{ContentDraft, IngestionOutcome};
-use asterism_domain_runtime::DomainStore;
 use asterism_domain_runtime::{
     CapturePlugin, DomainFoundationPlugin, HistoryPlugin, Ingestion, MediaPlugin,
 };
+use asterism_domain_runtime::{ContentLookup, DomainReadStore, DomainStore};
 use asterism_kernel::{BootPlan, MountedRuntime, ServiceRegistry};
 use asterism_platform::hardening::CrashGuard;
 use asterism_platform::{AppPaths, LocalIdentity, LocalVault};
@@ -83,7 +83,10 @@ impl DesktopState {
             )
             .map_err(|err| anyhow::anyhow!(err))?;
         registry
-            .provide_gated(DomainStore::wrap(Arc::clone(&store)), "content.read")
+            .provide_gated(DomainReadStore::wrap(Arc::clone(&store)), "content.read")
+            .map_err(|err| anyhow::anyhow!(err))?;
+        registry
+            .provide_gated(DomainStore::wrap(Arc::clone(&store)), "storage.domain")
             .map_err(|err| anyhow::anyhow!(err))?;
 
         let mut plan = BootPlan::new("asterism-desktop");
@@ -197,7 +200,7 @@ impl Drop for CaptureSession {
 
 pub fn item_to_clipboard(
     item: &ContentItem,
-    store: &DomainStore,
+    store: &impl ContentLookup,
     paths: &AppPaths,
     grant: &ContentReadGrant,
 ) -> anyhow::Result<NormalizedContent> {
@@ -300,7 +303,7 @@ pub fn item_to_clipboard(
     }
 }
 
-fn load_bytes(item: &ContentItem, store: &DomainStore) -> anyhow::Result<Vec<u8>> {
+fn load_bytes(item: &ContentItem, store: &impl ContentLookup) -> anyhow::Result<Vec<u8>> {
     match &item.payload_ref() {
         PayloadRef::Inline { bytes } => Ok(bytes.to_vec()),
         PayloadRef::Blob { blob_id } => Ok(store.get_blob(blob_id)?),
@@ -384,7 +387,7 @@ mod tests {
             .unwrap();
         let grant = PermissionBroker::host().grant_copy(item.id(), item.kind()).unwrap();
         let written =
-            item_to_clipboard(&item, &DomainStore::wrap(Arc::clone(&store)), &paths, &grant)
+            item_to_clipboard(&item, &DomainReadStore::wrap(Arc::clone(&store)), &paths, &grant)
                 .unwrap();
         let file = paths.item_cache(id).join("note.txt");
         assert_eq!(written.dedup_tag(), asterism_clipboard::files_local_dedup_tag(&[file]));

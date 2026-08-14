@@ -9,7 +9,7 @@ use asterism_clipboard::{
 use asterism_core::action::{ActionError, ActionId, ActionResult};
 use asterism_core::builtin_actions;
 use asterism_core::{ContentDraft, ContentId, IngestionOutcome};
-use asterism_domain_runtime::{DomainStore, HistoryApi, Ingestion};
+use asterism_domain_runtime::{DomainReadStore, DomainStore, HistoryApi, Ingestion};
 use asterism_kernel::{Health, KernelManifest, MountContext, OsThreadLease, Plugin, Result};
 use asterism_platform::AppPaths;
 use asterism_plugin_api::{ActionKey, ActionRegistry, PermissionBroker, PluginManifest, TrustTier};
@@ -29,7 +29,7 @@ impl DesktopSyncPlugin {
         id: "asterism.sync",
         trust_tier: TrustTier::RequiredBuiltin,
         requires: &["asterism.domain"],
-        permissions: &["content.read", "clipboard.write", "credential.account"],
+        permissions: &["content.read", "clipboard.write", "credential.account", "storage.domain"],
     };
 }
 
@@ -177,7 +177,7 @@ impl Plugin for DesktopActionPlugin {
         let clip = ctx.require::<HostClipboard>()?;
         let sync = ctx.require::<SyncHandle>()?;
         let registry = ctx.require::<ActionRegistry>()?;
-        let store = ctx.require::<DomainStore>()?;
+        let store = ctx.require::<DomainReadStore>()?;
         let broker = PermissionBroker::for_declared(ctx.declared_permissions());
         let ingestion = ctx.require::<Ingestion>()?;
         let paths = paths.paths.clone();
@@ -264,7 +264,7 @@ fn map_err(err: impl std::fmt::Display) -> ActionError {
 
 fn copy_action(
     ingestion: &Ingestion,
-    store: &DomainStore,
+    store: &impl asterism_domain_runtime::ContentLookup,
     paths: &AppPaths,
     guard: &SelfWriteGuard,
     cache_pin: &RwLock<Option<String>>,
@@ -346,7 +346,8 @@ fn save_action(
             std::fs::write(path, bytes).map_err(|err| ActionError::Failed(err.to_string()))?;
         }
         asterism_core::content::PayloadRef::Blob { .. } => {
-            let grant = broker.grant_read(item.id()).ok_or(ActionError::Unsupported)?;
+            let grant =
+                broker.grant_save(item.id(), item.kind()).ok_or(ActionError::Unsupported)?;
             let bytes = asterism_domain_runtime::ContentQueryService::new(ingestion)
                 .payload_bytes(&grant, &item)
                 .map_err(map_err)?;

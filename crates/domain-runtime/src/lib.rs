@@ -12,7 +12,7 @@ pub use plugins::{
     CaptureApi, CapturePlugin, ClipboardPlugin, DomainFoundationPlugin, DomainRuntime, HistoryApi,
     HistoryPlugin, MediaApi, MediaPlugin, SyncPlugin,
 };
-pub use ports::DomainStore;
+pub use ports::{ContentLookup, DomainReadStore, DomainStore};
 pub use query::ContentQueryService;
 
 use asterism_kernel::BootPlan;
