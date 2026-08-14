@@ -28,7 +28,7 @@ pub fn foreground_app() -> ForegroundApp {
             return ForegroundApp::default();
         };
         let mut buf = [0u16; MAX_PATH as usize];
-        let n = K32GetModuleFileNameExW(proc, None, &mut buf);
+        let n = K32GetModuleFileNameExW(Some(proc), None, &mut buf);
         let _ = CloseHandle(proc);
         if n == 0 {
             return ForegroundApp::default();

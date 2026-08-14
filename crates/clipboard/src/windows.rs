@@ -9,14 +9,15 @@ use std::sync::mpsc::{self, Sender};
 
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::{
-    AddClipboardFormatListener, CF_DIB, CF_HDROP, CF_UNICODETEXT, CloseClipboard, EmptyClipboard,
-    EnumClipboardFormats, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
-    RegisterClipboardFormatW, SetClipboardData,
+    AddClipboardFormatListener, CloseClipboard, EmptyClipboard, EnumClipboardFormats,
+    GetClipboardData, GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW,
+    SetClipboardData,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
+use windows::Win32::System::Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT, CLIPBOARD_FORMAT};
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, HWND_MESSAGE, MSG,
@@ -66,7 +67,7 @@ fn with_clipboard<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     unsafe {
         let mut last = None;
         for _ in 0..8 {
-            match OpenClipboard(clipboard_owner_hwnd()) {
+            match OpenClipboard(Some(clipboard_owner_hwnd())) {
                 Ok(()) => {
                     let out = f();
                     let _ = CloseClipboard();
@@ -121,9 +122,9 @@ unsafe fn enum_formats() -> Vec<String> {
 
 unsafe fn format_name(fmt: u32) -> String {
     match fmt {
-        x if x == CF_UNICODETEXT.0 => "CF_UNICODETEXT".into(),
-        x if x == CF_DIB.0 => "CF_DIB".into(),
-        x if x == CF_HDROP.0 => "CF_HDROP".into(),
+        x if x == cf(CF_UNICODETEXT) => "CF_UNICODETEXT".into(),
+        x if x == cf(CF_DIB) => "CF_DIB".into(),
+        x if x == cf(CF_HDROP) => "CF_HDROP".into(),
         _ => {
             let mut buf = [0u16; 128];
             let n = windows::Win32::System::DataExchange::GetClipboardFormatNameW(fmt, &mut buf);
@@ -158,8 +159,7 @@ unsafe fn dword_forbids(format_name: &str) -> bool {
     if fmt == 0 {
         return true;
     }
-    let Ok(handle) = GetClipboardData(windows::Win32::System::DataExchange::CLIPBOARD_FORMATS(fmt))
-    else {
+    let Ok(handle) = GetClipboardData(fmt) else {
         return true;
     };
     lock_hglobal(handle, |slice| {
@@ -173,7 +173,7 @@ unsafe fn dword_forbids(format_name: &str) -> bool {
 }
 
 unsafe fn read_unicode_text() -> Option<String> {
-    let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
+    let handle = GetClipboardData(cf(CF_UNICODETEXT)).ok()?;
     lock_hglobal(handle, |slice| {
         let words = as_u16_slice(slice);
         let end = words.iter().position(|&c| c == 0).unwrap_or(words.len());
@@ -187,18 +187,17 @@ unsafe fn read_png() -> Option<Vec<u8>> {
     if fmt == 0 {
         return None;
     }
-    let handle =
-        GetClipboardData(windows::Win32::System::DataExchange::CLIPBOARD_FORMATS(fmt)).ok()?;
+    let handle = GetClipboardData(fmt).ok()?;
     lock_hglobal(handle, |slice| Some(slice.to_vec()))
 }
 
 unsafe fn read_dib() -> Option<Vec<u8>> {
-    let handle = GetClipboardData(CF_DIB).ok()?;
+    let handle = GetClipboardData(cf(CF_DIB)).ok()?;
     lock_hglobal(handle, |slice| dib_to_png(slice).ok())
 }
 
 unsafe fn read_hdrop() -> Vec<PathBuf> {
-    let Ok(handle) = GetClipboardData(CF_HDROP) else {
+    let Ok(handle) = GetClipboardData(cf(CF_HDROP)) else {
         return Vec::new();
     };
     let drop = HDROP(handle.0);
@@ -229,7 +228,7 @@ unsafe fn set_unicode_text(text: &str) -> Result<()> {
     }
     std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
     let _ = GlobalUnlock(mem);
-    SetClipboardData(CF_UNICODETEXT, HANDLE(mem.0))
+    SetClipboardData(cf(CF_UNICODETEXT), Some(HANDLE(mem.0)))
         .map_err(|e| ClipboardError::Platform(e.to_string()))?;
     Ok(())
 }
@@ -247,7 +246,7 @@ unsafe fn set_png(png: &[u8]) -> Result<()> {
     }
     std::ptr::copy_nonoverlapping(png.as_ptr(), ptr as *mut u8, png.len());
     let _ = GlobalUnlock(mem);
-    SetClipboardData(windows::Win32::System::DataExchange::CLIPBOARD_FORMATS(fmt), HANDLE(mem.0))
+    SetClipboardData(fmt, Some(HANDLE(mem.0)))
         .map_err(|e| ClipboardError::Platform(e.to_string()))?;
     Ok(())
 }
@@ -287,7 +286,7 @@ unsafe fn set_hdrop(paths: &[PathBuf]) -> Result<()> {
         payload.len() * 2,
     );
     let _ = GlobalUnlock(mem);
-    SetClipboardData(CF_HDROP, HANDLE(mem.0))
+    SetClipboardData(cf(CF_HDROP), Some(HANDLE(mem.0)))
         .map_err(|e| ClipboardError::Platform(e.to_string()))?;
     Ok(())
 }
@@ -380,6 +379,10 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+fn cf(fmt: CLIPBOARD_FORMAT) -> u32 {
+    u32::from(fmt.0)
+}
+
 static CLASS_NAME: OnceLock<Vec<u16>> = OnceLock::new();
 static LISTENER_HWND: OnceLock<isize> = OnceLock::new();
 
@@ -405,7 +408,7 @@ fn run_listener(tx: Sender<()>) -> Result<()> {
             0,
             0,
             0,
-            HWND_MESSAGE,
+            Some(HWND_MESSAGE),
             None,
             Some(instance.into()),
             None,
@@ -415,7 +418,7 @@ fn run_listener(tx: Sender<()>) -> Result<()> {
         LISTENER.with(|slot| *slot.borrow_mut() = Some(tx));
         AddClipboardFormatListener(hwnd).map_err(|e| ClipboardError::Platform(e.to_string()))?;
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, HWND::default(), 0, 0).into() {
+        while GetMessageW(&mut msg, None, 0, 0).into() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
