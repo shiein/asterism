@@ -34,7 +34,10 @@ jobs:
             libxrandr-dev \
             libdbus-1-dev \
             libpipewire-0.3-dev \
-            libspa-0.2-dev
+            libspa-0.2-dev \
+            libgbm-dev \
+            libegl1-mesa-dev \
+            libdrm-dev
       - run: pnpm install --frozen-lockfile
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
