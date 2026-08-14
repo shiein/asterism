@@ -520,6 +520,48 @@ mod tests {
     }
 
     #[test]
+    fn history_search_trims_invisible_and_escapes_like() {
+        assert_eq!(repo::normalize_search_query("  \t\u{00a0}  "), None);
+        assert_eq!(repo::normalize_search_query("\u{200B}\u{FEFF}"), None);
+        assert_eq!(repo::normalize_search_query("\u{200B}as\u{200B}").as_deref(), Some("as"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let keep = sample("hello asterism");
+        let other = sample("unrelated note");
+        store.insert(keep.clone(), None).unwrap();
+        store.insert(other.clone(), None).unwrap();
+
+        let blank = store
+            .history(HistoryQuery {
+                query: Some(" \t\u{200B}\u{FEFF} ".into()),
+                limit: 10,
+                ..HistoryQuery::default()
+            })
+            .unwrap();
+        assert_eq!(blank.len(), 2);
+
+        let short = store
+            .history(HistoryQuery {
+                query: Some("\u{200B}as\u{200B}".into()),
+                limit: 10,
+                ..HistoryQuery::default()
+            })
+            .unwrap();
+        assert_eq!(short.len(), 1);
+        assert_eq!(short[0].id(), keep.id());
+
+        let wildcard = store
+            .history(HistoryQuery { query: Some("%".into()), limit: 10, ..HistoryQuery::default() })
+            .unwrap();
+        assert!(wildcard.is_empty());
+        let underscore = store
+            .history(HistoryQuery { query: Some("_".into()), limit: 10, ..HistoryQuery::default() })
+            .unwrap();
+        assert!(underscore.is_empty());
+    }
+
+    #[test]
     fn history_cursor_does_not_skip_equal_timestamps() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();

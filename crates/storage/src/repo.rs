@@ -173,7 +173,7 @@ pub fn contains_item(conn: &Connection, id: ContentId) -> Result<bool> {
 
 pub fn list_history(conn: &Connection, query: &HistoryQuery) -> Result<Vec<ContentItem>> {
     let limit = if query.limit == 0 { 50 } else { query.limit.min(200) } as i64;
-    let text_q = query.query.as_ref().map(|q| q.trim().to_string()).filter(|q| !q.is_empty());
+    let text_q = query.query.as_deref().and_then(normalize_search_query);
     // FTS5 trigram 对少于 3 个字符的查询几乎无效，短查询回退 LIKE。
     let use_fts = text_q.as_ref().is_some_and(|q| q.chars().count() >= 3);
     let use_like = text_q.is_some() && !use_fts;
@@ -433,6 +433,16 @@ fn blob16(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<[u8; 16]> {
     let mut arr = [0u8; 16];
     arr.copy_from_slice(&raw);
     Ok(arr)
+}
+
+fn is_invisible_search_noise(c: char) -> bool {
+    matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}')
+}
+
+pub(crate) fn normalize_search_query(raw: &str) -> Option<String> {
+    let stripped: String = raw.chars().filter(|c| !is_invisible_search_noise(*c)).collect();
+    let trimmed = stripped.trim();
+    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
 }
 
 fn escape_fts(raw: &str) -> String {
