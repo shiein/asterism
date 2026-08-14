@@ -38,11 +38,11 @@ pub fn change_token() -> Result<u64> {
 }
 
 pub fn read() -> Result<Option<CapturedClipboard>> {
-    with_clipboard(|| unsafe { read_inner() })
+    with_clipboard(read_inner)
 }
 
 pub fn write(content: &NormalizedContent) -> Result<()> {
-    with_clipboard(|| unsafe { write_inner(content) })
+    with_clipboard(|| write_inner(content))
 }
 
 /// 在隐藏消息窗口上挂 `AddClipboardFormatListener`。成功后每次更新向通道发信号。
@@ -83,8 +83,8 @@ fn with_clipboard<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     }
 }
 
-unsafe fn read_inner() -> Result<Option<CapturedClipboard>> {
-    let change_token = u64::from(GetClipboardSequenceNumber());
+fn read_inner() -> Result<Option<CapturedClipboard>> {
+    let change_token = u64::from(unsafe { GetClipboardSequenceNumber() });
     let formats = enum_formats();
     if formats.is_empty() {
         return Ok(None);
@@ -97,8 +97,8 @@ unsafe fn read_inner() -> Result<Option<CapturedClipboard>> {
     Ok(Some(CapturedClipboard { change_token, source_app, formats, text, image, files, sensitive }))
 }
 
-unsafe fn write_inner(content: &NormalizedContent) -> Result<()> {
-    EmptyClipboard().map_err(|e| ClipboardError::Platform(e.to_string()))?;
+fn write_inner(content: &NormalizedContent) -> Result<()> {
+    unsafe { EmptyClipboard() }.map_err(|e| ClipboardError::Platform(e.to_string()))?;
     match content {
         NormalizedContent::Text { text, .. } => set_unicode_text(text)?,
         NormalizedContent::Image { png, .. } => set_png(png)?,
@@ -107,11 +107,11 @@ unsafe fn write_inner(content: &NormalizedContent) -> Result<()> {
     Ok(())
 }
 
-unsafe fn enum_formats() -> Vec<String> {
+fn enum_formats() -> Vec<String> {
     let mut out = Vec::new();
     let mut fmt = 0u32;
     loop {
-        fmt = EnumClipboardFormats(fmt);
+        fmt = unsafe { EnumClipboardFormats(fmt) };
         if fmt == 0 {
             break;
         }
@@ -120,14 +120,16 @@ unsafe fn enum_formats() -> Vec<String> {
     out
 }
 
-unsafe fn format_name(fmt: u32) -> String {
+fn format_name(fmt: u32) -> String {
     match fmt {
         x if x == cf(CF_UNICODETEXT) => "CF_UNICODETEXT".into(),
         x if x == cf(CF_DIB) => "CF_DIB".into(),
         x if x == cf(CF_HDROP) => "CF_HDROP".into(),
         _ => {
             let mut buf = [0u16; 128];
-            let n = windows::Win32::System::DataExchange::GetClipboardFormatNameW(fmt, &mut buf);
+            let n = unsafe {
+                windows::Win32::System::DataExchange::GetClipboardFormatNameW(fmt, &mut buf)
+            };
             if n > 0 { String::from_utf16_lossy(&buf[..n as usize]) } else { format!("fmt:{fmt}") }
         }
     }
@@ -139,7 +141,7 @@ fn has_format(formats: &[String], name: &str) -> bool {
     })
 }
 
-unsafe fn is_sensitive_clipboard(formats: &[String]) -> bool {
+fn is_sensitive_clipboard(formats: &[String]) -> bool {
     if has_format(formats, WIN_EXCLUDE_MONITOR) {
         return true;
     }
@@ -154,12 +156,12 @@ unsafe fn is_sensitive_clipboard(formats: &[String]) -> bool {
 
 /// `CanIncludeInClipboardHistory` / `CanUploadToCloudClipboard` 是 DWORD：0 禁止，1 允许。
 /// 格式存在但读失败时保守当作敏感。
-unsafe fn dword_forbids(format_name: &str) -> bool {
-    let fmt = RegisterClipboardFormatW(PCWSTR(wide(format_name).as_ptr()));
+fn dword_forbids(format_name: &str) -> bool {
+    let fmt = unsafe { RegisterClipboardFormatW(PCWSTR(wide(format_name).as_ptr())) };
     if fmt == 0 {
         return true;
     }
-    let Ok(handle) = GetClipboardData(fmt) else {
+    let Ok(handle) = (unsafe { GetClipboardData(fmt) }) else {
         return true;
     };
     lock_hglobal(handle, |slice| {
@@ -172,8 +174,8 @@ unsafe fn dword_forbids(format_name: &str) -> bool {
     .unwrap_or(true)
 }
 
-unsafe fn read_unicode_text() -> Option<String> {
-    let handle = GetClipboardData(cf(CF_UNICODETEXT)).ok()?;
+fn read_unicode_text() -> Option<String> {
+    let handle = unsafe { GetClipboardData(cf(CF_UNICODETEXT)) }.ok()?;
     lock_hglobal(handle, |slice| {
         let words = as_u16_slice(slice);
         let end = words.iter().position(|&c| c == 0).unwrap_or(words.len());
@@ -182,76 +184,80 @@ unsafe fn read_unicode_text() -> Option<String> {
     })
 }
 
-unsafe fn read_png() -> Option<Vec<u8>> {
-    let fmt = RegisterClipboardFormatW(PCWSTR(wide(PNG_FORMAT).as_ptr()));
+fn read_png() -> Option<Vec<u8>> {
+    let fmt = unsafe { RegisterClipboardFormatW(PCWSTR(wide(PNG_FORMAT).as_ptr())) };
     if fmt == 0 {
         return None;
     }
-    let handle = GetClipboardData(fmt).ok()?;
+    let handle = unsafe { GetClipboardData(fmt) }.ok()?;
     lock_hglobal(handle, |slice| Some(slice.to_vec()))
 }
 
-unsafe fn read_dib() -> Option<Vec<u8>> {
-    let handle = GetClipboardData(cf(CF_DIB)).ok()?;
+fn read_dib() -> Option<Vec<u8>> {
+    let handle = unsafe { GetClipboardData(cf(CF_DIB)) }.ok()?;
     lock_hglobal(handle, |slice| dib_to_png(slice).ok())
 }
 
-unsafe fn read_hdrop() -> Vec<PathBuf> {
-    let Ok(handle) = GetClipboardData(cf(CF_HDROP)) else {
+fn read_hdrop() -> Vec<PathBuf> {
+    let Ok(handle) = (unsafe { GetClipboardData(cf(CF_HDROP)) }) else {
         return Vec::new();
     };
     let drop = HDROP(handle.0);
-    let count = DragQueryFileW(drop, 0xFFFF_FFFF, None);
+    let count = unsafe { DragQueryFileW(drop, 0xFFFF_FFFF, None) };
     let mut out = Vec::new();
     for i in 0..count {
-        let needed = DragQueryFileW(drop, i, None) as usize;
+        let needed = unsafe { DragQueryFileW(drop, i, None) } as usize;
         if needed == 0 {
             continue;
         }
         let mut buf = vec![0u16; needed + 1];
-        let n = DragQueryFileW(drop, i, Some(&mut buf)) as usize;
+        let n = unsafe { DragQueryFileW(drop, i, Some(&mut buf)) } as usize;
         buf.truncate(n);
         out.push(PathBuf::from(OsString::from_wide(&buf)));
     }
     out
 }
 
-unsafe fn set_unicode_text(text: &str) -> Result<()> {
+fn set_unicode_text(text: &str) -> Result<()> {
     let mut wide: Vec<u16> = text.encode_utf16().collect();
     wide.push(0);
     let bytes = wide.len() * 2;
-    let mem =
-        GlobalAlloc(GMEM_MOVEABLE, bytes).map_err(|e| ClipboardError::Platform(e.to_string()))?;
-    let ptr = GlobalLock(mem);
+    let mem = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) }
+        .map_err(|e| ClipboardError::Platform(e.to_string()))?;
+    let ptr = unsafe { GlobalLock(mem) };
     if ptr.is_null() {
         return Err(ClipboardError::Platform("GlobalLock text".into()));
     }
-    std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
-    let _ = GlobalUnlock(mem);
-    SetClipboardData(cf(CF_UNICODETEXT), Some(HANDLE(mem.0)))
-        .map_err(|e| ClipboardError::Platform(e.to_string()))?;
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
+        let _ = GlobalUnlock(mem);
+        SetClipboardData(cf(CF_UNICODETEXT), Some(HANDLE(mem.0)))
+    }
+    .map_err(|e| ClipboardError::Platform(e.to_string()))?;
     Ok(())
 }
 
-unsafe fn set_png(png: &[u8]) -> Result<()> {
-    let fmt = RegisterClipboardFormatW(PCWSTR(wide(PNG_FORMAT).as_ptr()));
+fn set_png(png: &[u8]) -> Result<()> {
+    let fmt = unsafe { RegisterClipboardFormatW(PCWSTR(wide(PNG_FORMAT).as_ptr())) };
     if fmt == 0 {
         return Err(ClipboardError::Platform("register PNG format".into()));
     }
-    let mem = GlobalAlloc(GMEM_MOVEABLE, png.len())
+    let mem = unsafe { GlobalAlloc(GMEM_MOVEABLE, png.len()) }
         .map_err(|e| ClipboardError::Platform(e.to_string()))?;
-    let ptr = GlobalLock(mem);
+    let ptr = unsafe { GlobalLock(mem) };
     if ptr.is_null() {
         return Err(ClipboardError::Platform("GlobalLock png".into()));
     }
-    std::ptr::copy_nonoverlapping(png.as_ptr(), ptr as *mut u8, png.len());
-    let _ = GlobalUnlock(mem);
-    SetClipboardData(fmt, Some(HANDLE(mem.0)))
-        .map_err(|e| ClipboardError::Platform(e.to_string()))?;
+    unsafe {
+        std::ptr::copy_nonoverlapping(png.as_ptr(), ptr as *mut u8, png.len());
+        let _ = GlobalUnlock(mem);
+        SetClipboardData(fmt, Some(HANDLE(mem.0)))
+    }
+    .map_err(|e| ClipboardError::Platform(e.to_string()))?;
     Ok(())
 }
 
-unsafe fn set_hdrop(paths: &[PathBuf]) -> Result<()> {
+fn set_hdrop(paths: &[PathBuf]) -> Result<()> {
     let mut payload: Vec<u16> = Vec::new();
     for path in paths {
         payload.extend(path.as_os_str().encode_wide());
@@ -269,39 +275,43 @@ unsafe fn set_hdrop(paths: &[PathBuf]) -> Result<()> {
     let header =
         DropFiles { p_files: std::mem::size_of::<DropFiles>() as u32, x: 0, y: 0, nc: 0, wide: 1 };
     let bytes = std::mem::size_of::<DropFiles>() + payload.len() * 2;
-    let mem =
-        GlobalAlloc(GMEM_MOVEABLE, bytes).map_err(|e| ClipboardError::Platform(e.to_string()))?;
-    let ptr = GlobalLock(mem) as *mut u8;
+    let mem = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) }
+        .map_err(|e| ClipboardError::Platform(e.to_string()))?;
+    let ptr = unsafe { GlobalLock(mem) } as *mut u8;
     if ptr.is_null() {
         return Err(ClipboardError::Platform("GlobalLock hdrop".into()));
     }
-    std::ptr::copy_nonoverlapping(
-        &header as *const DropFiles as *const u8,
-        ptr,
-        std::mem::size_of::<DropFiles>(),
-    );
-    std::ptr::copy_nonoverlapping(
-        payload.as_ptr() as *const u8,
-        ptr.add(std::mem::size_of::<DropFiles>()),
-        payload.len() * 2,
-    );
-    let _ = GlobalUnlock(mem);
-    SetClipboardData(cf(CF_HDROP), Some(HANDLE(mem.0)))
-        .map_err(|e| ClipboardError::Platform(e.to_string()))?;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            &header as *const DropFiles as *const u8,
+            ptr,
+            std::mem::size_of::<DropFiles>(),
+        );
+        std::ptr::copy_nonoverlapping(
+            payload.as_ptr() as *const u8,
+            ptr.add(std::mem::size_of::<DropFiles>()),
+            payload.len() * 2,
+        );
+        let _ = GlobalUnlock(mem);
+        SetClipboardData(cf(CF_HDROP), Some(HANDLE(mem.0)))
+    }
+    .map_err(|e| ClipboardError::Platform(e.to_string()))?;
     Ok(())
 }
 
-unsafe fn lock_hglobal<T>(handle: HANDLE, f: impl FnOnce(&[u8]) -> Option<T>) -> Option<T> {
-    let hg = HGLOBAL(handle.0);
-    let ptr = GlobalLock(hg);
-    if ptr.is_null() {
-        return None;
+fn lock_hglobal<T>(handle: HANDLE, f: impl FnOnce(&[u8]) -> Option<T>) -> Option<T> {
+    unsafe {
+        let hg = HGLOBAL(handle.0);
+        let ptr = GlobalLock(hg);
+        if ptr.is_null() {
+            return None;
+        }
+        let size = GlobalSize(hg);
+        let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+        let out = f(slice);
+        let _ = GlobalUnlock(hg);
+        out
     }
-    let size = GlobalSize(hg);
-    let slice = std::slice::from_raw_parts(ptr as *const u8, size);
-    let out = f(slice);
-    let _ = GlobalUnlock(hg);
-    out
 }
 
 fn as_u16_slice(bytes: &[u8]) -> &[u16] {
