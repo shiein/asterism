@@ -1,0 +1,213 @@
+# Cross-platform release binaries. Does not run on every PR.
+#
+# Triggers: manual (Actions → Artifacts → Run workflow) or a v* tag.
+# Output is a single GitHub Actions artifact `asterism-dist` with:
+#
+#   hub/linux-amd64/asterism-hub
+#   hub/linux-arm64/asterism-hub
+#   hub/macos-arm64/asterism-hub
+#   hub/windows-amd64/asterism-hub.exe
+#   desktop/macos-arm64/   (Tauri .dmg / .app)
+#   desktop/windows-amd64/ (Tauri .msi / NSIS)
+#   SHA256SUMS
+#
+# Binaries stay out of git. A v* tag also attaches a zip to the GitHub Release.
+
+name: Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  hub-linux:
+    name: Hub ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-amd64
+          - os: ubuntu-24.04-arm
+            label: linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: artifacts-hub-${{ matrix.label }}
+      - run: pnpm install --frozen-lockfile
+      - name: Build asterism-hub (release)
+        run: cargo build -p asterism-hub --release --locked
+      - name: Stage
+        run: |
+          set -euo pipefail
+          dest="dist/hub/${{ matrix.label }}"
+          mkdir -p "$dest"
+          install -m 0755 target/release/asterism-hub "$dest/asterism-hub"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part-hub-${{ matrix.label }}
+          path: dist/
+          if-no-files-found: error
+
+  desktop-macos:
+    name: Hub + Desktop macos-arm64
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: artifacts-macos-arm64
+      - run: pnpm install --frozen-lockfile
+      - name: Build asterism-hub (release)
+        run: cargo build -p asterism-hub --release --locked
+      - name: Build desktop (Tauri)
+        # Unsigned CI build: no Apple Developer ID on the runner.
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: pnpm --filter @asterism/desktop tauri build
+      - name: Stage
+        run: |
+          set -euo pipefail
+          dest_hub="dist/hub/macos-arm64"
+          dest_desk="dist/desktop/macos-arm64"
+          mkdir -p "$dest_hub" "$dest_desk"
+          install -m 0755 target/release/asterism-hub "$dest_hub/asterism-hub"
+
+          staged=0
+          for base in target/release/bundle desktop/src-tauri/target/release/bundle; do
+            if [[ -d "$base" ]]; then
+              cp -R "$base"/. "$dest_desk"/
+              staged=1
+            fi
+          done
+          if [[ "$staged" -eq 0 ]]; then
+            echo "Tauri bundle directory not found"
+            ls -la target/release || true
+            ls -la desktop/src-tauri/target/release || true
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part-macos-arm64
+          path: dist/
+          if-no-files-found: error
+
+  desktop-windows:
+    name: Hub + Desktop windows-amd64
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: artifacts-windows-amd64
+      - run: pnpm install --frozen-lockfile
+      - name: Build asterism-hub (release)
+        run: cargo build -p asterism-hub --release --locked
+      - name: Build desktop (Tauri)
+        run: pnpm --filter @asterism/desktop tauri build
+      - name: Stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest_hub="dist/hub/windows-amd64"
+          dest_desk="dist/desktop/windows-amd64"
+          mkdir -p "$dest_hub" "$dest_desk"
+          cp target/release/asterism-hub.exe "$dest_hub/asterism-hub.exe"
+
+          staged=0
+          for base in target/release/bundle desktop/src-tauri/target/release/bundle; do
+            if [[ -d "$base" ]]; then
+              cp -R "$base"/. "$dest_desk"/
+              staged=1
+            fi
+          done
+          if [[ "$staged" -eq 0 ]]; then
+            echo "Tauri bundle directory not found"
+            ls -la target/release || true
+            ls -la desktop/src-tauri/target/release || true
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part-windows-amd64
+          path: dist/
+          if-no-files-found: error
+
+  collect:
+    name: Collect dist
+    needs: [hub-linux, desktop-macos, desktop-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: part-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          find dist -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed 's#  dist/#  #' \
+            > dist/SHA256SUMS
+          echo "=== dist tree ==="
+          find dist -print | sort
+          echo "=== SHA256SUMS ==="
+          cat dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asterism-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Pack release zip
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          zip -r "asterism-${GITHUB_REF_NAME}-dist.zip" dist
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: asterism-${{ github.ref_name }}-dist.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
