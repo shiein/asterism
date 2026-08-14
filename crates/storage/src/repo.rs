@@ -440,9 +440,14 @@ fn is_invisible_search_noise(c: char) -> bool {
 }
 
 pub(crate) fn normalize_search_query(raw: &str) -> Option<String> {
-    let stripped: String = raw.chars().filter(|c| !is_invisible_search_noise(*c)).collect();
+    let stripped: String =
+        raw.chars().filter(|c| !is_invisible_search_noise(*c) && !c.is_control()).collect();
     let trimmed = stripped.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+    if trimmed.is_empty() || trimmed.chars().all(char::is_whitespace) {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn escape_fts(raw: &str) -> String {

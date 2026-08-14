@@ -71,8 +71,12 @@ pub fn select_region(frame: &CapturedFrame) -> Result<Option<Selection>, Capture
         current: None,
         result: None,
         done: false,
+        fail: None,
     };
     event_loop.run_app(&mut app).map_err(|e| CaptureError::Failed(e.to_string()))?;
+    if let Some(err) = app.fail {
+        return Err(CaptureError::Failed(err));
+    }
     Ok(app.result)
 }
 
@@ -98,6 +102,7 @@ struct OverlayApp {
     current: Option<(f64, f64)>,
     result: Option<Selection>,
     done: bool,
+    fail: Option<String>,
 }
 
 impl ApplicationHandler for OverlayApp {
@@ -107,9 +112,27 @@ impl ApplicationHandler for OverlayApp {
             .with_title("Asterism")
             .with_fullscreen(Some(Fullscreen::Borderless(target)))
             .with_decorations(false);
-        let window = Arc::new(event_loop.create_window(attrs).expect("overlay window"));
-        let context = softbuffer::Context::new(window.clone()).expect("softbuffer");
-        let surface = softbuffer::Surface::new(&context, window.clone()).expect("surface");
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => Arc::new(window),
+            Err(err) => {
+                self.fail_and_exit(event_loop, err.to_string());
+                return;
+            }
+        };
+        let context = match softbuffer::Context::new(window.clone()) {
+            Ok(context) => context,
+            Err(err) => {
+                self.fail_and_exit(event_loop, err.to_string());
+                return;
+            }
+        };
+        let surface = match softbuffer::Surface::new(&context, window.clone()) {
+            Ok(surface) => surface,
+            Err(err) => {
+                self.fail_and_exit(event_loop, err.to_string());
+                return;
+            }
+        };
         self.window = Some(window);
         self.surface = Some(surface);
         self.redraw();
@@ -144,8 +167,8 @@ impl ApplicationHandler for OverlayApp {
                         ElementState::Released => {
                             self.dragging = false;
                             if let (Some(a), Some(b)) = (self.start, self.current) {
-                                let size =
-                                    self.window.as_ref().expect("overlay window").inner_size();
+                                let Some(window) = self.window.as_ref() else { return };
+                                let size = window.inner_size();
                                 self.result = selection_in_frame(
                                     a,
                                     b,
@@ -172,6 +195,13 @@ impl ApplicationHandler for OverlayApp {
 }
 
 impl OverlayApp {
+    fn fail_and_exit(&mut self, event_loop: &ActiveEventLoop, err: String) {
+        self.fail = Some(err);
+        self.result = None;
+        self.done = true;
+        event_loop.exit();
+    }
+
     fn redraw(&mut self) {
         let Some(window) = &self.window else { return };
         let Some(surface) = &mut self.surface else { return };

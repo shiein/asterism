@@ -284,9 +284,15 @@ impl Store {
     }
 
     fn call<T>(&self, build: impl FnOnce(SyncSender<Result<T>>) -> WriteOp) -> Result<T> {
+        let started = std::time::Instant::now();
         let (tx, rx) = mpsc::sync_channel(1);
         self.writer.send(build(tx)).map_err(|_| StorageError::WriterStopped)?;
-        rx.recv().map_err(|_| StorageError::WriterStopped)?
+        let out = rx.recv().map_err(|_| StorageError::WriterStopped)?;
+        let waited = started.elapsed();
+        if waited > Duration::from_millis(100) {
+            tracing::debug!(wait_ms = waited.as_millis() as u64, "sqlite writer queue wait");
+        }
+        out
     }
 }
 
@@ -523,6 +529,8 @@ mod tests {
     fn history_search_trims_invisible_and_escapes_like() {
         assert_eq!(repo::normalize_search_query("  \t\u{00a0}  "), None);
         assert_eq!(repo::normalize_search_query("\u{200B}\u{FEFF}"), None);
+        assert_eq!(repo::normalize_search_query("\u{3000}\u{3000}"), None);
+        assert_eq!(repo::normalize_search_query("\u{0001}\u{0007}"), None);
         assert_eq!(repo::normalize_search_query("\u{200B}as\u{200B}").as_deref(), Some("as"));
 
         let dir = tempfile::tempdir().unwrap();

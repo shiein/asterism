@@ -15,6 +15,10 @@ use crate::state::HubState;
 const MAX_CHUNK: usize = 2 * 1024 * 1024;
 const MAX_CHUNKS: u32 = 50_000;
 
+fn parse_blob_id(id: &str) -> Result<Uuid, StatusCode> {
+    Uuid::parse_str(id).map_err(|_| StatusCode::BAD_REQUEST)
+}
+
 #[derive(Serialize)]
 pub struct BeginRes {
     pub blob_id: String,
@@ -46,9 +50,7 @@ pub async fn put_chunk(
     if index > MAX_CHUNKS || body.len() > MAX_CHUNK {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
-    if id.contains("..") || id.contains('/') || id.contains('\\') {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    parse_blob_id(&id)?;
     let dir = state.config.blob_root().join(&id);
     if !dir.exists() {
         return Err(StatusCode::NOT_FOUND);
@@ -64,9 +66,7 @@ pub async fn get_chunk(
     Path((id, index)): Path<(String, u32)>,
 ) -> Result<Vec<u8>, StatusCode> {
     let _ = auth_token(&state, bearer(&headers), None).ok_or(StatusCode::UNAUTHORIZED)?;
-    if id.contains("..") || id.contains('/') {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    parse_blob_id(&id)?;
     let path = state.config.blob_root().join(&id).join(format!("chunk_{index}"));
     std::fs::read(path).map_err(|_| StatusCode::NOT_FOUND)
 }
@@ -81,9 +81,7 @@ pub async fn commit(
     if req.chunks > MAX_CHUNKS {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
-    if id.contains("..") || id.contains('/') {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    parse_blob_id(&id)?;
     let dir = state.config.blob_root().join(&id);
     if !dir.exists() {
         return Err(StatusCode::NOT_FOUND);
@@ -154,6 +152,15 @@ fn gc_unused_locked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn blob_id_must_be_uuid() {
+        assert!(parse_blob_id("..").is_err());
+        assert!(parse_blob_id("../secret").is_err());
+        assert!(parse_blob_id("a\\b").is_err());
+        assert!(parse_blob_id(&Uuid::now_v7().to_string()).is_ok());
+    }
 
     #[test]
     fn gc_removes_released_and_orphan_blob_directories() {

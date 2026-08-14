@@ -212,7 +212,7 @@ async fn run_loop(
                         )
                         .await;
                         if let Err(err) = pull_hub(&identity, &vault, &ingestion, &store, &paths, &guard, &cache_pin, &settings, &mut last_cursor, &mut failed_remote, &on_change).await {
-                            tracing::warn!(error = %err, "hub pull failed");
+                            tracing::debug!(error = %err, "hub pull failed");
                         }
                     }
                 }
