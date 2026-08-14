@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 description = "Asterism domain model: content, action, device, policy"
 
+[features]
+default = []
+assemble = []
+
 [dependencies]
 async-trait = { workspace = true }
 bitflags.workspace = true

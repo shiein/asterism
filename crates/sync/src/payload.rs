@@ -57,18 +57,79 @@ pub fn decode_package(hex_str: &str) -> Result<SyncPackage> {
 const BLOB_CHUNK_MAGIC: &[u8; 4] = b"ASB1";
 const BLOB_CHUNK_HEADER: usize = 4 + 24 + 48 + 32 + 4 + 24 + 4;
 
+pub struct BlobChunkEncryptor {
+    item_key: ItemKey,
+    wrapped: WrappedItemKey,
+    blob_id: [u8; 32],
+}
+
+pub struct BlobChunkDecryptor {
+    expected_blob_id: Option<[u8; 32]>,
+    hasher: blake3::Hasher,
+}
+
+impl Default for BlobChunkDecryptor {
+    fn default() -> Self {
+        Self { expected_blob_id: None, hasher: blake3::Hasher::new() }
+    }
+}
+
+impl BlobChunkDecryptor {
+    pub fn decrypt(
+        &mut self,
+        avk: &AccountVaultKey,
+        expected_index: u32,
+        encoded: &[u8],
+    ) -> Result<Vec<u8>> {
+        let (wrapped, chunk) = decode_blob_chunk(encoded)?;
+        if chunk.chunk_index != expected_index {
+            return Err(SyncError::Protocol("blob chunk index is not contiguous".into()));
+        }
+        if self.expected_blob_id.is_some_and(|id| id != chunk.blob_id) {
+            return Err(SyncError::Protocol("blob id changed between chunks".into()));
+        }
+        self.expected_blob_id = Some(chunk.blob_id);
+        let item_key = unwrap_item_key(avk, &wrapped).map_err(crypto_failed)?;
+        let plaintext = decrypt_chunk(&item_key, &chunk).map_err(crypto_failed)?;
+        self.hasher.update(&plaintext);
+        Ok(plaintext)
+    }
+
+    pub fn finish(self, avk: &AccountVaultKey) -> Result<()> {
+        let hash = *self.hasher.finalize().as_bytes();
+        let expected = self
+            .expected_blob_id
+            .ok_or_else(|| SyncError::Protocol("encrypted blob has no chunks".into()))?;
+        if expected != avk.dedup_tag(&hash) && expected != hash {
+            return Err(SyncError::Failed("blob plaintext hash mismatch".into()));
+        }
+        Ok(())
+    }
+}
+
+impl BlobChunkEncryptor {
+    pub fn new(avk: &AccountVaultKey, plaintext_hash: [u8; 32]) -> Result<Self> {
+        let item_key = ItemKey::generate();
+        let wrapped = wrap_item_key(avk, &item_key).map_err(crypto_failed)?;
+        Ok(Self { item_key, wrapped, blob_id: avk.dedup_tag(&plaintext_hash) })
+    }
+
+    pub fn encrypt(&self, index: u32, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let chunk =
+            encrypt_chunk(&self.item_key, self.blob_id, index, plaintext).map_err(crypto_failed)?;
+        encode_blob_chunk(&self.wrapped, &chunk)
+    }
+}
+
 pub fn encrypt_blob_chunks(avk: &AccountVaultKey, plaintext: &[u8]) -> Result<Vec<Vec<u8>>> {
-    let item_key = ItemKey::generate();
-    let wrapped = wrap_item_key(avk, &item_key).map_err(crypto_failed)?;
-    let blob_id = avk.dedup_tag(&blake3_bytes(plaintext));
+    let encryptor = BlobChunkEncryptor::new(avk, blake3_bytes(plaintext))?;
     plaintext
         .chunks(CHUNK_SIZE)
         .enumerate()
         .map(|(index, bytes)| {
             let index = u32::try_from(index)
                 .map_err(|_| SyncError::Protocol("blob has too many chunks".into()))?;
-            let chunk = encrypt_chunk(&item_key, blob_id, index, bytes).map_err(crypto_failed)?;
-            encode_blob_chunk(&wrapped, &chunk)
+            encryptor.encrypt(index, bytes)
         })
         .collect()
 }
@@ -78,27 +139,13 @@ pub fn decrypt_blob_chunks(avk: &AccountVaultKey, encoded: &[Vec<u8>]) -> Result
         return Err(SyncError::Protocol("encrypted blob has no chunks".into()));
     }
     let mut plaintext = Vec::new();
-    let mut expected_blob_id = None;
+    let mut decryptor = BlobChunkDecryptor::default();
     for (expected_index, bytes) in encoded.iter().enumerate() {
-        let (wrapped, chunk) = decode_blob_chunk(bytes)?;
         let expected_index = u32::try_from(expected_index)
             .map_err(|_| SyncError::Protocol("blob has too many chunks".into()))?;
-        if chunk.chunk_index != expected_index {
-            return Err(SyncError::Protocol("blob chunk index is not contiguous".into()));
-        }
-        if expected_blob_id.is_some_and(|id| id != chunk.blob_id) {
-            return Err(SyncError::Protocol("blob id changed between chunks".into()));
-        }
-        expected_blob_id = Some(chunk.blob_id);
-        let item_key = unwrap_item_key(avk, &wrapped).map_err(crypto_failed)?;
-        plaintext.extend(decrypt_chunk(&item_key, &chunk).map_err(crypto_failed)?);
+        plaintext.extend(decryptor.decrypt(avk, expected_index, bytes)?);
     }
-    let hash = blake3_bytes(&plaintext);
-    let expected =
-        expected_blob_id.ok_or_else(|| SyncError::Failed("blob plaintext hash mismatch".into()))?;
-    if expected != avk.dedup_tag(&hash) && expected != hash {
-        return Err(SyncError::Failed("blob plaintext hash mismatch".into()));
-    }
+    decryptor.finish(avk)?;
     Ok(plaintext)
 }
 

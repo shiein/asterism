@@ -9,7 +9,6 @@ use asterism_core::policy::{CapturePolicy, RemotePolicy};
 use crate::capture::{ClipboardBackend, NativeClipboard};
 use crate::error::Result;
 use crate::guard::SelfWriteGuard;
-use crate::normalize::{self, NormalizedContent};
 
 #[derive(Clone, Debug)]
 pub struct WatcherConfig {
@@ -34,7 +33,11 @@ impl Default for WatcherConfig {
 
 #[derive(Clone, Debug)]
 pub enum ClipboardEvent {
-    Captured(NormalizedContent),
+    /// 原始捕获。Normalize / Policy / 自写判定由 Domain Ingestion 执行。
+    Captured {
+        captured: crate::capture::CapturedClipboard,
+        change_token: u64,
+    },
     Ignored,
     Error(String),
 }
@@ -43,7 +46,7 @@ pub fn spawn_watcher(
     config: WatcherConfig,
     guard: Arc<SelfWriteGuard>,
     on_event: impl Fn(ClipboardEvent) + Send + 'static,
-) -> WatcherHandle {
+) -> (WatcherHandle, thread::JoinHandle<()>) {
     spawn_with_backend(config, guard, NativeClipboard, on_event)
 }
 
@@ -52,13 +55,13 @@ pub fn spawn_with_backend<B>(
     guard: Arc<SelfWriteGuard>,
     backend: B,
     on_event: impl Fn(ClipboardEvent) + Send + 'static,
-) -> WatcherHandle
+) -> (WatcherHandle, thread::JoinHandle<()>)
 where
     B: ClipboardBackend + 'static,
 {
     let running = Arc::new(AtomicBool::new(true));
     let flag = Arc::clone(&running);
-    thread::Builder::new()
+    let thread = thread::Builder::new()
         .name("asterism-clipboard".into())
         .spawn(move || {
             if let Err(err) = run_loop(&config, &guard, &backend, &flag, &on_event) {
@@ -66,7 +69,7 @@ where
             }
         })
         .expect("spawn clipboard watcher");
-    WatcherHandle { running }
+    (WatcherHandle { running }, thread)
 }
 
 fn run_loop<B: ClipboardBackend>(
@@ -100,17 +103,11 @@ fn run_loop<B: ClipboardBackend>(
         last = token;
         match backend.read() {
             Ok(Some(captured)) => {
-                match normalize::normalize(&captured, &config.policy, &config.remote) {
-                    Ok(Some(content)) => {
-                        if guard.is_self_write(None, &content.dedup_tag()) {
-                            on_event(ClipboardEvent::Ignored);
-                            continue;
-                        }
-                        on_event(ClipboardEvent::Captured(content));
-                    }
-                    Ok(None) => on_event(ClipboardEvent::Ignored),
-                    Err(err) => on_event(ClipboardEvent::Error(err.to_string())),
-                }
+                let _ = (guard, &config.policy, &config.remote);
+                on_event(ClipboardEvent::Captured {
+                    change_token: captured.change_token,
+                    captured,
+                });
             }
             Ok(None) => on_event(ClipboardEvent::Ignored),
             Err(err) => on_event(ClipboardEvent::Error(err.to_string())),
@@ -163,7 +160,7 @@ mod tests {
             Ok(Some(self.payload.clone()))
         }
 
-        fn write(&self, _: &NormalizedContent) -> ClipResult<()> {
+        fn write(&self, _: &crate::normalize::NormalizedContent) -> ClipResult<()> {
             Ok(())
         }
     }
@@ -184,7 +181,7 @@ mod tests {
         guard.remember(asterism_core::id::ContentId::new(), tag);
 
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_with_backend(
+        let (handle, thread) = spawn_with_backend(
             WatcherConfig { poll_interval: Duration::from_millis(20), ..WatcherConfig::default() },
             Arc::clone(&guard),
             Fake { tokens: Mutex::new(vec![1, 2]), payload },
@@ -194,6 +191,7 @@ mod tests {
         );
         let ev = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         handle.stop();
-        assert!(matches!(ev, ClipboardEvent::Ignored));
+        let _ = thread.join();
+        assert!(matches!(ev, ClipboardEvent::Captured { .. }));
     }
 }

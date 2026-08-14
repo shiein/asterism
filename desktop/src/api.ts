@@ -6,12 +6,14 @@ export function listHistory(input: {
   kind?: ContentKind;
   favoriteOnly?: boolean;
   limit?: number;
+  cursor?: string;
 }): Promise<HistoryItem[]> {
   return invoke("list_history", {
     query: input.query ?? null,
     kind: input.kind ?? null,
     favoriteOnly: input.favoriteOnly ?? false,
     limit: input.limit ?? 80,
+    cursor: input.cursor ?? null,
   });
 }
 

@@ -1,0 +1,23 @@
+[package]
+name = "asterism-domain-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Sealed domain ingestion, commands, and query services"
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+asterism-clipboard = { workspace = true, features = ["assemble"] }
+asterism-core = { workspace = true, features = ["assemble"] }
+asterism-crypto.workspace = true
+asterism-kernel.workspace = true
+asterism-platform.workspace = true
+asterism-plugin-api.workspace = true
+asterism-storage.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3.20"

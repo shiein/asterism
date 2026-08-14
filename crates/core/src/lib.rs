@@ -7,6 +7,7 @@ pub mod action;
 pub mod builtin_actions;
 pub mod content;
 pub mod device;
+pub mod draft;
 pub mod error;
 pub mod id;
 pub mod policy;
@@ -17,6 +18,10 @@ pub use content::{
     FileManifestSummary, ImageMeta, ItemMetadata, PayloadRef, UnsupportedEntry, UnsupportedReason,
 };
 pub use device::{Device, DeviceCapabilities, DevicePlatform};
+pub use draft::{
+    ContentDraft, ContentHandle, DedupDecision, FILE_WORKER_DEBOUNCE_MS, IngestionOutcome,
+    OutboxPayload, Provenance, should_skip_duplicate_payload_tag,
+};
 pub use error::CoreError;
 pub use id::{AccountId, BlobId, ContentId, DeviceId, ManifestId};
 pub use policy::{

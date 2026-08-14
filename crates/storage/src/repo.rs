@@ -13,6 +13,7 @@ pub struct HistoryQuery {
     pub query: Option<String>,
     pub limit: u32,
     pub before_ms: Option<i64>,
+    pub before_id: Option<ContentId>,
 }
 
 impl HistoryQuery {
@@ -26,7 +27,7 @@ pub fn insert_item(
     item: &ContentItem,
     manifest: Option<&FileManifest>,
 ) -> Result<()> {
-    let (payload_kind, payload_inline, blob_id, manifest_id) = match &item.payload_ref {
+    let (payload_kind, payload_inline, blob_id, manifest_id) = match item.payload_ref() {
         PayloadRef::Inline { bytes } => ("inline", Some(bytes.as_ref()), None, None),
         PayloadRef::Blob { blob_id } => ("blob", None, Some(blob_id.as_str().to_string()), None),
         PayloadRef::FileManifest { manifest_id } => {
@@ -34,9 +35,9 @@ pub fn insert_item(
         }
     };
 
-    let preview_text = item.metadata.text_preview.clone();
-    let file_names = item.metadata.files.as_ref().map(|f| f.root_name.clone());
-    let metadata_json = serde_json::to_string(&item.metadata)?;
+    let preview_text = item.metadata().text_preview.clone();
+    let file_names = item.metadata().files.as_ref().map(|f| f.root_name.clone());
+    let metadata_json = serde_json::to_string(item.metadata())?;
 
     conn.execute(
         r#"
@@ -47,15 +48,15 @@ pub fn insert_item(
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
         "#,
         params![
-            item.id.as_bytes().as_slice(),
-            item.origin_device_id.as_bytes().as_slice(),
-            item.kind.as_str(),
-            item.created_at_ms,
-            item.logical_size as i64,
-            item.payload_size as i64,
-            item.dedup_tag.as_slice(),
-            item.flags.bits() as i64,
-            item.status.as_str(),
+            item.id().as_bytes().as_slice(),
+            item.origin_device_id().as_bytes().as_slice(),
+            item.kind().as_str(),
+            item.created_at_ms(),
+            item.logical_size() as i64,
+            item.payload_size() as i64,
+            item.dedup_tag().as_slice(),
+            item.flags().bits() as i64,
+            item.status().as_str(),
             metadata_json,
             payload_kind,
             payload_inline,
@@ -71,14 +72,14 @@ pub fn insert_item(
             "INSERT INTO file_manifests (id, content_id, manifest_json) VALUES (?1, ?2, ?3)",
             params![
                 manifest.id.as_bytes().as_slice(),
-                item.id.as_bytes().as_slice(),
+                item.id().as_bytes().as_slice(),
                 serde_json::to_string(manifest)?,
             ],
         )?;
     }
 
-    if let PayloadRef::Blob { blob_id } = &item.payload_ref {
-        bump_blob_ref(conn, blob_id, item.created_at_ms)?;
+    if let PayloadRef::Blob { blob_id } = item.payload_ref() {
+        bump_blob_ref(conn, blob_id, item.created_at_ms())?;
     }
     Ok(())
 }
@@ -87,7 +88,7 @@ pub fn reserve_blob(conn: &Connection, blob_id: &BlobId, now_ms: i64) -> Result<
     conn.execute(
         r#"
         INSERT INTO blob_refs (blob_id, ref_count, created_at_ms, last_released_at_ms)
-        VALUES (?1, 0, ?2, NULL)
+        VALUES (?1, 0, ?2, ?2)
         ON CONFLICT(blob_id) DO NOTHING
         "#,
         params![blob_id.as_str(), now_ms],
@@ -127,8 +128,10 @@ pub fn set_cursor(conn: &Connection, scope: &str, cursor: &str, now_ms: i64) -> 
 }
 
 pub fn list_cache_pins(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn
-        .prepare("SELECT metadata_json FROM content_items WHERE payload_kind = 'file_manifest'")?;
+    let mut stmt = conn.prepare(
+        "SELECT metadata_json FROM content_items
+         WHERE payload_kind = 'file_manifest' AND status IN ('LOCAL', 'UPLOADING', 'FAILED')",
+    )?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let mut pins = Vec::new();
     for row in rows {
@@ -197,14 +200,16 @@ pub fn list_history(conn: &Connection, query: &HistoryQuery) -> Result<Vec<Conte
     if query.favorite_only {
         where_parts.push("(c.flags & ?) != 0");
     }
-    if query.before_ms.is_some() {
+    if query.before_ms.is_some() && query.before_id.is_some() {
+        where_parts.push("(c.created_at_ms < ? OR (c.created_at_ms = ? AND c.id < ?))");
+    } else if query.before_ms.is_some() {
         where_parts.push("c.created_at_ms < ?");
     }
     if !where_parts.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&where_parts.join(" AND "));
     }
-    sql.push_str(" ORDER BY c.created_at_ms DESC LIMIT ?");
+    sql.push_str(" ORDER BY c.created_at_ms DESC, c.id DESC LIMIT ?");
 
     let mut stmt = conn.prepare(&sql)?;
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -225,6 +230,10 @@ pub fn list_history(conn: &Connection, query: &HistoryQuery) -> Result<Vec<Conte
     }
     if let Some(before) = query.before_ms {
         params.push(Box::new(before));
+        if let Some(before_id) = query.before_id {
+            params.push(Box::new(before));
+            params.push(Box::new(before_id.as_bytes().to_vec()));
+        }
     }
     params.push(Box::new(limit));
 
@@ -235,7 +244,7 @@ pub fn list_history(conn: &Connection, query: &HistoryQuery) -> Result<Vec<Conte
 
 pub fn set_favorite(conn: &Connection, id: ContentId, favorite: bool) -> Result<()> {
     let item = get_item(conn, id)?;
-    let mut flags = item.flags;
+    let mut flags = item.flags();
     flags.set(ContentFlags::FAVORITE, favorite);
     let n = conn.execute(
         "UPDATE content_items SET flags = ?1 WHERE id = ?2",
@@ -285,7 +294,8 @@ pub fn list_pending_sync(conn: &Connection, limit: u32) -> Result<Vec<ContentIte
 pub fn delete_item(conn: &Connection, id: ContentId) -> Result<Option<BlobId>> {
     let item = get_item(conn, id)?;
     conn.execute("DELETE FROM content_items WHERE id = ?1", params![id.as_bytes().as_slice()])?;
-    if let PayloadRef::Blob { blob_id } = item.payload_ref {
+    if let PayloadRef::Blob { blob_id } = item.payload_ref() {
+        let blob_id = blob_id.clone();
         conn.execute(
             r#"
             UPDATE blob_refs
@@ -389,26 +399,26 @@ fn map_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContentItem> {
         }
     };
 
-    Ok(ContentItem {
-        id: ContentId::from_bytes(id),
-        origin_device_id: DeviceId::from_bytes(device),
-        kind: ContentKind::parse(&kind).map_err(|e| {
+    Ok(ContentItem::from_trusted(
+        ContentId::from_bytes(id),
+        DeviceId::from_bytes(device),
+        ContentKind::parse(&kind).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
         })?,
         created_at_ms,
-        logical_size: logical_size as u64,
-        payload_size: payload_size as u64,
+        logical_size as u64,
+        payload_size as u64,
         dedup_tag,
-        flags: ContentFlags::from_bits_truncate(flags as u32),
-        status: ContentStatus::parse(&status).map_err(|e| {
+        ContentFlags::from_bits_truncate(flags as u32),
+        ContentStatus::parse(&status).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
         })?,
-        metadata: serde_json::from_str::<ItemMetadata>(&metadata_json).map_err(|e| {
+        serde_json::from_str::<ItemMetadata>(&metadata_json).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(e))
         })?,
         payload_ref,
-        encrypted_metadata: bytes::Bytes::new(),
-    })
+        bytes::Bytes::new(),
+    ))
 }
 
 fn blob16(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<[u8; 16]> {

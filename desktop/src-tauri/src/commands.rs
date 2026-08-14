@@ -3,15 +3,15 @@ use std::path::PathBuf;
 use asterism_capture::backend::CaptureBackend;
 use asterism_capture::{AnnotationScene, OverlaySession, XcapBackend, export_png};
 use asterism_clipboard::ClipboardBackend;
-use asterism_core::action::ActionId;
 use asterism_core::content::{ContentFlags, ContentKind};
 use asterism_core::id::ContentId;
+use asterism_plugin_api::ActionKey;
 use asterism_storage::HistoryQuery;
 use serde::Serialize;
 use tauri::State;
 
 use crate::actions;
-use crate::runtime::{DesktopState, item_to_clipboard};
+use crate::runtime::{DesktopState, ingest_image};
 use crate::settings::SyncSettings;
 use crate::sync_engine;
 
@@ -63,19 +63,33 @@ pub fn list_history(
     kind: Option<String>,
     favorite_only: bool,
     limit: Option<u32>,
+    cursor: Option<String>,
 ) -> Result<Vec<HistoryItemDto>, CmdError> {
     let kind = kind
         .map(|k| ContentKind::parse(&k))
         .transpose()
         .map_err(|e| CmdError::Any(e.to_string()))?;
-    let items = state
-        .store
+    let (before_ms, before_id) = cursor
+        .map(|raw| {
+            let (ms, id) = raw
+                .split_once(':')
+                .ok_or_else(|| CmdError::Any("invalid history cursor".into()))?;
+            Ok::<_, CmdError>((
+                ms.parse::<i64>().map_err(|_| CmdError::Any("invalid history cursor".into()))?,
+                id.parse::<ContentId>()
+                    .map_err(|_| CmdError::Any("invalid history cursor".into()))?,
+            ))
+        })
+        .transpose()?
+        .map_or((None, None), |(ms, id)| (Some(ms), Some(id)));
+    let items = asterism_domain_runtime::ContentQueryService::new(&state.ingestion)
         .history(HistoryQuery {
             kind,
             favorite_only,
             query,
             limit: limit.unwrap_or(80),
-            before_ms: None,
+            before_ms,
+            before_id,
         })
         .map_err(|e| CmdError::Any(e.to_string()))?;
     Ok(items.into_iter().map(to_dto).collect())
@@ -88,24 +102,28 @@ pub fn set_favorite(
     favorite: bool,
 ) -> Result<(), CmdError> {
     let id = id.parse::<ContentId>().map_err(|e| CmdError::Any(e.to_string()))?;
-    state.store.set_favorite(id, favorite).map_err(|e| CmdError::Any(e.to_string()))
+    let item = asterism_domain_runtime::ContentCommandService::new(&state.ingestion)
+        .get(id)
+        .map_err(|e| CmdError::Any(e.to_string()))?;
+    let current = item.flags().contains(asterism_core::ContentFlags::FAVORITE);
+    if current != favorite {
+        actions::execute(&state, ActionKey::FAVORITE, id, None)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub fn delete_item(state: State<'_, DesktopState>, id: String) -> Result<(), CmdError> {
     let id = id.parse::<ContentId>().map_err(|e| CmdError::Any(e.to_string()))?;
-    state.store.delete(id).map_err(|e| CmdError::Any(e.to_string()))?;
-    state.sync.notify_deleted(id);
+    actions::execute(&state, ActionKey::DELETE, id, None)?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn copy_item(state: State<'_, DesktopState>, id: String) -> Result<(), CmdError> {
     let id = id.parse::<ContentId>().map_err(|e| CmdError::Any(e.to_string()))?;
-    let item = state.store.get(id).map_err(|e| CmdError::Any(e.to_string()))?;
-    let content = item_to_clipboard(&item, &state.store, &state.paths)?;
-    state.guard.remember(item.id, content.dedup_tag());
-    state.clipboard.write(&content).map_err(|e| CmdError::Any(e.to_string()))
+    actions::execute(&state, ActionKey::COPY, id, None)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -124,8 +142,7 @@ pub fn execute_action(
     id: String,
     save_path: Option<String>,
 ) -> Result<String, CmdError> {
-    let action: ActionId =
-        serde_json::from_str(&format!("\"{action}\"")).map_err(|e| CmdError::Any(e.to_string()))?;
+    let action = ActionKey::from_user(&action).map_err(|e| CmdError::Any(e.to_string()))?;
     let id = id.parse::<ContentId>().map_err(|e| CmdError::Any(e.to_string()))?;
     let result = actions::execute(&state, action, id, save_path.map(PathBuf::from))?;
     Ok(format!("{result:?}"))
@@ -161,34 +178,27 @@ pub fn insert_screenshot(
     height: u32,
 ) -> Result<String, CmdError> {
     let local_tag = asterism_crypto::local_dedup_tag(&png);
-    let blob = state.store.put_blob(&png).map_err(|e| CmdError::Any(e.to_string()))?;
-    let mut item = asterism_clipboard::NormalizedContent::Image {
-        png: Vec::new(),
-        width,
-        height,
-        dedup_tag: state.vault.read().avk.dedup_tag(&asterism_crypto::blake3_bytes(&png)),
-        flags: asterism_core::ContentFlags::REMOTE_ALLOWED,
-        source_app: Some("asterism".into()),
-    }
-    .into_item(state.identity.device_id, asterism_platform::now_ms());
-    item.kind = asterism_core::ContentKind::Screenshot;
-    item.payload_ref = asterism_core::PayloadRef::Blob { blob_id: blob };
-    item.logical_size = png.len() as u64;
-    item.payload_size = png.len() as u64;
-    let id = state.store.insert(item.clone(), None).map_err(|e| CmdError::Any(e.to_string()))?;
     let written = asterism_clipboard::NormalizedContent::Image {
-        png,
+        png: png.clone(),
         width,
         height,
         dedup_tag: local_tag,
-        flags: item.flags,
-        source_app: item.metadata.source_app.clone(),
+        flags: asterism_core::ContentFlags::REMOTE_ALLOWED,
+        source_app: Some("asterism".into()),
     };
-    state.guard.remember(item.id, local_tag);
+    let id = ingest_image(
+        state,
+        png,
+        width,
+        height,
+        asterism_core::ContentKind::Screenshot,
+        None,
+        "asterism.capture",
+    )?;
+    state.guard.remember(id, local_tag);
     if let Err(err) = state.clipboard.write(&written) {
         tracing::warn!(error = %err, "failed to write screenshot to clipboard");
     }
-    state.sync.notify_local(item);
     Ok(id.to_string())
 }
 
@@ -364,15 +374,15 @@ fn persist_and_activate_vault(
 
 fn to_dto(item: asterism_core::ContentItem) -> HistoryItemDto {
     HistoryItemDto {
-        id: item.id.to_string(),
-        kind: item.kind.as_str().to_string(),
-        created_at_ms: item.created_at_ms,
-        preview: item.metadata.text_preview,
-        favorite: item.flags.contains(ContentFlags::FAVORITE),
-        source_app: item.metadata.source_app,
-        logical_size: item.logical_size,
-        image_width: item.metadata.image.as_ref().map(|i| i.width),
-        image_height: item.metadata.image.as_ref().map(|i| i.height),
-        file_count: item.metadata.files.as_ref().map(|f| f.file_count),
+        id: item.id().to_string(),
+        kind: item.kind().as_str().to_string(),
+        created_at_ms: item.created_at_ms(),
+        preview: item.metadata().text_preview.clone(),
+        favorite: item.flags().contains(ContentFlags::FAVORITE),
+        source_app: item.metadata().source_app.clone(),
+        logical_size: item.logical_size(),
+        image_width: item.metadata().image.as_ref().map(|i| i.width),
+        image_height: item.metadata().image.as_ref().map(|i| i.height),
+        file_count: item.metadata().files.as_ref().map(|f| f.file_count),
     }
 }

@@ -12,6 +12,7 @@ asterism-crypto.workspace = true
 asterism-platform.workspace = true
 argon2.workspace = true
 base64.workspace = true
+blake3.workspace = true
 bytes.workspace = true
 futures-util = "0.3"
 hex.workspace = true

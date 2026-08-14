@@ -1,7 +1,9 @@
 # Asterism — 项目级指令
 
-> 产品与架构以 `docs/design/windows_macos_clipboard_capture_hub_final_design.md` 为开发基线。
+> 产品范围与阶段以 `docs/design/windows_macos_clipboard_capture_hub_final_design.md` 为基线。
+> 内部组合方式以 `docs/design/asterism_kernel_plugins_refactoring_plan.md` 为重构基线（Kernel + Sealed Domain + 静态插件）。
 > 当前任务的明确要求 > 本文 > 全局偏好。
+> 重构不得削弱产品硬约束；未完成阶段不得用双事实源并行。
 
 ## 产品
 
@@ -18,6 +20,9 @@ Cargo workspace + pnpm workspace。
 
 | 路径 | 职责 |
 |---|---|
+| `crates/kernel` | 无领域依赖的 Scope / Registry / Lifecycle / BootPlan |
+| `crates/plugin-api` | 插件契约：ActionKey、Grant、Manifest |
+| `crates/domain-runtime` | Sealed Ingestion / Command / Query 与静态插件组装 |
 | `crates/core` | Content / Action / Device / Policy 域模型 |
 | `crates/crypto` | Hash、E2EE、Key wrap、dedup HMAC；同一实现供 Desktop 与未来 WASM |
 | `crates/storage` | SQLite WAL + Single Writer Queue + 本地 Blob |

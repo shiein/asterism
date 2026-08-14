@@ -77,9 +77,9 @@ fn load_image_item(
 ) -> Result<(asterism_core::ContentId, Vec<u8>, u32, u32), CmdError> {
     let id = item_id.parse().map_err(|e: asterism_core::CoreError| CmdError::Any(e.to_string()))?;
     let item = state.store.get(id).map_err(|e| CmdError::Any(e.to_string()))?;
-    let png = match item.payload_ref {
+    let png = match item.payload_ref() {
         asterism_core::PayloadRef::Blob { blob_id } => {
-            state.store.get_blob(&blob_id).map_err(|e| CmdError::Any(e.to_string()))?
+            state.store.get_blob(blob_id).map_err(|e| CmdError::Any(e.to_string()))?
         }
         asterism_core::PayloadRef::Inline { bytes } => bytes.to_vec(),
         _ => return Err(CmdError::Any("not an image".into())),
@@ -98,7 +98,7 @@ pub async fn record_gif(
         tauri::async_runtime::spawn_blocking(move || record_gif_inner(seconds, fps))
             .await
             .map_err(|e| CmdError::Any(e.to_string()))??;
-    insert_blob(&state, bytes, w, h, ContentKind::Gif)
+    insert_blob(&state, bytes, w, h, ContentKind::Gif, Some("image/gif"))
 }
 
 fn record_gif_inner(seconds: u32, fps: u16) -> Result<(Vec<u8>, u32, u32), CmdError> {
@@ -133,18 +133,22 @@ pub async fn record_video(
     fps: u32,
     audio: Option<String>,
 ) -> Result<String, CmdError> {
-    let (bytes, w, h) =
+    let (bytes, w, h, mime) =
         tauri::async_runtime::spawn_blocking(move || record_video_inner(seconds, fps, audio))
             .await
             .map_err(|e| CmdError::Any(e.to_string()))??;
-    insert_blob(&state, bytes, w, h, ContentKind::Video)
+    insert_blob(&state, bytes, w, h, ContentKind::Video, Some(mime))
 }
 
 fn record_video_inner(
     seconds: u32,
     fps: u32,
     audio: Option<String>,
-) -> Result<(Vec<u8>, u32, u32), CmdError> {
+) -> Result<(Vec<u8>, u32, u32, &'static str), CmdError> {
+    #[cfg(not(target_os = "macos"))]
+    if audio.as_deref().is_some_and(|source| source != "none") {
+        return Err(CmdError::Any("当前平台尚不支持带音频的视频录制；未创建任何录制结果".into()));
+    }
     let backend = XcapBackend;
     backend.permission_preflight().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
@@ -183,7 +187,7 @@ fn record_video_inner(
             }
         }
         let bytes = rec.finish().map_err(|e| CmdError::Any(e.to_string()))?;
-        Ok((bytes, w, h))
+        Ok((bytes, w, h, "video/mp4"))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -203,7 +207,7 @@ fn record_video_inner(
             }
         }
         let bytes = avi.finish().map_err(|e| CmdError::Any(e.to_string()))?;
-        Ok((bytes, w, h))
+        Ok((bytes, w, h, "video/x-msvideo"))
     }
 }
 
@@ -269,22 +273,9 @@ fn insert_blob(
     w: u32,
     h: u32,
     kind: ContentKind,
+    mime_hint: Option<&str>,
 ) -> Result<String, CmdError> {
-    let blob = state.store.put_blob(&bytes).map_err(|e| CmdError::Any(e.to_string()))?;
-    let mut item = asterism_clipboard::NormalizedContent::Image {
-        png: Vec::new(),
-        width: w,
-        height: h,
-        dedup_tag: state.vault.read().avk.dedup_tag(&asterism_crypto::blake3_bytes(&bytes)),
-        flags: asterism_core::ContentFlags::REMOTE_ALLOWED,
-        source_app: Some("asterism".into()),
-    }
-    .into_item(state.identity.device_id, asterism_platform::now_ms());
-    item.kind = kind;
-    item.payload_ref = asterism_core::PayloadRef::Blob { blob_id: blob };
-    item.logical_size = bytes.len() as u64;
-    item.payload_size = bytes.len() as u64;
-    let id = state.store.insert(item.clone(), None).map_err(|e| CmdError::Any(e.to_string()))?;
-    state.sync.notify_local(item);
+    let id = crate::runtime::ingest_image(state, bytes, w, h, kind, mime_hint, "asterism.capture")
+        .map_err(|e| CmdError::Any(e.to_string()))?;
     Ok(id.to_string())
 }

@@ -13,6 +13,9 @@ path = "src/main.rs"
 [dependencies]
 asterism-core.workspace = true
 asterism-crypto.workspace = true
+asterism-domain-runtime.workspace = true
+asterism-kernel.workspace = true
+asterism-plugin-api.workspace = true
 asterism-storage.workspace = true
 asterism-sync.workspace = true
 anyhow.workspace = true

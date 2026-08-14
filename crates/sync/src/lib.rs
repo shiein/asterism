@@ -21,7 +21,10 @@ pub mod router;
 pub mod session;
 pub mod transport;
 
-pub use archive::{pack_file_bundle, pack_tree, unpack_file_bundle, unpack_tree};
+pub use archive::{
+    pack_file_bundle, pack_file_bundle_to_writer, pack_tree, pack_tree_to_writer,
+    unpack_file_bundle, unpack_file_bundle_reader, unpack_tree, unpack_tree_reader,
+};
 pub use cert::{DeviceCert, HubTls};
 pub use error::SyncError;
 pub use hub_client::HubClient;
@@ -31,8 +34,8 @@ pub use pairing::{
     parse_salt_hex,
 };
 pub use payload::{
-    SyncPackage, decode_package, decrypt_blob_chunks, encode_package, encrypt_blob_chunks, pack,
-    unpack_body, unpack_meta,
+    BlobChunkDecryptor, BlobChunkEncryptor, SyncPackage, decode_package, decrypt_blob_chunks,
+    encode_package, encrypt_blob_chunks, pack, unpack_body, unpack_meta,
 };
 pub use protocol::{Envelope, MessageBody, PROTOCOL_VERSION};
 pub use session::SyncSession;

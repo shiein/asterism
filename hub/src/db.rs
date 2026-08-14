@@ -118,3 +118,14 @@ pub fn backup(src: &Path, dest: &Path) -> Result<()> {
     backup.run_to_completion(64, std::time::Duration::from_millis(16), None)?;
     Ok(())
 }
+
+pub fn referenced_blob_ids(snapshot: &Path) -> Result<Vec<String>> {
+    let conn = Connection::open(snapshot)?;
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT blob_id FROM content_refs WHERE blob_id IS NOT NULL ORDER BY blob_id",
+    )?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(ids)
+}

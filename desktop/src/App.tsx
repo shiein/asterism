@@ -31,8 +31,12 @@ export function App() {
         <div className="app">
           <div className="actions">
             <button onClick={() => void invoke("record_gif", { seconds: 3, fps: 10 })}>录 GIF 3s</button>
-            <button onClick={() => void invoke("record_video", { seconds: 3, fps: 30, audio: "both" })}>
-              录 H.264（系统音+麦）
+            <button
+              disabled={!navigator.userAgent.includes("Macintosh")}
+              title={navigator.userAgent.includes("Macintosh") ? undefined : "当前平台的视频音频录制尚未实现"}
+              onClick={() => void invoke("record_video", { seconds: 3, fps: 30, audio: "both" })}
+            >
+              {navigator.userAgent.includes("Macintosh") ? "录 H.264（系统音+麦）" : "视频录制（当前平台不可用）"}
             </button>
             <button onClick={() => void invoke("scroll_capture", { frames: 8 })}>滚动截图</button>
             <button

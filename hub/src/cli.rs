@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -91,7 +92,11 @@ pub fn init(args: InitArgs) -> Result<()> {
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
     let config = load_config(args.config)?;
-    crate::server::run(config).await
+    let runtime = crate::host::hub_boot_plan().mount().map_err(|err| anyhow::anyhow!(err))?;
+    tracing::info!(order = ?runtime.boot_order(), "hub boot plan");
+    let result = crate::server::run(config).await;
+    drop(runtime);
+    result
 }
 
 pub fn migrate(args: ConfigArgs) -> Result<()> {
@@ -102,18 +107,124 @@ pub fn migrate(args: ConfigArgs) -> Result<()> {
 }
 
 pub fn backup(args: BackupArgs) -> Result<()> {
-    let config_hint = args.config.clone();
     let config = load_config(args.config)?;
-    fs::create_dir_all(&args.dest)?;
-    db::backup(&config.db_path(), &args.dest.join("hub.db"))?;
-    copy_dir(&config.data_dir.join("blobs"), &args.dest.join("blobs"))?;
-    // 备份 config 但不复制私钥内容到 stdout。文件仍复制，dest 需受保护。
-    if config.tls.cert.exists() {
-        fs::copy(&config.tls.cert, args.dest.join("tls.cert"))?;
+    if args.dest.exists() {
+        bail!("backup destination already exists: {}", args.dest.display());
     }
-    fs::copy(config_path_hint(config_hint.as_deref()), args.dest.join("config.toml")).ok();
+    let parent = args.dest.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let name = args.dest.file_name().and_then(|value| value.to_str()).unwrap_or("backup");
+    let staging_path = parent.join(format!(".{name}.partial-{}", std::process::id()));
+    if staging_path.exists() {
+        bail!("stale backup staging directory exists: {}", staging_path.display());
+    }
+    fs::create_dir(&staging_path)?;
+    let mut staging = BackupStaging { path: staging_path, committed: false };
+    let target_root = &staging.path;
+
+    db::backup(&config.db_path(), &target_root.join("hub.db"))?;
+    let blob_ids = db::referenced_blob_ids(&target_root.join("hub.db"))?;
+    let mut blobs = Vec::new();
+    for id in blob_ids {
+        let source = config.blob_root().join(&id);
+        let committed = source.join("committed");
+        let chunk_count: u32 = fs::read_to_string(&committed)
+            .with_context(|| format!("referenced blob {id} is not committed"))?
+            .trim()
+            .parse()
+            .with_context(|| format!("invalid commit marker for blob {id}"))?;
+        let target = target_root.join("blobs").join(&id);
+        fs::create_dir_all(&target)?;
+        let mut chunks = Vec::with_capacity(chunk_count as usize);
+        for index in 0..chunk_count {
+            let name = format!("chunk_{index}");
+            let from = source.join(&name);
+            let to = target.join(&name);
+            fs::copy(&from, &to).with_context(|| format!("copy blob {id} chunk {index}"))?;
+            let source_hash = sha256_file(&from)?;
+            let copied_hash = sha256_file(&to)?;
+            if source_hash != copied_hash {
+                bail!("blob {id} chunk {index} changed while backup was running");
+            }
+            chunks.push(BackupChunk {
+                index,
+                bytes: fs::metadata(&to)?.len(),
+                sha256: copied_hash,
+            });
+        }
+        fs::write(target.join("committed"), chunk_count.to_string())?;
+        blobs.push(BackupBlob { id, chunks });
+    }
+
+    fs::copy(&config.tls.cert, target_root.join("tls.cert")).context("copy TLS certificate")?;
+    fs::copy(&config.tls.key, target_root.join("tls.key")).context("copy TLS private key")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(target_root.join("tls.key"), fs::Permissions::from_mode(0o600))?;
+    }
+    let restored = HubConfig {
+        data_dir: args.dest.clone(),
+        tls: crate::config::TlsConfig {
+            cert: args.dest.join("tls.cert"),
+            key: args.dest.join("tls.key"),
+        },
+        ..config
+    };
+    fs::write(target_root.join("config.toml"), restored.to_toml()?)?;
+    let manifest = BackupManifest { version: 1, blobs };
+    fs::write(target_root.join("backup-manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
+    fs::rename(&staging.path, &args.dest)?;
+    staging.committed = true;
     println!("backup written to {}", args.dest.display());
     Ok(())
+}
+
+struct BackupStaging {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl Drop for BackupStaging {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct BackupManifest {
+    version: u32,
+    blobs: Vec<BackupBlob>,
+}
+
+#[derive(serde::Serialize)]
+struct BackupBlob {
+    id: String,
+    chunks: Vec<BackupChunk>,
+}
+
+#[derive(serde::Serialize)]
+struct BackupChunk {
+    index: u32,
+    bytes: u64,
+    sha256: String,
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut input = fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hash.finalize()))
 }
 
 pub fn doctor(args: ConfigArgs) -> Result<()> {
@@ -154,27 +265,6 @@ fn resolve_config_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     bail!("missing --config and ./data/config.toml; run `asterism-hub init`")
 }
 
-fn config_path_hint(explicit: Option<&Path>) -> PathBuf {
-    explicit.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("./data/config.toml"))
-}
-
-fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
-    if !src.exists() {
-        return Ok(());
-    }
-    fs::create_dir_all(dest)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let to = dest.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &to)?;
-        } else {
-            fs::copy(entry.path(), to)?;
-        }
-    }
-    Ok(())
-}
-
 impl HubConfig {
     fn to_toml(&self) -> Result<String> {
         toml::to_string_pretty(self).context("serialize config")
@@ -201,5 +291,8 @@ mod tests {
         let dest = dir.path().join("backup");
         backup(BackupArgs { config, dest: dest.clone() }).unwrap();
         assert!(dest.join("hub.db").exists());
+        assert!(dest.join("tls.key").exists());
+        assert!(dest.join("backup-manifest.json").exists());
+        doctor(ConfigArgs { config: Some(dest.join("config.toml")) }).unwrap();
     }
 }

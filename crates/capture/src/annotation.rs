@@ -120,8 +120,19 @@ fn draw(pixmap: &mut Pixmap, ann: &Annotation) {
                 pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
             }
         }
-        AnnotationKind::Mosaic | AnnotationKind::Blur if ann.geometry.len() >= 4 => {
+        AnnotationKind::Mosaic if ann.geometry.len() >= 4 => {
             apply_block(pixmap, ann.geometry[0], ann.geometry[1], ann.geometry[2], ann.geometry[3]);
+        }
+        AnnotationKind::Blur if ann.geometry.len() >= 4 => {
+            let radius = ann.style.get("radius").and_then(|value| value.as_u64()).unwrap_or(6);
+            apply_blur(
+                pixmap,
+                ann.geometry[0],
+                ann.geometry[1],
+                ann.geometry[2],
+                ann.geometry[3],
+                radius.clamp(1, 32) as u32,
+            );
         }
         AnnotationKind::Text if ann.geometry.len() >= 2 => {
             let text = annotation_text(ann);
@@ -206,6 +217,58 @@ fn apply_block(pixmap: &mut Pixmap, x: f64, y: f64, w: f64, h: f64) {
     }
 }
 
+fn apply_blur(pixmap: &mut Pixmap, x: f64, y: f64, w: f64, h: f64, radius: u32) {
+    let left = x.max(0.0) as u32;
+    let top = y.max(0.0) as u32;
+    let right = (x + w.max(1.0)).max(0.0).min(f64::from(pixmap.width())) as u32;
+    let bottom = (y + h.max(1.0)).max(0.0).min(f64::from(pixmap.height())) as u32;
+    if left >= right || top >= bottom {
+        return;
+    }
+
+    let source_left = left.saturating_sub(radius);
+    let source_top = top.saturating_sub(radius);
+    let source_right = right.saturating_add(radius).min(pixmap.width());
+    let source_bottom = bottom.saturating_add(radius).min(pixmap.height());
+    let source_width = source_right - source_left;
+    let source_height = source_bottom - source_top;
+    let stride = source_width as usize + 1;
+    let mut sums = vec![[0u64; 4]; stride * (source_height as usize + 1)];
+
+    for sy in 0..source_height {
+        let mut row = [0u64; 4];
+        for sx in 0..source_width {
+            let pixel = pixmap.pixel(source_left + sx, source_top + sy).expect("bounded pixel");
+            row[0] += u64::from(pixel.red());
+            row[1] += u64::from(pixel.green());
+            row[2] += u64::from(pixel.blue());
+            row[3] += u64::from(pixel.alpha());
+            let above = sums[sy as usize * stride + sx as usize + 1];
+            sums[(sy as usize + 1) * stride + sx as usize + 1] =
+                [row[0] + above[0], row[1] + above[1], row[2] + above[2], row[3] + above[3]];
+        }
+    }
+
+    let width = pixmap.width();
+    for py in top..bottom {
+        for px in left..right {
+            let x0 = px.saturating_sub(radius).max(source_left) - source_left;
+            let y0 = py.saturating_sub(radius).max(source_top) - source_top;
+            let x1 = px.saturating_add(radius + 1).min(source_right) - source_left;
+            let y1 = py.saturating_add(radius + 1).min(source_bottom) - source_top;
+            let a = sums[y0 as usize * stride + x0 as usize];
+            let b = sums[y0 as usize * stride + x1 as usize];
+            let c = sums[y1 as usize * stride + x0 as usize];
+            let d = sums[y1 as usize * stride + x1 as usize];
+            let count = u64::from((x1 - x0) * (y1 - y0));
+            let channel =
+                |index: usize| ((d[index] + a[index] - b[index] - c[index]) / count) as u8;
+            let color = Color::from_rgba8(channel(0), channel(1), channel(2), channel(3));
+            pixmap.pixels_mut()[(py * width + px) as usize] = color.premultiply().to_color_u8();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +278,27 @@ mod tests {
         let bgra = vec![0u8, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255];
         let png = export_png(2, 2, &bgra, &AnnotationScene::default()).unwrap();
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn blur_is_not_the_mosaic_effect() {
+        let mut bgra = Vec::new();
+        for y in 0..24u8 {
+            for x in 0..24u8 {
+                bgra.extend_from_slice(&[x.wrapping_mul(9), y.wrapping_mul(7), x ^ y, 255]);
+            }
+        }
+        let annotation = |kind| AnnotationScene {
+            items: vec![Annotation {
+                id: "effect".into(),
+                kind,
+                geometry: vec![2.0, 2.0, 20.0, 20.0],
+                style: serde_json::json!({"radius": 3}),
+                z_index: 0,
+            }],
+        };
+        let mosaic = export_png(24, 24, &bgra, &annotation(AnnotationKind::Mosaic)).unwrap();
+        let blur = export_png(24, 24, &bgra, &annotation(AnnotationKind::Blur)).unwrap();
+        assert_ne!(mosaic, blur);
     }
 }

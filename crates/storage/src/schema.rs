@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::Result;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 3;
 
 pub fn initialize(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -71,6 +71,13 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     )?;
 
     ensure_fts(conn)?;
+    crate::outbox::ensure_schema(conn)?;
+    // V1 早期版本的未完成 blob reservation 没有释放时间，因而永远无法 GC。
+    conn.execute(
+        "UPDATE blob_refs SET last_released_at_ms = created_at_ms
+         WHERE ref_count = 0 AND last_released_at_ms IS NULL",
+        [],
+    )?;
     set_schema_version(conn, SCHEMA_VERSION)?;
     Ok(())
 }

@@ -4,6 +4,7 @@ mod actions;
 mod capture_cmds;
 mod commands;
 mod overlay_cli;
+mod plugins;
 mod runtime;
 mod settings;
 mod sync_engine;

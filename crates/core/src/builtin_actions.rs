@@ -7,7 +7,7 @@ use crate::id::DeviceId;
 pub fn supports(id: ActionId, item: &ContentItem) -> bool {
     match id {
         ActionId::Copy => matches!(
-            item.kind,
+            item.kind(),
             ContentKind::Text
                 | ContentKind::Image
                 | ContentKind::Screenshot
@@ -17,7 +17,7 @@ pub fn supports(id: ActionId, item: &ContentItem) -> bool {
         ),
         ActionId::Favorite | ActionId::Delete => true,
         ActionId::Save => matches!(
-            item.kind,
+            item.kind(),
             ContentKind::Text
                 | ContentKind::Image
                 | ContentKind::Screenshot
@@ -40,13 +40,13 @@ pub fn require_save_path(
 }
 
 pub fn copied(item: &ContentItem) -> ActionResult {
-    ActionResult::Copied { id: item.id }
+    ActionResult::Copied { id: item.id() }
 }
 
 pub fn deleted(item: &ContentItem) -> ActionResult {
-    ActionResult::Deleted { id: item.id }
+    ActionResult::Deleted { id: item.id() }
 }
 
 pub fn favorited(item: &ContentItem, favorite: bool) -> ActionResult {
-    ActionResult::Favorited { id: item.id, favorite }
+    ActionResult::Favorited { id: item.id(), favorite }
 }

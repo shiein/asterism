@@ -23,12 +23,6 @@ function deviceId(): string {
   return id;
 }
 
-function mergeHistory(cached: HistoryItem[], incoming: HistoryItem[]): HistoryItem[] {
-  const byId = new Map(cached.map((it) => [it.id, it]));
-  for (const it of incoming) byId.set(it.id, it);
-  return [...byId.values()].sort((a, b) => a.created_at_ms - b.created_at_ms || a.id.localeCompare(b.id));
-}
-
 export function App() {
   const [base, setBase] = useState(window.location.origin);
   const [code, setCode] = useState("");
@@ -52,7 +46,9 @@ export function App() {
     (async () => {
       try {
         const cached = (await loadShard<HistoryItem[]>("history")) ?? [];
-        const list = mergeHistory(cached, await api.allHistory(200));
+        if (!cancelled) setItems([...cached].reverse());
+        // 完整历史接口是服务端权威快照；不能与缓存做并集，否则服务端删除会复活。
+        const list = await api.allHistory(200);
         if (cancelled) return;
         setItems([...list].reverse());
         await saveShard("history", list);
@@ -177,6 +173,29 @@ export function App() {
     }
   }
 
+  async function deleteItem(it: HistoryItem) {
+    setError(null);
+    try {
+      await api.deleteHistory(it.id);
+      index.remove(it.id);
+      setIndexed(index.size);
+      setPreviews((current) => {
+        const url = current[it.id];
+        if (url?.startsWith("blob:")) URL.revokeObjectURL(url);
+        const next = { ...current };
+        delete next[it.id];
+        return next;
+      });
+      setItems((current) => {
+        const next = current.filter((candidate) => candidate.id !== it.id);
+        void saveShard("history", [...next].reverse());
+        return next;
+      });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   return (
     <main className="page">
       <h1>Asterism 历史中心</h1>
@@ -243,7 +262,7 @@ export function App() {
             )}
             {previews[it.id] && isTextKind(it.kind) && <p className="muted">{previews[it.id].slice(0, 160)}</p>}
             <button onClick={() => void copyItem(it)}>{isTextKind(it.kind) ? "复制" : "下载"}</button>
-            <button onClick={() => api.deleteHistory(it.id).then(() => setItems((xs) => xs.filter((x) => x.id !== it.id)))}>
+            <button onClick={() => void deleteItem(it)}>
               删除
             </button>
           </li>

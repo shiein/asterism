@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { captureFullscreen, captureRegion, copyItem, deleteItem, getIdentity, listHistory, setFavorite } from "../api";
@@ -12,15 +12,24 @@ export function HistoryPage() {
   const { query, kind, favoriteOnly, setQuery, setKind, setFavoriteOnly } = useUiStore();
 
   const identity = useQuery({ queryKey: ["identity"], queryFn: getIdentity });
-  const history = useQuery({
+  const history = useInfiniteQuery({
     queryKey: ["history", query, kind, favoriteOnly],
-    queryFn: () =>
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) =>
       listHistory({
         query: query.trim() || undefined,
         kind: kind === "ALL" ? undefined : kind,
         favoriteOnly,
+        limit: 80,
+        cursor: pageParam,
       }),
+    getNextPageParam: (page) => {
+      if (page.length < 80) return undefined;
+      const last = page.at(-1);
+      return last ? `${last.createdAtMs}:${last.id}` : undefined;
+    },
   });
+  const historyItems = history.data?.pages.flat() ?? [];
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -93,10 +102,10 @@ export function HistoryPage() {
 
       {history.isLoading && <p className="empty">正在读取历史…</p>}
       {history.error && <p className="empty error">读取失败：{(history.error as Error).message}</p>}
-      {history.data?.length === 0 && <p className="empty">还没有可显示的剪贴板历史。</p>}
+      {historyItems.length === 0 && !history.isLoading && <p className="empty">还没有可显示的剪贴板历史。</p>}
 
       <ul className="list">
-        {history.data?.map((item) => (
+        {historyItems.map((item) => (
           <li key={item.id} className="card">
             <div className="meta">
               <span className="kind">{labelKind(item.kind)}</span>
@@ -116,6 +125,11 @@ export function HistoryPage() {
           </li>
         ))}
       </ul>
+      {history.hasNextPage && (
+        <button disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>
+          {history.isFetchingNextPage ? "正在加载…" : "加载更多"}
+        </button>
+      )}
     </div>
   );
 }

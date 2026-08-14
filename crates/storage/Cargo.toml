@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "SQLite WAL store with a single writer queue and filesystem blobs"
 
 [dependencies]
-asterism-core.workspace = true
+asterism-core = { workspace = true, features = ["assemble"] }
 asterism-crypto.workspace = true
 bytes.workspace = true
 parking_lot.workspace = true

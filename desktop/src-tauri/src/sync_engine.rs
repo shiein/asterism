@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments, clippy::collapsible_if)]
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -10,6 +11,7 @@ use asterism_core::content::{
     ContentFlags, ContentItem, ContentKind, ContentStatus, FileManifest, ItemMetadata, PayloadRef,
 };
 use asterism_crypto::AccountVaultKey;
+use asterism_domain_runtime::{Ingestion, RemoteItemBody, RemoteItemSpec};
 use asterism_platform::{AppPaths, LocalIdentity, TrustStore};
 use asterism_storage::Store;
 use asterism_sync::hub_client::{HistoryDto, HubClient};
@@ -17,21 +19,23 @@ use asterism_sync::lan::{self, DiscoveredPeer};
 use asterism_sync::pairing::PairingFinish;
 use asterism_sync::protocol::{Envelope, ItemOffer, ItemReady, LanItem, MessageBody};
 use asterism_sync::{
-    DeviceCert, decode_package, decrypt_blob_chunks, encode_package, encrypt_blob_chunks, pack,
-    pack_file_bundle, unpack_body, unpack_file_bundle, unpack_meta, unpack_tree,
+    BlobChunkDecryptor, BlobChunkEncryptor, DeviceCert, decode_package, encode_package, pack,
+    pack_file_bundle_to_writer, unpack_body, unpack_file_bundle, unpack_file_bundle_reader,
+    unpack_meta, unpack_tree,
 };
 use mdns_sd::ServiceEvent;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
-use crate::runtime::{item_to_clipboard, persist_item};
+use crate::runtime::item_to_clipboard;
 use crate::settings::SyncSettings;
+use asterism_plugin_api::ContentReadGrant;
 
 pub enum SyncCmd {
-    LocalItem(Box<ContentItem>),
     ReplaceVault(AccountVaultKey),
     Reload,
     DeleteRemote(asterism_core::ContentId),
+    DrainOutbox,
 }
 
 #[derive(Clone)]
@@ -41,12 +45,6 @@ pub struct SyncHandle {
 }
 
 impl SyncHandle {
-    pub fn notify_local(&self, item: ContentItem) {
-        if item.may_sync_remote() {
-            let _ = self.tx.send(SyncCmd::LocalItem(Box::new(item)));
-        }
-    }
-
     pub fn reload(&self) {
         let _ = self.tx.send(SyncCmd::Reload);
     }
@@ -58,42 +56,49 @@ impl SyncHandle {
     pub fn notify_deleted(&self, id: asterism_core::ContentId) {
         let _ = self.tx.send(SyncCmd::DeleteRemote(id));
     }
+
+    pub fn drain_outbox(&self) {
+        let _ = self.tx.send(SyncCmd::DrainOutbox);
+    }
 }
 
 pub fn spawn(
     identity: LocalIdentity,
     vault: AccountVaultKey,
     store: Arc<Store>,
+    ingestion: Arc<Ingestion>,
     paths: AppPaths,
     guard: Arc<SelfWriteGuard>,
+    cache_pin: Arc<parking_lot::RwLock<Option<String>>>,
     settings: SyncSettings,
     on_change: impl Fn() + Send + Sync + 'static,
-) -> SyncHandle {
+) -> anyhow::Result<(SyncHandle, thread::JoinHandle<()>)> {
     let settings = Arc::new(Mutex::new(settings));
     let (tx, rx) = mpsc::unbounded_channel();
     let handle = SyncHandle { tx, settings: Arc::clone(&settings) };
-    thread::Builder::new()
-        .name("asterism-sync".into())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-                Ok(rt) => rt,
-                Err(err) => {
-                    tracing::error!(error = %err, "sync runtime");
-                    return;
-                }
-            };
-            rt.block_on(run_loop(identity, vault, store, paths, guard, settings, rx, on_change));
-        })
-        .ok();
-    handle
+    let join = thread::Builder::new().name("asterism-sync".into()).spawn(move || {
+        let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(err) => {
+                tracing::error!(error = %err, "sync runtime");
+                return;
+            }
+        };
+        rt.block_on(run_loop(
+            identity, vault, store, ingestion, paths, guard, cache_pin, settings, rx, on_change,
+        ));
+    })?;
+    Ok((handle, join))
 }
 
 async fn run_loop(
     identity: LocalIdentity,
     mut vault: AccountVaultKey,
     store: Arc<Store>,
+    ingestion: Arc<Ingestion>,
     paths: AppPaths,
     guard: Arc<SelfWriteGuard>,
+    cache_pin: Arc<parking_lot::RwLock<Option<String>>>,
     settings: Arc<Mutex<SyncSettings>>,
     mut rx: mpsc::UnboundedReceiver<SyncCmd>,
     on_change: impl Fn() + Send + Sync + 'static,
@@ -135,7 +140,7 @@ async fn run_loop(
     }));
     let listener = lan::listen(cert.clone(), port).await.ok();
     let mut last_cursor = store.hub_cursor().ok().flatten();
-    let mut failed_remote: Vec<asterism_sync::hub_client::HistoryDto> = Vec::new();
+    let mut failed_remote = load_failed_remote(&store);
     let mut maintenance = tokio::time::interval(Duration::from_secs(60 * 60));
     let (net_tx, mut net_rx) = tokio::sync::mpsc::unbounded_channel();
     let net_watch = asterism_platform::spawn_change_watch(Duration::from_secs(3));
@@ -160,7 +165,7 @@ async fn run_loop(
                                 .is_some_and(|fp| trust.lock().is_trusted(from, fp));
                             if !trusted {
                                 tracing::warn!(%from, "rejected lan item from untrusted device");
-                            } else if let Err(err) = apply_lan(&store, &paths, &guard, from, lan_item, payload, settings.lock().auto_receive) {
+                            } else if let Err(err) = apply_lan(&ingestion, &store, &paths, &guard, &cache_pin, from, lan_item, payload, settings.lock().auto_receive) {
                                 tracing::warn!(error = %err, "lan apply");
                             } else {
                                 on_change();
@@ -173,31 +178,39 @@ async fn run_loop(
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
                 match cmd {
-                    SyncCmd::LocalItem(item) => {
-                        if settings.lock().auto_sync {
-                            let _ = push_lan(&cert, &peers, &trust, identity.device_id, item.as_ref(), &store, &paths).await;
-                        }
-                        if let Err(err) = publish_one(&identity, &vault, &store, &paths, &settings, item.as_ref(), &on_change).await {
-                            tracing::warn!(error = %err, "hub publish failed");
-                        }
-                    }
                     SyncCmd::ReplaceVault(next) => {
                         vault = next;
                     }
-                    SyncCmd::DeleteRemote(id) => {
-                        remember_tombstone(&store, id);
+                    SyncCmd::DeleteRemote(_id) => {
                         if let Err(err) = flush_tombstones(&store, &settings).await {
                             tracing::warn!(error = %err, "hub delete failed");
                         }
                     }
+                    SyncCmd::DrainOutbox => {
+                        consume_committed_outbox(
+                            &identity, &vault, &store, &paths, &settings, &cert, &peers, &trust,
+                            &on_change,
+                        )
+                        .await;
+                    }
                     SyncCmd::Reload => {
+                        consume_committed_outbox(
+                            &identity, &vault, &store, &paths, &settings, &cert, &peers, &trust,
+                            &on_change,
+                        )
+                        .await;
                         if let Err(err) = flush_tombstones(&store, &settings).await {
                             tracing::warn!(error = %err, "hub delete retry");
                         }
                         refresh_trust(&identity, &settings, &trust, &paths).await;
                         exchange_candidates(&identity, &cert, &settings, &peers, &paths).await;
-                        retry_pending(&identity, &vault, &store, &paths, &settings, &on_change).await;
-                        if let Err(err) = pull_hub(&identity, &vault, &store, &paths, &guard, &settings, &mut last_cursor, &mut failed_remote, &on_change).await {
+                        backfill_unsynced(&store);
+                        consume_committed_outbox(
+                            &identity, &vault, &store, &paths, &settings, &cert, &peers, &trust,
+                            &on_change,
+                        )
+                        .await;
+                        if let Err(err) = pull_hub(&identity, &vault, &ingestion, &store, &paths, &guard, &cache_pin, &settings, &mut last_cursor, &mut failed_remote, &on_change).await {
                             tracing::warn!(error = %err, "hub pull failed");
                         }
                     }
@@ -208,13 +221,16 @@ async fn run_loop(
                 exchange_candidates(&identity, &cert, &settings, &peers, &paths).await;
             }
             _ = tokio::time::sleep(Duration::from_secs(8)) => {
+                consume_committed_outbox(
+                    &identity, &vault, &store, &paths, &settings, &cert, &peers, &trust, &on_change,
+                )
+                .await;
                 refresh_trust(&identity, &settings, &trust, &paths).await;
                 exchange_candidates(&identity, &cert, &settings, &peers, &paths).await;
                 if let Err(err) = flush_tombstones(&store, &settings).await {
                     tracing::debug!(error = %err, "hub delete retry");
                 }
-                retry_pending(&identity, &vault, &store, &paths, &settings, &on_change).await;
-                if let Err(err) = pull_hub(&identity, &vault, &store, &paths, &guard, &settings, &mut last_cursor, &mut failed_remote, &on_change).await {
+                if let Err(err) = pull_hub(&identity, &vault, &ingestion, &store, &paths, &guard, &cache_pin, &settings, &mut last_cursor, &mut failed_remote, &on_change).await {
                     tracing::debug!(error = %err, "hub pull");
                 }
             }
@@ -225,7 +241,12 @@ async fn run_loop(
                 if let Err(err) = store.sweep_orphan_blobs() {
                     tracing::warn!(error = %err, "local orphan blob sweep failed");
                 }
-                let pins = store.cache_pins().unwrap_or_default();
+                let mut pins = store.cache_pins().unwrap_or_default();
+                if let Some(pin) = cache_pin.read().clone()
+                    && !pins.contains(&pin)
+                {
+                    pins.push(pin);
+                }
                 if let Err(err) = asterism_storage::cleanup::evict_item_cache(
                     &paths.cache_dir,
                     Duration::from_secs(7 * 24 * 60 * 60),
@@ -239,7 +260,71 @@ async fn run_loop(
     }
 }
 
-async fn retry_pending(
+async fn consume_committed_outbox(
+    identity: &LocalIdentity,
+    vault: &AccountVaultKey,
+    store: &Store,
+    paths: &AppPaths,
+    settings: &Arc<Mutex<SyncSettings>>,
+    cert: &DeviceCert,
+    peers: &Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
+    trust: &Arc<Mutex<TrustStore>>,
+    on_change: &impl Fn(),
+) {
+    consume_lan_outbox(identity, store, paths, settings, cert, peers, trust).await;
+    consume_hub_outbox(identity, vault, store, paths, settings, on_change).await;
+}
+
+async fn consume_lan_outbox(
+    identity: &LocalIdentity,
+    store: &Store,
+    paths: &AppPaths,
+    settings: &Arc<Mutex<SyncSettings>>,
+    cert: &DeviceCert,
+    peers: &Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
+    trust: &Arc<Mutex<TrustStore>>,
+) {
+    let pending = match store.pending_outbox_for(
+        asterism_storage::EVENT_COMMITTED,
+        asterism_storage::CONSUMER_LAN,
+        50,
+    ) {
+        Ok(events) => events,
+        Err(err) => {
+            tracing::warn!(error = %err, "load lan outbox");
+            return;
+        }
+    };
+    for event in pending {
+        let from_remote = event.payload().map(|payload| payload.from_remote).unwrap_or(false);
+        if from_remote {
+            let _ = store.ack_outbox_consumer(event.id, asterism_storage::CONSUMER_LAN);
+            continue;
+        }
+        let item = match store.get(event.aggregate_id) {
+            Ok(item) => item,
+            Err(asterism_storage::StorageError::NotFound) => {
+                let _ = store.ack_outbox_consumer(event.id, asterism_storage::CONSUMER_LAN);
+                continue;
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "load lan item");
+                let _ = store.retry_outbox_consumer(
+                    event.id,
+                    asterism_storage::CONSUMER_LAN,
+                    Duration::from_secs(5),
+                );
+                continue;
+            }
+        };
+        if item.may_sync_remote() && settings.lock().auto_sync {
+            let _ = push_lan(cert, peers, trust, identity.device_id, &item, store, paths).await;
+        }
+        let _ = store.ack_outbox_consumer(event.id, asterism_storage::CONSUMER_LAN);
+    }
+}
+
+async fn consume_hub_outbox(
     identity: &LocalIdentity,
     vault: &AccountVaultKey,
     store: &Store,
@@ -247,21 +332,79 @@ async fn retry_pending(
     settings: &Arc<Mutex<SyncSettings>>,
     on_change: &impl Fn(),
 ) {
-    if !settings.lock().hub_ready() {
-        return;
+    let pending = match store.pending_outbox_for(
+        asterism_storage::EVENT_COMMITTED,
+        asterism_storage::CONSUMER_HUB,
+        50,
+    ) {
+        Ok(events) => events,
+        Err(err) => {
+            tracing::warn!(error = %err, "load hub outbox");
+            return;
+        }
+    };
+    let snap = settings.lock().clone();
+    for event in pending {
+        let from_remote = event.payload().map(|payload| payload.from_remote).unwrap_or(false);
+        if from_remote || !snap.hub_url.as_ref().is_some_and(|url| !url.is_empty()) {
+            let _ = store.ack_outbox_consumer(event.id, asterism_storage::CONSUMER_HUB);
+            continue;
+        }
+        let item = match store.get(event.aggregate_id) {
+            Ok(item) => item,
+            Err(asterism_storage::StorageError::NotFound) => {
+                let _ = store.ack_outbox_consumer(event.id, asterism_storage::CONSUMER_HUB);
+                continue;
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "load hub item");
+                let _ = store.retry_outbox_consumer(
+                    event.id,
+                    asterism_storage::CONSUMER_HUB,
+                    Duration::from_secs(5),
+                );
+                continue;
+            }
+        };
+        if !item.may_sync_remote() {
+            let _ = store.ack_outbox_consumer(event.id, asterism_storage::CONSUMER_HUB);
+            continue;
+        }
+        if !snap.hub_ready() {
+            let _ = store.retry_outbox_consumer(
+                event.id,
+                asterism_storage::CONSUMER_HUB,
+                Duration::from_secs(8),
+            );
+            continue;
+        }
+        match publish_one(identity, vault, store, paths, settings, &item, on_change).await {
+            Ok(()) => {
+                let _ = store.ack_outbox_consumer(event.id, asterism_storage::CONSUMER_HUB);
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "hub publish from outbox failed");
+                let _ = store.retry_outbox_consumer(
+                    event.id,
+                    asterism_storage::CONSUMER_HUB,
+                    Duration::from_secs(8),
+                );
+            }
+        }
     }
+}
+
+fn backfill_unsynced(store: &Store) {
     let pending = match store.pending_sync(200) {
         Ok(items) => items,
         Err(err) => {
-            tracing::warn!(error = %err, "load sync outbox failed");
+            tracing::warn!(error = %err, "load pending sync for outbox backfill");
             return;
         }
     };
     for item in pending {
-        if let Err(err) =
-            publish_one(identity, vault, store, paths, settings, &item, on_change).await
-        {
-            tracing::warn!(item_id = %item.id, error = %err, "hub retry failed");
+        if let Err(err) = store.ensure_committed(&item) {
+            tracing::warn!(error = %err, "backfill committed outbox");
         }
     }
 }
@@ -278,14 +421,14 @@ async fn publish_one(
     if !settings.lock().hub_ready() || !item.may_sync_remote() {
         return Ok(());
     }
-    store.set_status(item.id, ContentStatus::Uploading)?;
+    store.set_status(item.id(), ContentStatus::Uploading)?;
     let result = publish(identity, vault, store, paths, settings, item).await;
     let status = match &result {
         Ok(true) => ContentStatus::SyncedToHub,
         Ok(false) => ContentStatus::Local,
         Err(_) => ContentStatus::Failed,
     };
-    store.set_status(item.id, status)?;
+    store.set_status(item.id(), status)?;
     on_change();
     result.map(|_| ())
 }
@@ -354,15 +497,15 @@ async fn push_lan(
         return Ok(());
     }
     let payload = load_payload(item, store, paths)?;
-    let Some(payload) = payload else { return Ok(()) };
-    let meta = serde_json::to_string(&item.metadata)?;
+    let payload = payload.into_bytes()?;
+    let meta = serde_json::to_string(&item.metadata())?;
     let offer = ItemOffer {
-        item_id: item.id,
-        kind: item.kind.as_str().to_string(),
-        logical_size: item.logical_size,
+        item_id: item.id(),
+        kind: item.kind().as_str().to_string(),
+        logical_size: item.logical_size(),
         payload_size: payload.len() as u64,
-        dedup_tag: item.dedup_tag.to_vec(),
-        flags: item.flags.bits(),
+        dedup_tag: item.dedup_tag().to_vec(),
+        flags: item.flags().bits(),
     };
     let env = Envelope::new(
         local,
@@ -456,9 +599,11 @@ fn parse_fp(hex_str: &str) -> Option<[u8; 32]> {
 }
 
 fn apply_lan(
+    ingestion: &Ingestion,
     store: &Store,
     paths: &AppPaths,
     guard: &SelfWriteGuard,
+    cache_pin: &parking_lot::RwLock<Option<String>>,
     from: asterism_core::DeviceId,
     lan_item: LanItem,
     payload: Vec<u8>,
@@ -474,6 +619,7 @@ fn apply_lan(
     let metadata: ItemMetadata = serde_json::from_str(&lan_item.metadata_json).unwrap_or_default();
     let kind = ContentKind::parse(&lan_item.offer.kind).unwrap_or(ContentKind::Text);
     let (item, manifest) = build_item(
+        ingestion,
         lan_item.offer.item_id,
         from,
         kind,
@@ -481,84 +627,54 @@ fn apply_lan(
         tag,
         metadata,
         payload,
-        store,
         paths,
         true,
         None,
         Some(lan_item.offer.logical_size),
         Some(lan_item.offer.payload_size),
     )?;
-    if persist_new(store, item.clone(), manifest)?
+    if persist_new(ingestion, item.clone(), manifest)?
         && auto_receive
-        && let Ok(content) = item_to_clipboard(&item, store, paths)
+        && let Ok(content) = item_to_clipboard(&item, store, paths, &host_read_grant(item.id()))
     {
-        guard.remember(item.id, content.dedup_tag());
+        guard.remember(item.id(), content.dedup_tag());
         let _ = NativeClipboard.write(&content);
+        *cache_pin.write() = item.metadata().local_cache_rel.clone().or_else(|| {
+            matches!(item.kind(), ContentKind::Gif | ContentKind::Video)
+                .then(|| item.id().to_string())
+        });
     }
     Ok(())
 }
 
 fn build_item(
+    ingestion: &Ingestion,
     id: asterism_core::ContentId,
     origin: asterism_core::DeviceId,
     kind: ContentKind,
     flags: u32,
     tag: [u8; 32],
-    mut metadata: ItemMetadata,
+    metadata: ItemMetadata,
     bytes: Vec<u8>,
-    store: &Store,
     paths: &AppPaths,
     from_lan: bool,
     created_at_ms: Option<i64>,
     logical_size: Option<u64>,
     payload_size: Option<u64>,
 ) -> anyhow::Result<(ContentItem, Option<FileManifest>)> {
-    let flags = ContentFlags::from_bits_truncate(flags) | ContentFlags::FROM_REMOTE;
-    let created_at_ms = created_at_ms.unwrap_or_else(asterism_platform::now_ms);
-    let logical_size = logical_size.filter(|n| *n > 0).unwrap_or(bytes.len() as u64);
-    let payload_size = payload_size.filter(|n| *n > 0).unwrap_or(bytes.len() as u64);
+    let spec = RemoteItemSpec {
+        id,
+        origin,
+        kind,
+        flags: ContentFlags::from_bits_truncate(flags),
+        tag,
+        metadata,
+        from_lan,
+        created_at_ms,
+        logical_size,
+        payload_size,
+    };
     match kind {
-        ContentKind::Text => Ok((
-            ContentItem {
-                id,
-                origin_device_id: origin,
-                kind,
-                created_at_ms,
-                logical_size,
-                payload_size,
-                dedup_tag: tag,
-                flags,
-                status: if from_lan {
-                    asterism_core::ContentStatus::DeliveredToPeer
-                } else {
-                    asterism_core::ContentStatus::SyncedToHub
-                },
-                metadata,
-                payload_ref: PayloadRef::Inline { bytes: bytes::Bytes::from(bytes) },
-                encrypted_metadata: bytes::Bytes::new(),
-            },
-            None,
-        )),
-        ContentKind::Image | ContentKind::Screenshot | ContentKind::Gif | ContentKind::Video => {
-            let blob = store.put_blob(&bytes)?;
-            Ok((
-                ContentItem {
-                    id,
-                    origin_device_id: origin,
-                    kind,
-                    created_at_ms,
-                    logical_size,
-                    payload_size,
-                    dedup_tag: tag,
-                    flags,
-                    status: asterism_core::ContentStatus::SyncedToHub,
-                    metadata,
-                    payload_ref: PayloadRef::Blob { blob_id: blob },
-                    encrypted_metadata: bytes::Bytes::new(),
-                },
-                None,
-            ))
-        }
         ContentKind::Files => {
             let cache = paths.item_cache(id);
             let manifest = match unpack_file_bundle(&bytes, &cache) {
@@ -568,28 +684,9 @@ fn build_item(
                     asterism_clipboard::preflight_paths(&roots)?
                 }
             };
-            metadata.local_cache_rel = Some(id.to_string());
-            metadata.files = Some(manifest.summary());
-            let manifest_id = manifest.id;
-            Ok((
-                ContentItem {
-                    id,
-                    origin_device_id: origin,
-                    kind,
-                    created_at_ms,
-                    logical_size,
-                    payload_size,
-                    dedup_tag: tag,
-                    flags,
-                    status: asterism_core::ContentStatus::SyncedToHub,
-                    metadata,
-                    payload_ref: PayloadRef::FileManifest { manifest_id },
-                    encrypted_metadata: bytes::Bytes::new(),
-                },
-                Some(manifest),
-            ))
+            ingestion.assemble_remote(spec, RemoteItemBody::Files(manifest))
         }
-        other => anyhow::bail!("unsupported kind {other}"),
+        _ => ingestion.assemble_remote(spec, RemoteItemBody::Bytes(bytes)),
     }
 }
 
@@ -647,35 +744,26 @@ async fn publish(
         return Ok(false);
     }
     let payload = load_payload(item, store, paths)?;
-    if matches!(item.payload_ref, PayloadRef::FileManifest { .. }) && payload.is_none() {
-        anyhow::bail!("file cache missing for {}; not publishing metadata-only item", item.id);
-    }
-    let meta = serde_json::to_vec(&item.metadata)?;
-    let mut pkg = pack(vault, &meta, payload.as_deref())?;
+    let meta = serde_json::to_vec(&item.metadata())?;
+    let mut pkg = pack(vault, &meta, payload.small_bytes())?;
     let client = client(&snap)?;
     let mut blob_id = None;
-    if pkg.body.is_none()
-        && let Some(bytes) = payload
-    {
+    if pkg.body.is_none() {
         let id = client.begin_blob().await?;
-        let chunks = encrypt_blob_chunks(vault, &bytes)?;
-        let count = u32::try_from(chunks.len())?;
-        for (index, chunk) in chunks.into_iter().enumerate() {
-            client.put_chunk(&id, u32::try_from(index)?, chunk).await?;
-        }
+        let count = upload_payload_chunks(&client, &id, vault, &payload).await?;
         client.commit_blob(&id, count).await?;
         pkg.chunk_count = count;
         blob_id = Some(id);
     }
     let dto = HistoryDto {
-        id: hex::encode(item.id.as_bytes()),
+        id: hex::encode(item.id().as_bytes()),
         origin_device_id: identity.device_id,
-        kind: item.kind.as_str().to_string(),
-        created_at_ms: item.created_at_ms,
-        logical_size: item.logical_size,
-        payload_size: item.payload_size,
-        dedup_tag: hex::encode(item.dedup_tag),
-        flags: item.flags.bits(),
+        kind: item.kind().as_str().to_string(),
+        created_at_ms: item.created_at_ms(),
+        logical_size: item.logical_size(),
+        payload_size: item.payload_size(),
+        dedup_tag: hex::encode(item.dedup_tag()),
+        flags: item.flags().bits(),
         encrypted_metadata: encode_package(&pkg)?,
         blob_id,
     };
@@ -683,12 +771,12 @@ async fn publish(
     persist_hub_pin(settings, paths, &client);
     if let Ok(mut ws) = client.connect_ws().await {
         let offer = ItemOffer {
-            item_id: item.id,
-            kind: item.kind.as_str().to_string(),
-            logical_size: item.logical_size,
-            payload_size: item.payload_size,
-            dedup_tag: item.dedup_tag.to_vec(),
-            flags: item.flags.bits(),
+            item_id: item.id(),
+            kind: item.kind().as_str().to_string(),
+            logical_size: item.logical_size(),
+            payload_size: item.payload_size(),
+            dedup_tag: item.dedup_tag().to_vec(),
+            flags: item.flags().bits(),
         };
         let _ = HubClient::send_control(
             &mut ws,
@@ -700,7 +788,7 @@ async fn publish(
                 &mut ws,
                 &Envelope::new(
                     identity.device_id,
-                    MessageBody::ItemReady(ItemReady { item_id: item.id, blob_id: blob.clone() }),
+                    MessageBody::ItemReady(ItemReady { item_id: item.id(), blob_id: blob.clone() }),
                 ),
             )
             .await;
@@ -712,9 +800,11 @@ async fn publish(
 async fn pull_hub(
     identity: &LocalIdentity,
     vault: &AccountVaultKey,
+    ingestion: &Ingestion,
     store: &Store,
     paths: &AppPaths,
     guard: &SelfWriteGuard,
+    cache_pin: &parking_lot::RwLock<Option<String>>,
     settings: &Arc<Mutex<SyncSettings>>,
     last_cursor: &mut Option<String>,
     failed_remote: &mut Vec<asterism_sync::hub_client::HistoryDto>,
@@ -728,7 +818,8 @@ async fn pull_hub(
     let mut retry = std::mem::take(failed_remote);
     let mut newest: Option<ContentItem> = None;
     for dto in retry.drain(..) {
-        match apply_remote(vault, store, paths, guard, &client, dto.clone(), false).await {
+        match apply_remote(vault, ingestion, store, paths, guard, &client, dto.clone(), false).await
+        {
             Ok(Some(item)) => newest = Some(item),
             Ok(None) => {}
             Err(err) => {
@@ -737,41 +828,46 @@ async fn pull_hub(
             }
         }
     }
+    save_failed_remote(store, failed_remote);
     persist_hub_pin(settings, paths, &client);
-    if failed_remote.is_empty() {
-        let items = client.history(last_cursor.as_deref(), 50).await?;
-        for dto in items {
-            let next_cursor = format!("{}:{}", dto.created_at_ms, dto.id);
-            match apply_remote(vault, store, paths, guard, &client, dto.clone(), false).await {
-                Ok(Some(item)) => {
-                    newest = Some(item);
-                    persist_cursor(store, last_cursor, next_cursor);
-                    on_change();
-                }
-                Ok(None) => {
-                    persist_cursor(store, last_cursor, next_cursor);
-                }
-                Err(err) => {
-                    tracing::warn!(id = %dto.id, error = %err, "remote item failed; will retry");
-                    remember_failed(failed_remote, dto);
-                    break;
-                }
+    let items = client.history(last_cursor.as_deref(), 50).await?;
+    for dto in items {
+        let next_cursor = format!("{}:{}", dto.created_at_ms, dto.id);
+        match apply_remote(vault, ingestion, store, paths, guard, &client, dto.clone(), false).await
+        {
+            Ok(Some(item)) => {
+                newest = Some(item);
+                on_change();
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(id = %dto.id, error = %err, "remote item failed; isolated for retry");
+                remember_failed(failed_remote, dto);
+                // 先持久化失败队列，再推进 cursor，避免进程退出后永久跳过该项。
+                save_failed_remote(store, failed_remote);
             }
         }
+        // 单条损坏或暂时不可取的记录不能卡住同页后续记录。
+        persist_cursor(store, last_cursor, next_cursor);
     }
     if snap.auto_receive
         && let Some(item) = newest
-        && item.origin_device_id != identity.device_id
-        && let Ok(content) = item_to_clipboard(&item, store, paths)
+        && item.origin_device_id() != identity.device_id
+        && let Ok(content) = item_to_clipboard(&item, store, paths, &host_read_grant(item.id()))
     {
-        guard.remember(item.id, content.dedup_tag());
+        guard.remember(item.id(), content.dedup_tag());
         let _ = NativeClipboard.write(&content);
+        *cache_pin.write() = item.metadata().local_cache_rel.clone().or_else(|| {
+            matches!(item.kind(), ContentKind::Gif | ContentKind::Video)
+                .then(|| item.id().to_string())
+        });
     }
     Ok(())
 }
 
 const TOMBSTONE_SCOPE: &str = "hub_tombstones";
 
+#[cfg(test)]
 fn remember_tombstone(store: &Store, id: asterism_core::ContentId) {
     let hex_id = hex::encode(id.as_bytes());
     let mut ids = load_tombstones(store);
@@ -802,23 +898,62 @@ async fn flush_tombstones(
     settings: &Arc<Mutex<SyncSettings>>,
 ) -> anyhow::Result<()> {
     let snap = settings.lock().clone();
-    if !snap.hub_ready() {
+    if !snap.hub_url.as_ref().is_some_and(|url| !url.is_empty()) {
+        if let Ok(pending) = store.pending_outbox_for(
+            asterism_storage::EVENT_DELETED,
+            asterism_storage::CONSUMER_HUB_DELETE,
+            50,
+        ) {
+            for event in pending {
+                let _ = store.ack_outbox_consumer(event.id, asterism_storage::CONSUMER_HUB_DELETE);
+            }
+        }
         return Ok(());
     }
-    let pending = load_tombstones(store);
-    if pending.is_empty() {
+    if !snap.hub_ready() {
         return Ok(());
     }
     let client = client(&snap)?;
     let mut remain = Vec::new();
-    for id in pending {
+    for id in load_tombstones(store) {
         if let Err(err) = client.delete_history(&id).await {
             tracing::warn!(id, error = %err, "hub delete item failed");
             remain.push(id);
         }
     }
     save_tombstones(store, &remain);
-    if remain.is_empty() { Ok(()) } else { Err(anyhow::anyhow!("hub still has pending deletes")) }
+
+    let pending = store
+        .pending_outbox_for(
+            asterism_storage::EVENT_DELETED,
+            asterism_storage::CONSUMER_HUB_DELETE,
+            50,
+        )
+        .unwrap_or_default();
+    let mut failed = !remain.is_empty();
+    for event in pending {
+        let hex_id = hex::encode(event.aggregate_id.as_bytes());
+        match client.delete_history(&hex_id).await {
+            Ok(()) => {
+                if let Err(err) =
+                    store.ack_outbox_consumer(event.id, asterism_storage::CONSUMER_HUB_DELETE)
+                {
+                    tracing::warn!(error = %err, "ack deleted outbox");
+                    failed = true;
+                }
+            }
+            Err(err) => {
+                tracing::warn!(id = hex_id, error = %err, "hub delete item failed");
+                let _ = store.retry_outbox_consumer(
+                    event.id,
+                    asterism_storage::CONSUMER_HUB_DELETE,
+                    Duration::from_secs(8),
+                );
+                failed = true;
+            }
+        }
+    }
+    if failed { Err(anyhow::anyhow!("hub still has pending deletes")) } else { Ok(()) }
 }
 
 fn remember_failed(failed: &mut Vec<HistoryDto>, dto: HistoryDto) {
@@ -828,6 +963,28 @@ fn remember_failed(failed: &mut Vec<HistoryDto>, dto: HistoryDto) {
     failed.push(dto);
 }
 
+const FAILED_REMOTE_SCOPE: &str = "hub_failed_remote";
+
+fn load_failed_remote(store: &Store) -> Vec<HistoryDto> {
+    store
+        .kv_get(FAILED_REMOTE_SCOPE)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_failed_remote(store: &Store, failed: &[HistoryDto]) {
+    match serde_json::to_string(failed) {
+        Ok(raw) => {
+            if let Err(err) = store.kv_set(FAILED_REMOTE_SCOPE, &raw) {
+                tracing::warn!(error = %err, "persist failed remote retry queue");
+            }
+        }
+        Err(err) => tracing::warn!(error = %err, "encode failed remote retry queue"),
+    }
+}
+
 fn persist_cursor(store: &Store, last_cursor: &mut Option<String>, next: String) {
     *last_cursor = Some(next.clone());
     if let Err(err) = store.set_hub_cursor(&next) {
@@ -835,8 +992,86 @@ fn persist_cursor(store: &Store, last_cursor: &mut Option<String>, next: String)
     }
 }
 
+enum RemotePayload {
+    Bytes(Vec<u8>),
+    StagedFile(TemporaryFile),
+}
+
+impl RemotePayload {
+    fn write_all(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        match self {
+            Self::Bytes(target) => target.extend_from_slice(bytes),
+            Self::StagedFile(target) => target.file.write_all(bytes)?,
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> anyhow::Result<()> {
+        if let Self::StagedFile(target) = self {
+            target.file.flush()?;
+            target.file.sync_all()?;
+        }
+        Ok(())
+    }
+}
+
+struct TemporaryFile {
+    path: std::path::PathBuf,
+    file: std::fs::File,
+}
+
+impl TemporaryFile {
+    fn create(path: std::path::PathBuf) -> anyhow::Result<Self> {
+        let file = std::fs::File::create(&path)?;
+        Ok(Self { path, file })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn build_file_item_from_archive(
+    ingestion: &Ingestion,
+    id: asterism_core::ContentId,
+    origin: asterism_core::DeviceId,
+    flags: u32,
+    tag: [u8; 32],
+    metadata: ItemMetadata,
+    archive: &std::path::Path,
+    paths: &AppPaths,
+    created_at_ms: i64,
+    logical_size: u64,
+    payload_size: u64,
+) -> anyhow::Result<(ContentItem, Option<FileManifest>)> {
+    let cache = paths.item_cache(id);
+    let (manifest, _) = unpack_file_bundle_reader(std::fs::File::open(archive)?, &cache)?;
+    ingestion.assemble_remote(
+        RemoteItemSpec {
+            id,
+            origin,
+            kind: ContentKind::Files,
+            flags: ContentFlags::from_bits_truncate(flags),
+            tag,
+            metadata,
+            from_lan: false,
+            created_at_ms: Some(created_at_ms),
+            logical_size: Some(logical_size),
+            payload_size: Some(payload_size),
+        },
+        RemoteItemBody::Files(manifest),
+    )
+}
+
 async fn apply_remote(
     vault: &AccountVaultKey,
+    ingestion: &Ingestion,
     store: &Store,
     paths: &AppPaths,
     _guard: &SelfWriteGuard,
@@ -851,16 +1086,29 @@ async fn apply_remote(
     let pkg = decode_package(&dto.encrypted_metadata)?;
     let meta_bytes = unpack_meta(vault, &pkg)?;
     let metadata: ItemMetadata = serde_json::from_slice(&meta_bytes).unwrap_or_default();
-    let mut payload = unpack_body(vault, &pkg)?;
+    let kind = ContentKind::parse(&dto.kind).unwrap_or(ContentKind::Text);
+    let mut payload = unpack_body(vault, &pkg)?.map(RemotePayload::Bytes);
     if payload.is_none()
         && let Some(blob) = &dto.blob_id
     {
         if pkg.chunk_count > 0 {
-            let mut chunks = Vec::with_capacity(pkg.chunk_count as usize);
+            let mut decryptor = BlobChunkDecryptor::default();
+            let mut target = if kind == ContentKind::Files {
+                let staging = paths.cache_dir.join("sync-staging");
+                std::fs::create_dir_all(&staging)?;
+                RemotePayload::StagedFile(TemporaryFile::create(
+                    staging.join(format!("{}.download", dto.id)),
+                )?)
+            } else {
+                RemotePayload::Bytes(Vec::with_capacity(dto.payload_size as usize))
+            };
             for index in 0..pkg.chunk_count {
-                chunks.push(client.get_chunk(blob, index).await?);
+                let encoded = client.get_chunk(blob, index).await?;
+                target.write_all(&decryptor.decrypt(vault, index, &encoded)?)?;
             }
-            payload = Some(decrypt_blob_chunks(vault, &chunks)?);
+            decryptor.finish(vault)?;
+            target.flush()?;
+            payload = Some(target);
         } else {
             // 兼容修复前已经上传的单 AEAD 包。
             let mut packed = Vec::new();
@@ -871,11 +1119,12 @@ async fn apply_remote(
                 }
             }
             if let Ok(enc) = serde_json::from_slice::<asterism_crypto::EncryptedPayload>(&packed) {
-                payload = Some(asterism_crypto::decrypt_metadata(vault, &enc)?);
+                payload =
+                    Some(RemotePayload::Bytes(asterism_crypto::decrypt_metadata(vault, &enc)?));
             }
         }
     }
-    let Some(bytes) = payload else {
+    let Some(payload) = payload else {
         anyhow::bail!("remote item {} missing payload", dto.id);
     };
     let mut tag = [0u8; 32];
@@ -884,68 +1133,154 @@ async fn apply_remote(
     {
         tag.copy_from_slice(&decoded);
     }
-    let kind = ContentKind::parse(&dto.kind).unwrap_or(ContentKind::Text);
-    let (item, manifest) = build_item(
-        remote_id,
-        dto.origin_device_id,
-        kind,
-        dto.flags,
-        tag,
-        metadata,
-        bytes,
-        store,
-        paths,
-        false,
-        Some(dto.created_at_ms),
-        Some(dto.logical_size),
-        Some(dto.payload_size),
-    )?;
-    if !persist_new(store, item.clone(), manifest)? {
+    let (item, manifest) = match payload {
+        RemotePayload::Bytes(bytes) => build_item(
+            ingestion,
+            remote_id,
+            dto.origin_device_id,
+            kind,
+            dto.flags,
+            tag,
+            metadata,
+            bytes,
+            paths,
+            false,
+            Some(dto.created_at_ms),
+            Some(dto.logical_size),
+            Some(dto.payload_size),
+        )?,
+        RemotePayload::StagedFile(file) => build_file_item_from_archive(
+            ingestion,
+            remote_id,
+            dto.origin_device_id,
+            dto.flags,
+            tag,
+            metadata,
+            file.path(),
+            paths,
+            dto.created_at_ms,
+            dto.logical_size,
+            dto.payload_size,
+        )?,
+    };
+    if !persist_new(ingestion, item.clone(), manifest)? {
         return Ok(None);
     }
-    if write_clipboard && let Ok(content) = item_to_clipboard(&item, store, paths) {
-        _guard.remember(item.id, content.dedup_tag());
+    if write_clipboard
+        && let Ok(content) = item_to_clipboard(&item, store, paths, &host_read_grant(item.id()))
+    {
+        _guard.remember(item.id(), content.dedup_tag());
         let _ = NativeClipboard.write(&content);
     }
     Ok(Some(item))
 }
 
+fn host_read_grant(id: asterism_core::ContentId) -> ContentReadGrant {
+    asterism_plugin_api::PermissionBroker::host()
+        .grant_host_transfer(id)
+        .expect("host broker issues transfer grant")
+}
+
 fn persist_new(
-    store: &Store,
+    ingestion: &Ingestion,
     item: ContentItem,
     manifest: Option<FileManifest>,
 ) -> anyhow::Result<bool> {
-    let id = item.id;
-    if store.contains(id)? {
-        return Ok(false);
+    ingestion.commit_remote(item, manifest)
+}
+
+enum PayloadSource {
+    Bytes(Vec<u8>),
+    StagedFile(std::path::PathBuf),
+}
+
+impl PayloadSource {
+    fn small_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Bytes(bytes) if bytes.len() <= 256 * 1024 => Some(bytes),
+            _ => None,
+        }
     }
-    match persist_item(store, item, manifest) {
-        Ok(()) => Ok(true),
-        Err(_) if store.contains(id).unwrap_or(false) => Ok(false),
-        Err(err) => Err(err),
+
+    fn open(&self) -> anyhow::Result<Box<dyn Read + '_>> {
+        match self {
+            Self::Bytes(bytes) => Ok(Box::new(std::io::Cursor::new(bytes.as_slice()))),
+            Self::StagedFile(path) => Ok(Box::new(std::fs::File::open(path)?)),
+        }
     }
+
+    fn into_bytes(mut self) -> anyhow::Result<Vec<u8>> {
+        match &mut self {
+            Self::Bytes(bytes) => Ok(std::mem::take(bytes)),
+            Self::StagedFile(path) => Ok(std::fs::read(path)?),
+        }
+    }
+}
+
+impl Drop for PayloadSource {
+    fn drop(&mut self) {
+        if let Self::StagedFile(path) = self {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+async fn upload_payload_chunks(
+    client: &HubClient,
+    blob_id: &str,
+    vault: &AccountVaultKey,
+    payload: &PayloadSource,
+) -> anyhow::Result<u32> {
+    let hash = match payload {
+        PayloadSource::Bytes(bytes) => asterism_crypto::blake3_bytes(bytes),
+        PayloadSource::StagedFile(path) => {
+            asterism_crypto::blake3_reader(std::fs::File::open(path)?)?
+        }
+    };
+    let encryptor = BlobChunkEncryptor::new(vault, hash)?;
+    let mut reader = payload.open()?;
+    let mut buffer = vec![0u8; asterism_crypto::CHUNK_SIZE];
+    let mut count = 0u32;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        client.put_chunk(blob_id, count, encryptor.encrypt(count, &buffer[..read])?).await?;
+        count = count.checked_add(1).ok_or_else(|| anyhow::anyhow!("blob has too many chunks"))?;
+    }
+    Ok(count)
 }
 
 fn load_payload(
     item: &ContentItem,
     store: &Store,
     paths: &AppPaths,
-) -> anyhow::Result<Option<Vec<u8>>> {
-    match &item.payload_ref {
-        PayloadRef::Inline { bytes } => Ok(Some(bytes.to_vec())),
-        PayloadRef::Blob { blob_id } => Ok(Some(store.get_blob(blob_id)?)),
+) -> anyhow::Result<PayloadSource> {
+    match &item.payload_ref() {
+        PayloadRef::Inline { bytes } => Ok(PayloadSource::Bytes(bytes.to_vec())),
+        PayloadRef::Blob { blob_id } => Ok(PayloadSource::Bytes(store.get_blob(blob_id)?)),
         PayloadRef::FileManifest { manifest_id } => {
             let cache = item
-                .metadata
+                .metadata()
                 .local_cache_rel
                 .as_ref()
                 .map(|rel| paths.cache_dir.join("items").join(rel))
-                .unwrap_or_else(|| paths.item_cache(item.id));
+                .unwrap_or_else(|| paths.item_cache(item.id()));
             if cache.exists() {
                 let manifest = store.load_manifest(*manifest_id)?;
-                Ok(Some(pack_file_bundle(&manifest, &cache)?))
+                let staging = paths.cache_dir.join("sync-staging");
+                std::fs::create_dir_all(&staging)?;
+                let path = staging.join(format!("{}.asb", item.id()));
+                let mut file = std::fs::File::create(&path)?;
+                pack_file_bundle_to_writer(&manifest, &cache, &mut file)?;
+                file.sync_all()?;
+                Ok(PayloadSource::StagedFile(path))
             } else {
-                Ok(None)
+                anyhow::bail!(
+                    "file cache missing for {}; not publishing metadata-only item",
+                    item.id()
+                )
             }
         }
     }
@@ -1084,22 +1419,70 @@ mod tests {
         };
         paths.ensure().unwrap();
         let store = Store::open(&paths.data_dir).unwrap();
-        let item = ContentItem {
-            id: asterism_core::ContentId::new(),
-            origin_device_id: asterism_core::DeviceId::new(),
-            kind: ContentKind::Text,
-            created_at_ms: 1,
-            logical_size: 1,
-            payload_size: 1,
-            dedup_tag: [2; 32],
-            flags: ContentFlags::REMOTE_ALLOWED,
-            status: asterism_core::ContentStatus::Local,
-            metadata: ItemMetadata::default(),
-            payload_ref: PayloadRef::Inline { bytes: bytes::Bytes::from_static(b"x") },
-            encrypted_metadata: bytes::Bytes::new(),
+        let avk = Arc::new(parking_lot::RwLock::new(AccountVaultKey::generate()));
+        let ingestion =
+            Ingestion::new(Arc::clone(&store), paths.clone(), asterism_core::DeviceId::new(), avk);
+        let (item, _) = ingestion
+            .assemble_remote(
+                RemoteItemSpec {
+                    id: asterism_core::ContentId::new(),
+                    origin: asterism_core::DeviceId::new(),
+                    kind: ContentKind::Text,
+                    flags: ContentFlags::empty(),
+                    tag: [2; 32],
+                    metadata: ItemMetadata::default(),
+                    from_lan: false,
+                    created_at_ms: Some(1),
+                    logical_size: Some(1),
+                    payload_size: Some(1),
+                },
+                RemoteItemBody::Bytes(b"x".to_vec()),
+            )
+            .unwrap();
+        assert!(persist_new(&ingestion, item.clone(), None).unwrap());
+        assert!(!persist_new(&ingestion, item, None).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_delete_writes_outbox_not_kv_tombstone() {
+        let root = std::env::temp_dir()
+            .join(format!("asterism-delete-outbox-{}", asterism_core::ContentId::new()));
+        let paths = AppPaths {
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            config_dir: root.join("config"),
         };
-        assert!(persist_new(&store, item.clone(), None).unwrap());
-        assert!(!persist_new(&store, item, None).unwrap());
+        paths.ensure().unwrap();
+        let store = Store::open(&paths.data_dir).unwrap();
+        let avk = Arc::new(parking_lot::RwLock::new(AccountVaultKey::generate()));
+        let ingestion =
+            Ingestion::new(Arc::clone(&store), paths.clone(), asterism_core::DeviceId::new(), avk);
+        let (item, _) = ingestion
+            .assemble_remote(
+                RemoteItemSpec {
+                    id: asterism_core::ContentId::new(),
+                    origin: asterism_core::DeviceId::new(),
+                    kind: ContentKind::Text,
+                    flags: ContentFlags::empty(),
+                    tag: [3; 32],
+                    metadata: ItemMetadata::default(),
+                    from_lan: false,
+                    created_at_ms: Some(1),
+                    logical_size: Some(1),
+                    payload_size: Some(1),
+                },
+                RemoteItemBody::Bytes(b"x".to_vec()),
+            )
+            .unwrap();
+        ingestion.commit_remote(item.clone(), None).unwrap();
+        store.delete(item.id()).unwrap();
+        assert!(load_tombstones(&store).is_empty());
+        let types: Vec<_> =
+            store.pending_outbox(10).unwrap().into_iter().map(|event| event.event_type).collect();
+        assert!(types.iter().any(|ty| ty == asterism_storage::EVENT_COMMITTED));
+        assert!(types.iter().any(|ty| ty == asterism_storage::EVENT_DELETED));
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1145,6 +1528,31 @@ mod tests {
     }
 
     #[test]
+    fn failed_remote_retry_queue_survives_restart() {
+        let root = std::env::temp_dir()
+            .join(format!("asterism-failed-remote-{}", asterism_core::ContentId::new()));
+        let store = Store::open(&root).unwrap();
+        let dto = HistoryDto {
+            id: "aa".into(),
+            origin_device_id: asterism_core::DeviceId::new(),
+            kind: "TEXT".into(),
+            created_at_ms: 1,
+            logical_size: 1,
+            payload_size: 1,
+            dedup_tag: String::new(),
+            flags: 0,
+            encrypted_metadata: "ciphertext".into(),
+            blob_id: None,
+        };
+        save_failed_remote(&store, std::slice::from_ref(&dto));
+        drop(store);
+        let reopened = Store::open(&root).unwrap();
+        assert_eq!(load_failed_remote(&reopened)[0].id, dto.id);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn pairing_wrap_recovers_avk() {
         let code = "ABCDEFGHJKLMNPQRSTUV";
         let salt = [9u8; 16];
@@ -1165,7 +1573,7 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         std::fs::write(source.join("note.txt"), b"hello").unwrap();
         let manifest = asterism_clipboard::preflight_paths(&[source.join("note.txt")]).unwrap();
-        let bundle = pack_file_bundle(&manifest, &source).unwrap();
+        let bundle = asterism_sync::pack_file_bundle(&manifest, &source).unwrap();
         let paths = AppPaths {
             data_dir: root.join("data"),
             cache_dir: root.join("cache"),
@@ -1173,8 +1581,12 @@ mod tests {
         };
         paths.ensure().unwrap();
         let store = Store::open(&paths.data_dir).unwrap();
+        let avk = Arc::new(parking_lot::RwLock::new(AccountVaultKey::generate()));
+        let ingestion =
+            Ingestion::new(Arc::clone(&store), paths.clone(), asterism_core::DeviceId::new(), avk);
 
         let (item, received_manifest) = build_item(
+            &ingestion,
             asterism_core::ContentId::new(),
             asterism_core::DeviceId::new(),
             ContentKind::Files,
@@ -1182,7 +1594,6 @@ mod tests {
             [7; 32],
             ItemMetadata::default(),
             bundle,
-            &store,
             &paths,
             false,
             None,
@@ -1190,8 +1601,9 @@ mod tests {
             None,
         )
         .unwrap();
-        persist_item(&store, item.clone(), received_manifest).unwrap();
-        let clipboard = item_to_clipboard(&item, &store, &paths).unwrap();
+        ingestion.commit_remote(item.clone(), received_manifest).unwrap();
+        let clipboard =
+            item_to_clipboard(&item, &store, &paths, &host_read_grant(item.id())).unwrap();
 
         let NormalizedContent::Files { paths: files, manifest: restored, .. } = clipboard else {
             panic!("expected files clipboard item");
@@ -1214,22 +1626,32 @@ mod tests {
         };
         paths.ensure().unwrap();
         let store = Store::open(&paths.data_dir).unwrap();
-        let item = ContentItem {
-            id: asterism_core::ContentId::new(),
-            origin_device_id: asterism_core::DeviceId::new(),
-            kind: ContentKind::Files,
-            created_at_ms: 1,
-            logical_size: 4,
-            payload_size: 4,
-            dedup_tag: [1; 32],
-            flags: ContentFlags::REMOTE_ALLOWED,
-            status: asterism_core::ContentStatus::Local,
-            metadata: ItemMetadata::default(),
-            payload_ref: PayloadRef::FileManifest { manifest_id: asterism_core::ManifestId::new() },
-            encrypted_metadata: bytes::Bytes::new(),
-        };
-        let loaded = load_payload(&item, &store, &paths).unwrap();
-        assert!(loaded.is_none());
+        let avk = Arc::new(parking_lot::RwLock::new(AccountVaultKey::generate()));
+        let ingestion =
+            Ingestion::new(Arc::clone(&store), paths.clone(), asterism_core::DeviceId::new(), avk);
+        let (item, _) = ingestion
+            .assemble_remote(
+                RemoteItemSpec {
+                    id: asterism_core::ContentId::new(),
+                    origin: asterism_core::DeviceId::new(),
+                    kind: ContentKind::Files,
+                    flags: ContentFlags::empty(),
+                    tag: [1; 32],
+                    metadata: ItemMetadata::default(),
+                    from_lan: false,
+                    created_at_ms: Some(1),
+                    logical_size: Some(4),
+                    payload_size: Some(4),
+                },
+                RemoteItemBody::Files(FileManifest {
+                    id: asterism_core::ManifestId::new(),
+                    root_name: "missing".into(),
+                    entries: Vec::new(),
+                    unsupported: Vec::new(),
+                }),
+            )
+            .unwrap();
+        assert!(load_payload(&item, &store, &paths).is_err());
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

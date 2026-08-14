@@ -46,11 +46,15 @@ impl ScrollCaptureEngine {
         self.low_confidence_streak >= 3
     }
 
-    /// macOS 自动滚动：注入 CGEvent 滚轮。Windows 由 SendInput 在平台模块补。
+    /// 注入原生滚轮事件；调用方仍需根据图像匹配置信度决定何时停止。
     pub fn inject_scroll(delta: i32) {
         #[cfg(target_os = "macos")]
         unsafe {
             macos_scroll(delta);
+        }
+        #[cfg(windows)]
+        unsafe {
+            windows_scroll(delta);
         }
         let _ = delta;
     }
@@ -82,6 +86,27 @@ impl ScrollCaptureEngine {
             y += tile.height.saturating_sub(first_row);
         }
         Some(StitchFrame { width, height: y.max(1), bgra })
+    }
+}
+
+#[cfg(windows)]
+unsafe fn windows_scroll(delta: i32) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
+    };
+
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                mouseData: delta as u32,
+                dwFlags: MOUSEEVENTF_WHEEL,
+                ..Default::default()
+            },
+        },
+    };
+    unsafe {
+        let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
     }
 }
 

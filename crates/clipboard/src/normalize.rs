@@ -62,6 +62,7 @@ impl NormalizedContent {
         }
     }
 
+    #[cfg(feature = "assemble")]
     pub fn into_item(self, device_id: DeviceId, created_at_ms: i64) -> ContentItem {
         match self {
             Self::Text { text, dedup_tag, flags, source_app } => {
@@ -70,39 +71,39 @@ impl NormalizedContent {
                     std::str::from_utf8(&bytes).unwrap_or_default(),
                     240,
                 );
-                ContentItem {
-                    id: ContentId::new(),
-                    origin_device_id: device_id,
-                    kind: ContentKind::Text,
+                ContentItem::from_trusted(
+                    ContentId::new(),
+                    device_id,
+                    ContentKind::Text,
                     created_at_ms,
-                    logical_size: bytes.len() as u64,
-                    payload_size: bytes.len() as u64,
+                    bytes.len() as u64,
+                    bytes.len() as u64,
                     dedup_tag,
                     flags,
-                    status: ContentStatus::Local,
-                    metadata: ItemMetadata {
+                    ContentStatus::Local,
+                    ItemMetadata {
                         source_app,
                         mime_hint: Some("text/plain;charset=utf-8".into()),
                         text_preview: Some(preview),
                         ..ItemMetadata::default()
                     },
-                    payload_ref: PayloadRef::Inline { bytes },
-                    encrypted_metadata: Bytes::new(),
-                }
+                    PayloadRef::Inline { bytes },
+                    Bytes::new(),
+                )
             }
             Self::Image { png, width, height, dedup_tag, flags, source_app } => {
                 let bytes = Bytes::from(png);
-                ContentItem {
-                    id: ContentId::new(),
-                    origin_device_id: device_id,
-                    kind: ContentKind::Image,
+                ContentItem::from_trusted(
+                    ContentId::new(),
+                    device_id,
+                    ContentKind::Image,
                     created_at_ms,
-                    logical_size: bytes.len() as u64,
-                    payload_size: bytes.len() as u64,
+                    bytes.len() as u64,
+                    bytes.len() as u64,
                     dedup_tag,
                     flags,
-                    status: ContentStatus::Local,
-                    metadata: ItemMetadata {
+                    ContentStatus::Local,
+                    ItemMetadata {
                         source_app,
                         mime_hint: Some("image/png".into()),
                         image: Some(asterism_core::content::ImageMeta {
@@ -112,31 +113,31 @@ impl NormalizedContent {
                         }),
                         ..ItemMetadata::default()
                     },
-                    payload_ref: PayloadRef::Inline { bytes },
-                    encrypted_metadata: Bytes::new(),
-                }
+                    PayloadRef::Inline { bytes },
+                    Bytes::new(),
+                )
             }
             Self::Files { manifest, dedup_tag, flags, source_app, .. } => {
                 let summary = manifest.summary();
-                ContentItem {
-                    id: ContentId::new(),
-                    origin_device_id: device_id,
-                    kind: ContentKind::Files,
+                ContentItem::from_trusted(
+                    ContentId::new(),
+                    device_id,
+                    ContentKind::Files,
                     created_at_ms,
-                    logical_size: summary.total_logical_size,
-                    payload_size: summary.total_logical_size,
+                    summary.total_logical_size,
+                    summary.total_logical_size,
                     dedup_tag,
                     flags,
-                    status: ContentStatus::Local,
-                    metadata: ItemMetadata {
+                    ContentStatus::Local,
+                    ItemMetadata {
                         source_app,
                         mime_hint: Some("application/x-asterism-files".into()),
                         files: Some(summary),
                         ..ItemMetadata::default()
                     },
-                    payload_ref: PayloadRef::FileManifest { manifest_id: manifest.id },
-                    encrypted_metadata: Bytes::new(),
-                }
+                    PayloadRef::FileManifest { manifest_id: manifest.id },
+                    Bytes::new(),
+                )
             }
         }
     }
@@ -149,6 +150,7 @@ pub fn normalize(
     policy: &CapturePolicy,
     remote: &RemotePolicy,
 ) -> Result<Option<NormalizedContent>> {
+    let _ = remote;
     let decision = decide(captured, policy);
     if decision.should_ignore() {
         tracing::info!(?decision, "clipboard ignored by policy");
@@ -173,15 +175,13 @@ pub fn normalize(
 
     if let Some(image) = &captured.image {
         let png = normalize_png(image)?;
-        let flags =
-            remote_flags(decision.flags(), remote, ContentKind::Image, 0, png.bytes.len() as u64);
         let tag = local_dedup_tag(&png.bytes);
         return Ok(Some(NormalizedContent::Image {
             png: png.bytes,
             width: png.width,
             height: png.height,
             dedup_tag: tag,
-            flags,
+            flags: decision.flags(),
             source_app: captured.source_app.clone(),
         }));
     }
@@ -190,11 +190,10 @@ pub fn normalize(
         if text.is_empty() {
             return Err(ClipboardError::Empty);
         }
-        let flags = remote_flags(decision.flags(), remote, ContentKind::Text, 0, text.len() as u64);
         return Ok(Some(NormalizedContent::Text {
             dedup_tag: local_dedup_tag(text.as_bytes()),
             text: text.clone(),
-            flags,
+            flags: decision.flags(),
             source_app: captured.source_app.clone(),
         }));
     }
@@ -223,20 +222,6 @@ fn stable_path_key(path: &std::path::Path) -> String {
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .into_owned()
-}
-
-fn remote_flags(
-    base: ContentFlags,
-    remote: &RemotePolicy,
-    kind: ContentKind,
-    file_count: u64,
-    logical_size: u64,
-) -> ContentFlags {
-    if remote.check_preflight_ext(kind, file_count, logical_size, 0).is_ok() {
-        base | ContentFlags::REMOTE_ALLOWED
-    } else {
-        base
-    }
 }
 
 #[cfg(test)]
@@ -281,6 +266,28 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(via_tmp);
+    }
+
+    #[test]
+    fn different_change_tokens_same_text_both_normalize() {
+        let make = |token| CapturedClipboard {
+            change_token: token,
+            source_app: None,
+            formats: vec!["public.utf8-plain-text".into()],
+            text: Some("same body".into()),
+            image: None,
+            files: vec![],
+            sensitive: false,
+        };
+        let first = normalize(&make(1), &CapturePolicy::default(), &RemotePolicy::default())
+            .unwrap()
+            .unwrap();
+        let second = normalize(&make(2), &CapturePolicy::default(), &RemotePolicy::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.kind(), ContentKind::Text);
+        assert_eq!(second.kind(), ContentKind::Text);
+        assert_eq!(first.dedup_tag(), second.dedup_tag());
     }
 
     #[test]

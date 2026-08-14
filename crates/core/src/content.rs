@@ -120,24 +120,125 @@ pub enum PayloadRef {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ContentItem {
-    pub id: ContentId,
-    pub origin_device_id: DeviceId,
-    pub kind: ContentKind,
-    pub created_at_ms: i64,
-    pub logical_size: u64,
-    pub payload_size: u64,
+    id: ContentId,
+    origin_device_id: DeviceId,
+    kind: ContentKind,
+    created_at_ms: i64,
+    logical_size: u64,
+    payload_size: u64,
     /// HMAC(VaultKey, BLAKE3(plaintext))；本地未建 Vault 时为 BLAKE3(plaintext)。
-    pub dedup_tag: [u8; 32],
-    pub flags: ContentFlags,
-    pub status: ContentStatus,
-    pub metadata: ItemMetadata,
-    pub payload_ref: PayloadRef,
+    dedup_tag: [u8; 32],
+    flags: ContentFlags,
+    status: ContentStatus,
+    metadata: ItemMetadata,
+    payload_ref: PayloadRef,
     /// Hub 侧密文 metadata；本地历史使用 `metadata`。
-    pub encrypted_metadata: Bytes,
+    encrypted_metadata: Bytes,
 }
 
 impl ContentItem {
+    /// 仅 `assemble` feature（domain-runtime / storage / host）可构造。
+    #[cfg(feature = "assemble")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_trusted(
+        id: ContentId,
+        origin_device_id: DeviceId,
+        kind: ContentKind,
+        created_at_ms: i64,
+        logical_size: u64,
+        payload_size: u64,
+        dedup_tag: [u8; 32],
+        flags: ContentFlags,
+        status: ContentStatus,
+        metadata: ItemMetadata,
+        payload_ref: PayloadRef,
+        encrypted_metadata: Bytes,
+    ) -> Self {
+        Self {
+            id,
+            origin_device_id,
+            kind,
+            created_at_ms,
+            logical_size,
+            payload_size,
+            dedup_tag,
+            flags,
+            status,
+            metadata,
+            payload_ref,
+            encrypted_metadata,
+        }
+    }
+
+    pub fn handle(&self) -> crate::draft::ContentHandle {
+        crate::draft::ContentHandle::from_id(self.id)
+    }
+
+    pub fn id(&self) -> ContentId {
+        self.id
+    }
+    pub fn origin_device_id(&self) -> DeviceId {
+        self.origin_device_id
+    }
+    pub fn kind(&self) -> ContentKind {
+        self.kind
+    }
+    pub fn created_at_ms(&self) -> i64 {
+        self.created_at_ms
+    }
+    pub fn logical_size(&self) -> u64 {
+        self.logical_size
+    }
+    pub fn payload_size(&self) -> u64 {
+        self.payload_size
+    }
+    pub fn dedup_tag(&self) -> [u8; 32] {
+        self.dedup_tag
+    }
+    pub fn flags(&self) -> ContentFlags {
+        self.flags
+    }
+    pub fn status(&self) -> ContentStatus {
+        self.status
+    }
+    pub fn metadata(&self) -> &ItemMetadata {
+        &self.metadata
+    }
+    #[cfg(feature = "assemble")]
+    pub fn metadata_mut(&mut self) -> &mut ItemMetadata {
+        &mut self.metadata
+    }
+    pub fn payload_ref(&self) -> &PayloadRef {
+        &self.payload_ref
+    }
+    pub fn encrypted_metadata(&self) -> &Bytes {
+        &self.encrypted_metadata
+    }
+    #[cfg(feature = "assemble")]
+    pub fn set_kind(&mut self, kind: ContentKind) {
+        self.kind = kind;
+    }
+    #[cfg(feature = "assemble")]
+    pub fn set_payload(&mut self, payload_ref: PayloadRef, logical_size: u64, payload_size: u64) {
+        self.payload_ref = payload_ref;
+        self.logical_size = logical_size;
+        self.payload_size = payload_size;
+    }
+    #[cfg(feature = "assemble")]
+    pub fn or_flags(&mut self, flags: ContentFlags) {
+        self.flags |= flags;
+    }
+    #[cfg(feature = "assemble")]
+    pub fn set_flags(&mut self, flags: ContentFlags) {
+        self.flags = flags;
+    }
+    #[cfg(feature = "assemble")]
+    pub fn set_dedup_tag(&mut self, dedup_tag: [u8; 32]) {
+        self.dedup_tag = dedup_tag;
+    }
+
     pub fn is_sensitive(&self) -> bool {
         self.flags.contains(ContentFlags::SENSITIVE)
     }
@@ -163,6 +264,14 @@ pub struct ItemMetadata {
     pub files: Option<FileManifestSummary>,
     /// 本地文件缓存相对 `cache/items/<id>`；跨设备同步时不得当作源路径。
     pub local_cache_rel: Option<String>,
+    #[serde(default)]
+    pub producer_plugin_id: Option<String>,
+    #[serde(default)]
+    pub source_event_id: Option<String>,
+    #[serde(default)]
+    pub change_token: Option<u64>,
+    #[serde(default)]
+    pub parent_content_id: Option<ContentId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

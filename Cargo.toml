@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/kernel",
+    "crates/plugin-api",
+    "crates/domain-runtime",
     "crates/core",
     "crates/crypto",
     "crates/storage",
@@ -14,6 +17,9 @@ members = [
     "crates/crypto-wasm",
 ]
 default-members = [
+    "crates/kernel",
+    "crates/plugin-api",
+    "crates/domain-runtime",
     "crates/core",
     "crates/crypto",
     "crates/storage",
@@ -35,6 +41,9 @@ repository = "https://github.com/shiein/asterism"
 description = "Cross-device clipboard, screenshot, and self-hosted hub"
 
 [workspace.dependencies]
+asterism-kernel = { path = "crates/kernel" }
+asterism-plugin-api = { path = "crates/plugin-api" }
+asterism-domain-runtime = { path = "crates/domain-runtime" }
 asterism-core = { path = "crates/core" }
 asterism-crypto = { path = "crates/crypto" }
 asterism-storage = { path = "crates/storage" }

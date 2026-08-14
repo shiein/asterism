@@ -6,6 +6,7 @@
 pub mod blob;
 pub mod cleanup;
 pub mod error;
+pub mod outbox;
 pub mod paths;
 pub mod repo;
 pub mod schema;
@@ -13,5 +14,8 @@ pub mod store;
 
 pub use blob::BlobStore;
 pub use error::StorageError;
+pub use outbox::{
+    CONSUMER_HUB, CONSUMER_HUB_DELETE, CONSUMER_LAN, EVENT_COMMITTED, EVENT_DELETED, OutboxEvent,
+};
 pub use repo::HistoryQuery;
-pub use store::Store;
+pub use store::{ContentCommitPort, Store};

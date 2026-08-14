@@ -67,7 +67,7 @@ pub fn run_overlay_select() -> i32 {
 
 pub fn select_region_subprocess(frame: &CapturedFrame) -> anyhow::Result<Option<Selection>> {
     let exe = std::env::current_exe()?;
-    let mut child = std::process::Command::new(exe)
+    let child = std::process::Command::new(exe)
         .arg("--overlay-select")
         .arg(frame.width.to_string())
         .arg(frame.height.to_string())
@@ -77,10 +77,13 @@ pub fn select_region_subprocess(frame: &CapturedFrame) -> anyhow::Result<Option<
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
+    let mut lease = asterism_kernel::ChildProcessLease::new(child);
     {
+        let child = lease.child_mut().ok_or_else(|| anyhow::anyhow!("overlay child"))?;
         let stdin = child.stdin.as_mut().ok_or_else(|| anyhow::anyhow!("overlay stdin"))?;
         stdin.write_all(&frame.bgra)?;
     }
+    let child = lease.take().ok_or_else(|| anyhow::anyhow!("overlay child taken"))?;
     let output = child.wait_with_output()?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);

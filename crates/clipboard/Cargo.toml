@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 description = "Native clipboard watch, normalize, dedup, and sensitive policy"
 
+[features]
+default = []
+assemble = ["asterism-core/assemble"]
+
 [dependencies]
 asterism-core.workspace = true
 asterism-crypto.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "asterism-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Domain-free runtime microkernel: scope, registry, and lifecycle"
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]

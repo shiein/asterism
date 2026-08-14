@@ -213,6 +213,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tiny-skia",
+ "windows",
  "winit",
  "xcap",
 ]
@@ -288,8 +289,11 @@ dependencies = [
  "asterism-clipboard",
  "asterism-core",
  "asterism-crypto",
+ "asterism-domain-runtime",
+ "asterism-kernel",
  "asterism-media",
  "asterism-platform",
+ "asterism-plugin-api",
  "asterism-storage",
  "asterism-sync",
  "base64 0.22.1",
@@ -312,12 +316,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "asterism-domain-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "asterism-clipboard",
+ "asterism-core",
+ "asterism-crypto",
+ "asterism-kernel",
+ "asterism-platform",
+ "asterism-plugin-api",
+ "asterism-storage",
+ "bytes",
+ "parking_lot",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "asterism-hub"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "asterism-core",
  "asterism-crypto",
+ "asterism-domain-runtime",
+ "asterism-kernel",
+ "asterism-plugin-api",
  "asterism-storage",
  "asterism-sync",
  "axum",
@@ -345,6 +370,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "asterism-kernel"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -380,6 +412,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "asterism-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "asterism-core",
+ "asterism-kernel",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "asterism-storage"
 version = "0.1.0"
 dependencies = [
@@ -404,6 +445,7 @@ dependencies = [
  "asterism-crypto",
  "asterism-platform",
  "base64 0.22.1",
+ "blake3",
  "bytes",
  "futures-util",
  "hex",

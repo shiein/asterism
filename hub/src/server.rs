@@ -2,24 +2,20 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::Router;
-use axum::extract::{DefaultBodyLimit, Request};
-use axum::routing::{delete, get, post, put};
+use axum::extract::Request;
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::Service;
-use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::trace::TraceLayer;
 
+use crate::blob;
 use crate::config::HubConfig;
+use crate::routes::HubRouter;
 use crate::state::HubState;
-use crate::{api, auth, blob, device, health, history, relay, web};
 
-const MAX_JSON_BYTES: usize = 1024 * 1024;
-const MAX_CHUNK_BYTES: usize = 2 * 1024 * 1024;
+use asterism_kernel::ServiceRegistry;
 
 fn ensure_bootstrap(mut config: HubConfig) -> Result<HubConfig> {
     if config.bootstrap_secret_hash.is_some() {
@@ -85,7 +81,14 @@ pub async fn run(config: HubConfig) -> Result<()> {
             }
         }
     });
-    let app = router(state);
+    let routes = Arc::new(HubRouter::new());
+    let mut registry = ServiceRegistry::new();
+    registry.provide(Arc::clone(&routes)).map_err(|err| anyhow::anyhow!(err))?;
+    let runtime =
+        crate::host::hub_boot_plan().mount_with(registry).map_err(|err| anyhow::anyhow!(err))?;
+    tracing::info!(order = ?runtime.boot_order(), "hub boot plan");
+    let app = routes.finish(runtime.boot_order(), state);
+    let _runtime = runtime;
 
     loop {
         let (tcp, peer) = listener.accept().await?;
@@ -111,28 +114,4 @@ pub async fn run(config: HubConfig) -> Result<()> {
             }
         });
     }
-}
-
-fn router(state: Arc<HubState>) -> Router {
-    Router::new()
-        .route("/healthz", get(health::healthz))
-        .route("/readyz", get(health::readyz))
-        .route("/api/v1/auth/session", post(auth::session))
-        .route("/api/v1/pairing/start", post(auth::pairing_start))
-        .route("/api/v1/pairing/finish", post(auth::pairing_finish))
-        .route("/api/v1/pairing/avk", post(auth::deposit_avk))
-        .route("/api/v1/devices", get(device::list))
-        .route("/api/v1/devices/{id}", delete(device::revoke))
-        .route("/api/v1/history", get(history::list).post(history::create))
-        .route("/api/v1/history/{id}", delete(history::delete))
-        .route("/api/v1/blobs", post(blob::begin))
-        .route("/api/v1/blobs/{id}/chunks/{index}", put(blob::put_chunk).get(blob::get_chunk))
-        .route("/api/v1/blobs/{id}/commit", post(blob::commit))
-        .route("/ws/v1/device", get(relay::ws))
-        .route("/api/v1/signaling/{*rest}", get(api::not_implemented))
-        .fallback(web::asset)
-        .layer(TraceLayer::new_for_http())
-        .layer(RequestBodyLimitLayer::new(MAX_CHUNK_BYTES))
-        .layer(DefaultBodyLimit::max(MAX_JSON_BYTES.max(MAX_CHUNK_BYTES)))
-        .with_state(state)
 }

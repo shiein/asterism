@@ -1,0 +1,12 @@
+[package]
+name = "asterism-plugin-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Plugin contracts: namespaced IDs, grants, action host, manifests"
+
+[dependencies]
+asterism-core.workspace = true
+asterism-kernel.workspace = true
+thiserror.workspace = true
