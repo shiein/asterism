@@ -23,6 +23,26 @@ pub struct AnnotationSource {
 }
 
 #[tauri::command]
+pub fn preview_image(state: State<'_, DesktopState>, item_id: String) -> Result<String, CmdError> {
+    let (_, bytes, _, _) = load_image_item(&state, &item_id)?;
+    encode_preview_data_url(&bytes)
+}
+
+fn encode_preview_data_url(bytes: &[u8]) -> Result<String, CmdError> {
+    const MAX_EDGE: u32 = 480;
+    let img = image::load_from_memory(bytes).map_err(|e| CmdError::Any(e.to_string()))?;
+    let img = if img.width() > MAX_EDGE || img.height() > MAX_EDGE {
+        img.thumbnail(MAX_EDGE, MAX_EDGE)
+    } else {
+        img
+    };
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| CmdError::Any(e.to_string()))?;
+    Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
+}
+
+#[tauri::command]
 pub fn annotation_source(
     state: State<'_, DesktopState>,
     item_id: String,
@@ -318,4 +338,26 @@ fn insert_blob(
     let id = crate::runtime::ingest_image(state, bytes, w, h, kind, mime_hint, "asterism.capture")
         .map_err(|e| CmdError::Any(e.to_string()))?;
     Ok(id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_preview_data_url;
+
+    #[test]
+    fn preview_downscales_wide_png() {
+        let img = image::RgbaImage::from_pixel(800, 200, image::Rgba([10, 20, 30, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let url = encode_preview_data_url(&png).unwrap();
+        let b64 = url.strip_prefix("data:image/png;base64,").expect("data url");
+        let bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).unwrap();
+        let out = image::load_from_memory(&bytes).unwrap();
+        assert!(out.width() <= 480);
+        assert!(out.height() <= 480);
+        assert!(out.width() > 0 && out.height() > 0);
+    }
 }

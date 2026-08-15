@@ -54,6 +54,7 @@ pub fn run() {
             commands::publish_pairing_avk,
             capture_cmds::list_windows,
             capture_cmds::capture_window,
+            capture_cmds::preview_image,
             capture_cmds::annotation_source,
             capture_cmds::export_annotated,
             capture_cmds::record_gif,

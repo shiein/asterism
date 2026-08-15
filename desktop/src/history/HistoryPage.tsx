@@ -9,14 +9,15 @@ import {
   getIdentity,
   listActions,
   listHistory,
+  previewImage,
   setFavorite,
 } from "../api";
 import { useUiStore } from "../store";
 import type { ContentKind, HistoryItem } from "../types";
 
-const KINDS: Array<ContentKind | "ALL"> = ["ALL", "TEXT", "IMAGE", "FILES"];
+const KINDS: Array<ContentKind | "ALL"> = ["ALL", "TEXT", "IMAGE", "SCREENSHOT", "FILES"];
 
-export function HistoryPage() {
+export function HistoryPage({ onAnnotate }: { onAnnotate: (id: string) => void }) {
   const queryClient = useQueryClient();
   const { query, kind, favoriteOnly, setQuery, setKind, setFavoriteOnly } = useUiStore();
 
@@ -75,14 +76,20 @@ export function HistoryPage() {
         <div className="top-actions">
           <button
             onClick={() => {
-              void captureFullscreen().then(() => queryClient.invalidateQueries({ queryKey: ["history"] }));
+              void captureFullscreen().then((id) => {
+                void queryClient.invalidateQueries({ queryKey: ["history"] });
+                onAnnotate(id);
+              });
             }}
           >
             全屏截图
           </button>
           <button
             onClick={() => {
-              void captureRegion().then(() => queryClient.invalidateQueries({ queryKey: ["history"] }));
+              void captureRegion().then((id) => {
+                void queryClient.invalidateQueries({ queryKey: ["history"] });
+                onAnnotate(id);
+              });
             }}
           >
             选区截图
@@ -125,6 +132,7 @@ export function HistoryPage() {
               {item.sourceApp && <span className="app">{item.sourceApp}</span>}
             </div>
             <p className="preview">{previewOf(item)}</p>
+            {isVisual(item.kind) && <HistoryThumb id={item.id} onOpen={() => onAnnotate(item.id)} />}
             <div className="actions">
               {showAction("asterism.history.copy") && (
                 <button onClick={() => copy.mutate(item.id)}>复制</button>
@@ -139,6 +147,7 @@ export function HistoryPage() {
                   删除
                 </button>
               )}
+              {isVisual(item.kind) && <button onClick={() => onAnnotate(item.id)}>标注</button>}
             </div>
           </li>
         ))}
@@ -149,6 +158,29 @@ export function HistoryPage() {
         </button>
       )}
     </div>
+  );
+}
+
+function isVisual(kind: ContentKind): boolean {
+  return kind === "IMAGE" || kind === "SCREENSHOT" || kind === "GIF";
+}
+
+function HistoryThumb({ id, onOpen }: { id: string; onOpen: () => void }) {
+  const preview = useQuery({
+    queryKey: ["preview-image", id],
+    queryFn: () => previewImage(id),
+    staleTime: 60_000,
+  });
+  if (preview.isLoading) {
+    return <p className="preview muted">加载图片…</p>;
+  }
+  if (preview.error || !preview.data) {
+    return <p className="empty error">图片无法展示</p>;
+  }
+  return (
+    <button type="button" className="thumb-btn" onClick={onOpen}>
+      <img className="thumb" src={preview.data} alt="历史图片" />
+    </button>
   );
 }
 

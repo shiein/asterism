@@ -77,7 +77,7 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
             className={tool === candidate ? "chip on" : "chip"}
             onClick={() => setTool(candidate)}
           >
-            {candidate}
+            {toolLabel(candidate)}
           </button>
         ))}
         <button disabled={undo.length === 0} onClick={undoOnce}>Undo</button>
@@ -91,8 +91,9 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
               .catch((e) => setError(String(e)));
           }}
         >
-          导出
+          完成
         </button>
+        <button onClick={onDone}>取消</button>
       </div>
       {error && <p className="error">{error}</p>}
       {!source && !error && <p className="muted">读取截图…</p>}
@@ -148,6 +149,19 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
       )}
     </section>
   );
+}
+
+function toolLabel(tool: Tool): string {
+  switch (tool) {
+    case "rectangle":
+      return "矩形";
+    case "arrow":
+      return "箭头";
+    case "mosaic":
+      return "马赛克";
+    case "blur":
+      return "模糊";
+  }
 }
 
 function AnnotationPreview({ annotation }: { annotation: Ann }) {

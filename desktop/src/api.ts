@@ -45,6 +45,10 @@ export function captureRegion(): Promise<string> {
   return invoke("capture_region");
 }
 
+export function previewImage(id: string): Promise<string> {
+  return invoke("preview_image", { itemId: id });
+}
+
 export function recoveryKey(): Promise<string> {
   return invoke("recovery_key");
 }

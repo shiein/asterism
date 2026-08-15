@@ -17,6 +17,9 @@ winit = "0.30"
 softbuffer = "0.4"
 xcap = "0.6"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 

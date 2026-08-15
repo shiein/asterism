@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use winit::application::ApplicationHandler;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Fullscreen, Window, WindowId};
+use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::backend::{CaptureError, CapturedFrame};
 
@@ -108,10 +109,33 @@ struct OverlayApp {
 impl ApplicationHandler for OverlayApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let target = overlay_monitor(event_loop, self.frame.monitor.origin_physical);
-        let attrs = Window::default_attributes()
+        let (pos, size) = match target.as_ref() {
+            Some(monitor) => (monitor.position(), monitor.size()),
+            None => (
+                PhysicalPosition::new(
+                    self.frame.monitor.origin_physical.0,
+                    self.frame.monitor.origin_physical.1,
+                ),
+                PhysicalSize::new(self.frame.width.max(1), self.frame.height.max(1)),
+            ),
+        };
+        let mut attrs = Window::default_attributes()
             .with_title("Asterism")
-            .with_fullscreen(Some(Fullscreen::Borderless(target)))
-            .with_decorations(false);
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_transparent(false)
+            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_position(pos)
+            .with_inner_size(size);
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs = attrs
+                .with_has_shadow(false)
+                .with_accepts_first_mouse(true)
+                .with_titlebar_hidden(true)
+                .with_movable_by_window_background(false);
+        }
         let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(err) => {
@@ -119,6 +143,15 @@ impl ApplicationHandler for OverlayApp {
                 return;
             }
         };
+        #[cfg(target_os = "macos")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = window.window_handle()
+                && let RawWindowHandle::AppKit(appkit) = handle.as_raw()
+            {
+                crate::macos_perm::elevate_overlay_ns_view(appkit.ns_view.as_ptr());
+            }
+        }
         let context = match softbuffer::Context::new(window.clone()) {
             Ok(context) => context,
             Err(err) => {
@@ -212,9 +245,24 @@ impl OverlayApp {
             return;
         }
         let Ok(mut buf) = surface.buffer_mut() else { return };
-        blit_dimmed(&self.frame, &mut buf, size.width, size.height);
-        if let (Some(a), Some(b), true) = (self.start, self.current, self.dragging) {
-            stroke_rect(&mut buf, size.width, size.height, a, b);
+        let hole = match (self.start, self.current) {
+            (Some(a), Some(b)) if self.dragging || self.result.is_some() => Some((
+                a.0.min(b.0).max(0.0) as u32,
+                a.1.min(b.1).max(0.0) as u32,
+                a.0.max(b.0).min(size.width as f64 - 1.0) as u32,
+                a.1.max(b.1).min(size.height as f64 - 1.0) as u32,
+            )),
+            _ => None,
+        };
+        blit_dimmed(&self.frame, &mut buf, size.width, size.height, hole);
+        if let Some((x0, y0, x1, y1)) = hole {
+            stroke_rect(
+                &mut buf,
+                size.width,
+                size.height,
+                (x0 as f64, y0 as f64),
+                (x1 as f64, y1 as f64),
+            );
         }
         let _ = buf.present();
     }
@@ -238,7 +286,13 @@ fn selection_in_frame(
     Some(Selection { x: x0, y: y0, width: x1 - x0, height: y1 - y0 })
 }
 
-fn blit_dimmed(frame: &CapturedFrame, buf: &mut [u32], dw: u32, dh: u32) {
+fn blit_dimmed(
+    frame: &CapturedFrame,
+    buf: &mut [u32],
+    dw: u32,
+    dh: u32,
+    hole: Option<(u32, u32, u32, u32)>,
+) {
     for y in 0..dh {
         let sy = (y as u64 * frame.height as u64 / dh as u64) as u32;
         for x in 0..dw {
@@ -247,9 +301,17 @@ fn blit_dimmed(frame: &CapturedFrame, buf: &mut [u32], dw: u32, dh: u32) {
             if i + 2 >= frame.bgra.len() {
                 continue;
             }
-            let b = (frame.bgra[i] as u16 * 3 / 5) as u32;
-            let g = (frame.bgra[i + 1] as u16 * 3 / 5) as u32;
-            let r = (frame.bgra[i + 2] as u16 * 3 / 5) as u32;
+            let in_hole =
+                hole.is_some_and(|(x0, y0, x1, y1)| x >= x0 && x <= x1 && y >= y0 && y <= y1);
+            let (b, g, r) = if in_hole {
+                (frame.bgra[i] as u32, frame.bgra[i + 1] as u32, frame.bgra[i + 2] as u32)
+            } else {
+                (
+                    (frame.bgra[i] as u16 * 3 / 5) as u32,
+                    (frame.bgra[i + 1] as u16 * 3 / 5) as u32,
+                    (frame.bgra[i + 2] as u16 * 3 / 5) as u32,
+                )
+            };
             buf[(y * dw + x) as usize] = (0xFF << 24) | (r << 16) | (g << 8) | b;
         }
     }

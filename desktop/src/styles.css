@@ -38,6 +38,14 @@ h1 { font-size: 32px; font-weight: 600; letter-spacing: -0.03em; margin: 0; }
 .meta { display: flex; gap: 10px; color: var(--muted); font-size: 12px; }
 .kind { color: var(--accent); }
 .preview { margin: 10px 0 12px; white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
+.muted { color: var(--muted); }
+.thumb-btn {
+  display: block; width: 100%; padding: 0; border: 0; background: transparent; cursor: zoom-in;
+}
+.thumb {
+  display: block; max-width: 100%; max-height: 240px; border-radius: 8px; margin: 0 0 12px;
+  background: #0b0d09;
+}
 .actions { display: flex; gap: 8px; }
 .danger { color: var(--danger) !important; }
 .empty { color: var(--muted); }

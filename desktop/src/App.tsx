@@ -1,12 +1,19 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { AnnotatePage } from "./capture/AnnotatePage";
 import { HistoryPage } from "./history/HistoryPage";
 import { SettingsPage } from "./settings/SettingsPage";
 
 export function App() {
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState<"history" | "settings" | "capture">("history");
   const [annotate, setAnnotate] = useState<string | null>(null);
+
+  function closeAnnotate() {
+    setAnnotate(null);
+    void queryClient.invalidateQueries({ queryKey: ["history"] });
+  }
 
   return (
     <div>
@@ -21,7 +28,12 @@ export function App() {
           设置
         </button>
       </nav>
-      {tab === "history" && <HistoryPage />}
+      {annotate && (
+        <div className="app">
+          <AnnotatePage itemId={annotate} onDone={closeAnnotate} />
+        </div>
+      )}
+      {tab === "history" && <HistoryPage onAnnotate={setAnnotate} />}
       {tab === "settings" && (
         <div className="app">
           <SettingsPage />
@@ -47,7 +59,6 @@ export function App() {
               选区并标注
             </button>
           </div>
-          {annotate && <AnnotatePage itemId={annotate} onDone={() => setAnnotate(null)} />}
         </div>
       )}
     </div>
