@@ -1,38 +1,77 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   captureFullscreen,
   captureRegion,
   copyItem,
   deleteItem,
-  getIdentity,
   listActions,
   listHistory,
   previewImage,
   setFavorite,
 } from "../api";
 import { useUiStore } from "../store";
+import { useToast } from "../components/Toast";
+import { HistoryDetailModal } from "./HistoryDetailModal";
+import {
+  SearchIcon,
+  XIcon,
+  CopyIcon,
+  StarIcon,
+  TrashIcon,
+  CropIcon,
+  MaximizeIcon,
+  CameraIcon,
+  EditIcon,
+  FolderIcon,
+  CheckIcon,
+} from "../components/icons";
 import type { ContentKind, HistoryItem } from "../types";
 
-const KINDS: Array<ContentKind | "ALL"> = ["ALL", "TEXT", "IMAGE", "SCREENSHOT", "FILES"];
+const KINDS: Array<{ key: ContentKind | "ALL"; label: string }> = [
+  { key: "ALL", label: "全部" },
+  { key: "TEXT", label: "文本" },
+  { key: "IMAGE", label: "图片" },
+  { key: "SCREENSHOT", label: "截图" },
+  { key: "FILES", label: "文件" },
+  { key: "GIF", label: "GIF" },
+  { key: "VIDEO", label: "视频" },
+];
 
-export function HistoryPage({ onAnnotate }: { onAnnotate: (id: string) => void }) {
+export function HistoryPage({
+  onAnnotate,
+  favoriteFilter = false,
+}: {
+  onAnnotate: (id: string) => void;
+  favoriteFilter?: boolean;
+}) {
   const queryClient = useQueryClient();
+  const { toast, success } = useToast();
   const { query, kind, favoriteOnly, setQuery, setKind, setFavoriteOnly } = useUiStore();
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
-  const identity = useQuery({ queryKey: ["identity"], queryFn: getIdentity });
+  const [detailItem, setDetailItem] = useState<HistoryItem | null>(null);
+  const [detailImageUrl, setDetailImageUrl] = useState<string | undefined>(undefined);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const effectiveFavorite = favoriteFilter || favoriteOnly;
+
   const catalog = useQuery({ queryKey: ["actions"], queryFn: listActions });
-  const actionIds = new Set((catalog.data ?? []).map((action) => action.id));
+  const actionIds = useMemo(
+    () => new Set((catalog.data ?? []).map((action) => action.id)),
+    [catalog.data]
+  );
   const showAction = (id: string) => !catalog.data || actionIds.has(id);
+
   const history = useInfiniteQuery({
-    queryKey: ["history", query, kind, favoriteOnly],
+    queryKey: ["history", query, kind, effectiveFavorite],
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       listHistory({
         query: query.trim() || undefined,
         kind: kind === "ALL" ? undefined : kind,
-        favoriteOnly,
+        favoriteOnly: effectiveFavorite,
         limit: 80,
         cursor: pageParam,
       }),
@@ -42,7 +81,8 @@ export function HistoryPage({ onAnnotate }: { onAnnotate: (id: string) => void }
       return last ? `${last.createdAtMs}:${last.id}` : undefined;
     },
   });
-  const historyItems = history.data?.pages.flat() ?? [];
+
+  const historyItems = useMemo(() => history.data?.pages.flat() ?? [], [history.data]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -54,168 +94,384 @@ export function HistoryPage({ onAnnotate }: { onAnnotate: (id: string) => void }
     return () => unlisten?.();
   }, [queryClient]);
 
-  const copy = useMutation({ mutationFn: copyItem });
-  const fav = useMutation({
-    mutationFn: ({ id, favorite }: { id: string; favorite: boolean }) => setFavorite(id, favorite),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["history"] }),
-  });
-  const remove = useMutation({
-    mutationFn: deleteItem,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["history"] }),
+  // Global hotkey to focus search bar with '/'
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "/" && document.activeElement !== searchInputRef.current) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  const copy = useMutation({
+    mutationFn: copyItem,
+    onSuccess: (_, id) => {
+      setCopiedId(id);
+      success("已复制到剪贴板");
+      setTimeout(() => setCopiedId(null), 1200);
+    },
   });
 
+  const fav = useMutation({
+    mutationFn: ({ id, favorite }: { id: string; favorite: boolean }) => setFavorite(id, favorite),
+    onSuccess: (_, { favorite }) => {
+      void queryClient.invalidateQueries({ queryKey: ["history"] });
+      toast(favorite ? "已添加至收藏" : "已从收藏移除");
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: deleteItem,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["history"] });
+      toast("已删除剪贴板记录");
+    },
+  });
+
+  function handleOpenDetail(item: HistoryItem, imgUrl?: string) {
+    setDetailItem(item);
+    setDetailImageUrl(imgUrl);
+  }
+
   return (
-    <div className="app">
-      <header className="top">
-        <div>
-          <h1>Asterism</h1>
-          <p className="sub">
-            {identity.data?.deviceName ?? "本机"} · 本地历史 · Phase 1
-          </p>
-        </div>
-        <div className="top-actions">
-          <button
-            onClick={() => {
-              void captureFullscreen().then((id) => {
-                void queryClient.invalidateQueries({ queryKey: ["history"] });
-                onAnnotate(id);
-              });
-            }}
-          >
-            全屏截图
-          </button>
-          <button
-            onClick={() => {
-              void captureRegion().then((id) => {
-                void queryClient.invalidateQueries({ queryKey: ["history"] });
-                onAnnotate(id);
-              });
-            }}
-          >
-            选区截图
-          </button>
-          <label className="search">
-            <span>搜索</span>
+    <main className="main-content">
+      {/* Top Command & Search Bar */}
+      <header className="page-header">
+        <div className="header-top">
+          <div className="search-container">
+            <SearchIcon size={16} className="search-icon" />
             <input
+              ref={searchInputRef}
+              className="search-input"
               value={query}
-              placeholder="文本或文件名"
+              placeholder="搜索剪贴板文本、文件名、应用..."
               onChange={(e) => setQuery(e.target.value)}
             />
-          </label>
+            {query ? (
+              <button
+                className="btn btn-ghost btn-icon search-shortcut"
+                style={{ right: 8, height: 24, width: 24 }}
+                onClick={() => setQuery("")}
+                aria-label="清空搜索"
+              >
+                <XIcon size={14} />
+              </button>
+            ) : (
+              <span className="search-shortcut">/</span>
+            )}
+          </div>
+
+          <div className="header-actions">
+            <button
+              className="btn btn-primary"
+              onClick={() => {
+                void captureRegion().then((id) => {
+                  void queryClient.invalidateQueries({ queryKey: ["history"] });
+                  success("选区截图已生成");
+                  onAnnotate(id);
+                });
+              }}
+            >
+              <CropIcon size={15} />
+              <span>选区截图</span>
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => {
+                void captureFullscreen().then((id) => {
+                  void queryClient.invalidateQueries({ queryKey: ["history"] });
+                  success("全屏截图已生成");
+                  onAnnotate(id);
+                });
+              }}
+            >
+              <MaximizeIcon size={15} />
+              <span>全屏截图</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Filter Pills */}
+        <div className="filter-bar">
+          {KINDS.map((k) => (
+            <button
+              key={k.key}
+              className={`filter-chip ${kind === k.key ? "active" : ""}`}
+              onClick={() => setKind(k.key)}
+            >
+              <span>{k.label}</span>
+            </button>
+          ))}
+          {!favoriteFilter && (
+            <button
+              className={`filter-chip ${favoriteOnly ? "active-fav" : ""}`}
+              onClick={() => setFavoriteOnly(!favoriteOnly)}
+            >
+              <StarIcon size={13} filled={favoriteOnly} />
+              <span>仅看收藏</span>
+            </button>
+          )}
         </div>
       </header>
 
-      <div className="filters">
-        {KINDS.map((k) => (
-          <button key={k} className={kind === k ? "chip on" : "chip"} onClick={() => setKind(k)}>
-            {labelKind(k)}
-          </button>
-        ))}
-        <button
-          className={favoriteOnly ? "chip on" : "chip"}
-          onClick={() => setFavoriteOnly(!favoriteOnly)}
-        >
-          仅收藏
-        </button>
+      {/* History Grid / Feed */}
+      <div className="history-feed">
+        {history.isLoading && (
+          <div className="empty-state">
+            <div className="empty-state-icon">
+              <CameraIcon size={24} />
+            </div>
+            <div className="empty-state-title">正在读取剪贴板历史…</div>
+          </div>
+        )}
+
+        {history.error && (
+          <div className="empty-state">
+            <div className="empty-state-title" style={{ color: "var(--danger)" }}>
+              读取失败：{(history.error as Error).message}
+            </div>
+          </div>
+        )}
+
+        {historyItems.length === 0 && !history.isLoading && (
+          <div className="empty-state">
+            <div className="empty-state-icon">
+              <SearchIcon size={24} />
+            </div>
+            <div className="empty-state-title">
+              {query ? "未找到匹配的剪贴板内容" : "还没有可显示的剪贴板历史"}
+            </div>
+            <div className="empty-state-sub">
+              {query ? "尝试更换搜索词，或清空筛选条件" : "复制任何文本、图片或截图，即可在此即时记录与同步"}
+            </div>
+            {query && (
+              <button className="btn btn-secondary" onClick={() => setQuery("")} style={{ marginTop: 8 }}>
+                清空搜索
+              </button>
+            )}
+          </div>
+        )}
+
+        <div className="history-grid">
+          {historyItems.map((item) => (
+            <HistoryCard
+              key={item.id}
+              item={item}
+              copied={copiedId === item.id}
+              showAction={showAction}
+              onCopy={() => copy.mutate(item.id)}
+              onFavorite={() => fav.mutate({ id: item.id, favorite: !item.favorite })}
+              onDelete={() => remove.mutate(item.id)}
+              onAnnotate={() => onAnnotate(item.id)}
+              onOpenDetail={(imgUrl) => handleOpenDetail(item, imgUrl)}
+            />
+          ))}
+        </div>
+
+        {history.hasNextPage && (
+          <div style={{ textAlign: "center", marginTop: 24 }}>
+            <button
+              className="btn btn-secondary"
+              disabled={history.isFetchingNextPage}
+              onClick={() => void history.fetchNextPage()}
+            >
+              {history.isFetchingNextPage ? "正在加载更多…" : "加载更多历史"}
+            </button>
+          </div>
+        )}
       </div>
 
-      {history.isLoading && <p className="empty">正在读取历史…</p>}
-      {history.error && <p className="empty error">读取失败：{(history.error as Error).message}</p>}
-      {historyItems.length === 0 && !history.isLoading && <p className="empty">还没有可显示的剪贴板历史。</p>}
+      {/* History Detail Modal */}
+      <HistoryDetailModal
+        item={detailItem}
+        isOpen={Boolean(detailItem)}
+        onClose={() => setDetailItem(null)}
+        imageUrl={detailImageUrl}
+        onCopy={(id) => copy.mutate(id)}
+        onFavorite={(id, favState) => fav.mutate({ id, favorite: favState })}
+        onDelete={(id) => remove.mutate(id)}
+        onAnnotate={(id) => onAnnotate(id)}
+      />
+    </main>
+  );
+}
 
-      <ul className="list">
-        {historyItems.map((item) => (
-          <li key={item.id} className="card">
-            <div className="meta">
-              <span className="kind">{labelKind(item.kind)}</span>
-              <time>{formatTime(item.createdAtMs)}</time>
-              {item.sourceApp && <span className="app">{item.sourceApp}</span>}
+interface HistoryCardProps {
+  item: HistoryItem;
+  copied: boolean;
+  showAction: (id: string) => boolean;
+  onCopy: () => void;
+  onFavorite: () => void;
+  onDelete: () => void;
+  onAnnotate: () => void;
+  onOpenDetail: (imgUrl?: string) => void;
+}
+
+function HistoryCard({
+  item,
+  copied,
+  showAction,
+  onCopy,
+  onFavorite,
+  onDelete,
+  onAnnotate,
+  onOpenDetail,
+}: HistoryCardProps) {
+  const isVisual = item.kind === "IMAGE" || item.kind === "SCREENSHOT" || item.kind === "GIF";
+  const [cachedImgUrl, setCachedImgUrl] = useState<string | undefined>();
+
+  return (
+    <div className="history-card" onClick={() => onOpenDetail(cachedImgUrl)}>
+      {/* Header Meta */}
+      <div className="card-header">
+        <div className="card-meta-left">
+          <span className={`kind-badge ${item.kind.toLowerCase()}`}>{kindLabel(item.kind)}</span>
+          {item.sourceApp && <span className="source-app-tag">{item.sourceApp}</span>}
+          <span className="card-time">{formatRelativeTime(item.createdAtMs)}</span>
+        </div>
+        <div className="card-header-actions" onClick={(e) => e.stopPropagation()}>
+          <button
+            className={`fav-btn ${item.favorite ? "is-fav" : ""}`}
+            onClick={onFavorite}
+            title={item.favorite ? "取消收藏" : "加入收藏"}
+          >
+            <StarIcon size={15} filled={item.favorite} />
+          </button>
+        </div>
+      </div>
+
+      {/* Body Content */}
+      <div className="card-body">
+        {item.kind === "TEXT" && (
+          <div className="text-preview-box">{item.preview || "无预览文本"}</div>
+        )}
+
+        {isVisual && (
+          <CardImageThumbnail
+            id={item.id}
+            onLoaded={(url) => setCachedImgUrl(url)}
+            onOpen={() => onOpenDetail(cachedImgUrl)}
+          />
+        )}
+
+        {item.kind === "FILES" && (
+          <div className="files-preview-box">
+            <FolderIcon size={22} style={{ color: "var(--warning)" }} />
+            <div>
+              <div className="files-info-title">{item.preview || "文件集合"}</div>
+              <div className="files-info-sub">
+                {item.fileCount ?? 1} 个文件 · {formatBytes(item.logicalSize)}
+              </div>
             </div>
-            <p className="preview">{previewOf(item)}</p>
-            {isVisual(item.kind) && <HistoryThumb id={item.id} onOpen={() => onAnnotate(item.id)} />}
-            <div className="actions">
-              {showAction("asterism.history.copy") && (
-                <button onClick={() => copy.mutate(item.id)}>复制</button>
-              )}
-              {showAction("asterism.history.favorite") && (
-                <button onClick={() => fav.mutate({ id: item.id, favorite: !item.favorite })}>
-                  {item.favorite ? "取消收藏" : "收藏"}
-                </button>
-              )}
-              {showAction("asterism.history.delete") && (
-                <button className="danger" onClick={() => remove.mutate(item.id)}>
-                  删除
-                </button>
-              )}
-              {isVisual(item.kind) && <button onClick={() => onAnnotate(item.id)}>标注</button>}
-            </div>
-          </li>
-        ))}
-      </ul>
-      {history.hasNextPage && (
-        <button disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>
-          {history.isFetchingNextPage ? "正在加载…" : "加载更多"}
-        </button>
-      )}
+          </div>
+        )}
+      </div>
+
+      {/* Footer Actions */}
+      <div className="card-footer" onClick={(e) => e.stopPropagation()}>
+        <span className="card-size-label">{formatBytes(item.logicalSize)}</span>
+        <div className="card-action-btns">
+          {isVisual && (
+            <button className="btn btn-ghost btn-icon" onClick={onAnnotate} title="标注">
+              <EditIcon size={14} />
+            </button>
+          )}
+          {showAction("asterism.history.delete") && (
+            <button
+              className="btn btn-ghost btn-icon"
+              style={{ color: "var(--text-muted)" }}
+              onClick={onDelete}
+              title="删除"
+            >
+              <TrashIcon size={14} />
+            </button>
+          )}
+          {showAction("asterism.history.copy") && (
+            <button
+              className={`btn ${copied ? "btn-secondary" : "btn-primary"}`}
+              style={{ padding: "4px 10px", fontSize: 12 }}
+              onClick={onCopy}
+            >
+              {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
+              <span>{copied ? "已复制" : "复制"}</span>
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
 
-function isVisual(kind: ContentKind): boolean {
-  return kind === "IMAGE" || kind === "SCREENSHOT" || kind === "GIF";
-}
-
-function HistoryThumb({ id, onOpen }: { id: string; onOpen: () => void }) {
+function CardImageThumbnail({
+  id,
+  onLoaded,
+  onOpen,
+}: {
+  id: string;
+  onLoaded: (url: string) => void;
+  onOpen: () => void;
+}) {
   const preview = useQuery({
     queryKey: ["preview-image", id],
     queryFn: () => previewImage(id),
-    staleTime: 60_000,
+    staleTime: 120_000,
   });
+
+  useEffect(() => {
+    if (preview.data) {
+      onLoaded(preview.data);
+    }
+  }, [preview.data, onLoaded]);
+
   if (preview.isLoading) {
-    return <p className="preview muted">加载图片…</p>;
+    return (
+      <div className="thumbnail-preview-container" style={{ height: 110 }}>
+        <span style={{ fontSize: 12, color: "var(--text-muted)" }}>载入图片中…</span>
+      </div>
+    );
   }
+
   if (preview.error || !preview.data) {
-    return <p className="empty error">图片无法展示</p>;
+    return (
+      <div className="thumbnail-preview-container" style={{ height: 90 }}>
+        <span style={{ fontSize: 12, color: "var(--danger)" }}>缩略图无法展示</span>
+      </div>
+    );
   }
+
   return (
-    <button type="button" className="thumb-btn" onClick={onOpen}>
-      <img className="thumb" src={preview.data} alt="历史图片" />
-    </button>
+    <div className="thumbnail-preview-container" onClick={onOpen}>
+      <img className="card-thumbnail" src={preview.data} alt="缩略图" loading="lazy" />
+    </div>
   );
 }
 
-function labelKind(kind: ContentKind | "ALL"): string {
+function kindLabel(kind: ContentKind): string {
   switch (kind) {
-    case "ALL":
-      return "全部";
-    case "TEXT":
-      return "文本";
-    case "IMAGE":
-      return "图片";
-    case "FILES":
-      return "文件";
-    case "SCREENSHOT":
-      return "截图";
-    case "GIF":
-      return "GIF";
-    case "VIDEO":
-      return "视频";
+    case "TEXT": return "文本";
+    case "IMAGE": return "图片";
+    case "SCREENSHOT": return "截图";
+    case "FILES": return "文件";
+    case "GIF": return "GIF";
+    case "VIDEO": return "视频";
   }
 }
 
-function previewOf(item: HistoryItem): string {
-  if (item.preview) return item.preview;
-  if (item.kind === "IMAGE" && item.imageWidth && item.imageHeight) {
-    return `${item.imageWidth}×${item.imageHeight} PNG`;
-  }
-  if (item.kind === "FILES" && item.fileCount != null) {
-    return `${item.fileCount} 个文件 · ${formatBytes(item.logicalSize)}`;
-  }
-  return formatBytes(item.logicalSize);
-}
-
-function formatTime(ms: number): string {
-  return new Date(ms).toLocaleString();
+function formatRelativeTime(ms: number): string {
+  const diff = Date.now() - ms;
+  const seconds = Math.floor(diff / 1000);
+  if (seconds < 45) return "刚刚";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}小时前`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "昨天";
+  if (days < 7) return `${days}天前`;
+  return new Date(ms).toLocaleDateString();
 }
 
 function formatBytes(n: number): string {

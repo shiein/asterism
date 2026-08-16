@@ -1,1 +1,1 @@
-export const appName = "Asterism";
+export * from "./icons";
