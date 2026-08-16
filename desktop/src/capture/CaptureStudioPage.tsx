@@ -7,7 +7,6 @@ import {
   MaximizeIcon,
   ScrollIcon,
   VideoIcon,
-  CameraIcon,
   PlayIcon,
 } from "../components/icons";
 
@@ -96,7 +95,7 @@ export function CaptureStudioPage({ onAnnotate }: CaptureStudioPageProps) {
     <main className="main-content">
       <header className="page-header" style={{ padding: "20px 28px" }}>
         <div>
-          <h2 style={{ fontSize: 20, fontWeight: 700, letterSpacing: -0.02em }}>采集工作台 Studio</h2>
+          <h2 style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-0.02em" }}>采集工作台 Studio</h2>
           <p style={{ fontSize: 13, color: "var(--text-secondary)", marginTop: 2 }}>
             高精度屏幕截取、长图滚动拼接与多媒体录制套件
           </p>

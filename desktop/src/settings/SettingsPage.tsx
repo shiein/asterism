@@ -33,7 +33,7 @@ interface DeviceDto {
 
 export function SettingsPage() {
   const qc = useQueryClient();
-  const { toast, success, error: showError } = useToast();
+  const { success, error: showError } = useToast();
 
   const [copiedKey, setCopiedKey] = useState(false);
   const [hubUrlInput, setHubUrlInput] = useState("");
@@ -113,7 +113,7 @@ export function SettingsPage() {
     <main className="main-content">
       <header className="page-header" style={{ padding: "20px 32px" }}>
         <div>
-          <h2 style={{ fontSize: 20, fontWeight: 700, letterSpacing: -0.02em }}>系统设置</h2>
+          <h2 style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-0.02em" }}>系统设置</h2>
           <p style={{ fontSize: 13, color: "var(--text-secondary)", marginTop: 2 }}>
             配置端到端加密、Hub 远程中转与局域网节点互联
           </p>
