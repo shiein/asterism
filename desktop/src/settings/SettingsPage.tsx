@@ -89,6 +89,20 @@ export function SettingsPage() {
   });
 
   const current = settings.data;
+  if (settings.isError) {
+    return (
+      <main className="main-content">
+        <div className="empty-state">
+          <div className="empty-state-title" style={{ color: "var(--danger)" }}>
+            读取设置失败
+          </div>
+          <button className="btn btn-secondary" onClick={() => void settings.refetch()}>
+            重试
+          </button>
+        </div>
+      </main>
+    );
+  }
   if (!current) {
     return (
       <main className="main-content">
@@ -99,15 +113,19 @@ export function SettingsPage() {
     );
   }
 
-  function handleCopyRecoveryKey() {
+  async function handleCopyRecoveryKey() {
     if (!recovery.data) return;
-    navigator.clipboard.writeText(recovery.data);
-    setCopiedKey(true);
-    success("恢复密钥已复制到剪贴板");
-    setTimeout(() => setCopiedKey(false), 2000);
+    try {
+      await invoke("copy_recovery_key");
+      setCopiedKey(true);
+      success("恢复密钥已复制到剪贴板");
+      setTimeout(() => setCopiedKey(false), 2000);
+    } catch (e) {
+      showError(`复制恢复密钥失败: ${e}`);
+    }
   }
 
-  const isConnected = Boolean(current.token && current.hub_url);
+  const isHubConfigured = Boolean(current.token && current.hub_url);
 
   return (
     <main className="main-content">
@@ -129,9 +147,9 @@ export function SettingsPage() {
               <span>Hub 远程中转与 E2EE 密文同步</span>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-              <span className={`status-dot ${isConnected ? "" : "offline"}`} />
-              <span style={{ color: isConnected ? "var(--success)" : "var(--text-muted)" }}>
-                {isConnected ? "已建立受信任连接" : "未连接"}
+              <span className={`status-dot ${isHubConfigured ? "" : "offline"}`} />
+              <span style={{ color: isHubConfigured ? "var(--success)" : "var(--text-muted)" }}>
+                {isHubConfigured ? "Hub 已配置" : "Hub 未配置"}
               </span>
             </div>
           </div>
@@ -243,7 +261,7 @@ export function SettingsPage() {
             <label className="form-label">Recovery Key（恢复密钥，请妥善离线保存）</label>
             <div style={{ display: "flex", gap: 8 }}>
               <input className="form-input" readOnly value={recovery.data ?? ""} />
-              <button className="btn btn-secondary" onClick={handleCopyRecoveryKey}>
+              <button className="btn btn-secondary" onClick={() => void handleCopyRecoveryKey()}>
                 {copiedKey ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
                 <span>{copiedKey ? "已复制" : "复制密钥"}</span>
               </button>

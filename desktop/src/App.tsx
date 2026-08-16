@@ -6,7 +6,7 @@ import { HistoryPage } from "./history/HistoryPage";
 import { CaptureStudioPage } from "./capture/CaptureStudioPage";
 import { SettingsPage } from "./settings/SettingsPage";
 import { AnnotatePage } from "./capture/AnnotatePage";
-import { getIdentity, listHistory } from "./api";
+import { getIdentity } from "./api";
 
 export function App() {
   return (
@@ -25,15 +25,6 @@ function MainApp() {
     queryKey: ["identity"],
     queryFn: getIdentity,
   });
-
-  const historyPreview = useQuery({
-    queryKey: ["history-counts"],
-    queryFn: () => listHistory({ limit: 100 }),
-    staleTime: 10_000,
-  });
-
-  const historyCount = historyPreview.data?.length;
-  const favCount = historyPreview.data?.filter((item) => item.favorite).length;
 
   function closeAnnotate() {
     setAnnotateId(null);
@@ -70,9 +61,6 @@ function MainApp() {
         currentTab={tab}
         onSelectTab={setTab}
         identity={identity.data}
-        historyCount={historyCount}
-        favCount={favCount}
-        isOnline={true}
       />
 
       {/* Main Content Area */}

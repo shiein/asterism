@@ -26,6 +26,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
+use asterism_core::ContentFlags;
+
 use crate::capture::CapturedClipboard;
 use crate::error::{ClipboardError, Result};
 use crate::normalize::NormalizedContent;
@@ -103,6 +105,11 @@ fn write_inner(content: &NormalizedContent) -> Result<()> {
         NormalizedContent::Text { text, .. } => set_unicode_text(text)?,
         NormalizedContent::Image { png, .. } => set_png(png)?,
         NormalizedContent::Files { paths, .. } => set_hdrop(paths)?,
+    }
+    if content.flags().contains(ContentFlags::SENSITIVE) {
+        set_dword_format(WIN_EXCLUDE_MONITOR, 0)?;
+        set_dword_format(WIN_NO_HISTORY, 0)?;
+        set_dword_format(WIN_NO_CLOUD, 0)?;
     }
     Ok(())
 }
@@ -232,6 +239,27 @@ fn set_unicode_text(text: &str) -> Result<()> {
         std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
         let _ = GlobalUnlock(mem);
         SetClipboardData(cf(CF_UNICODETEXT), Some(HANDLE(mem.0)))
+    }
+    .map_err(|e| ClipboardError::Platform(e.to_string()))?;
+    Ok(())
+}
+
+fn set_dword_format(name: &str, value: u32) -> Result<()> {
+    let fmt = unsafe { RegisterClipboardFormatW(PCWSTR(wide(name).as_ptr())) };
+    if fmt == 0 {
+        return Err(ClipboardError::Platform(format!("register clipboard format {name}")));
+    }
+    let bytes = value.to_le_bytes();
+    let mem = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) }
+        .map_err(|e| ClipboardError::Platform(e.to_string()))?;
+    let ptr = unsafe { GlobalLock(mem) };
+    if ptr.is_null() {
+        return Err(ClipboardError::Platform(format!("GlobalLock {name}")));
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+        let _ = GlobalUnlock(mem);
+        SetClipboardData(fmt, Some(HANDLE(mem.0)))
     }
     .map_err(|e| ClipboardError::Platform(e.to_string()))?;
     Ok(())

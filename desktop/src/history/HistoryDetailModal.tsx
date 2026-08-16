@@ -1,44 +1,89 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { previewImage } from "../api";
 import { Modal } from "../components/Modal";
 import { CopyIcon, StarIcon, TrashIcon, EditIcon, CheckIcon } from "../components/icons";
-import { useToast } from "../components/Toast";
 import type { HistoryItem } from "../types";
 
 interface HistoryDetailModalProps {
   item: HistoryItem | null;
   isOpen: boolean;
   onClose: () => void;
-  onCopy: (id: string) => void;
-  onFavorite: (id: string, favorite: boolean) => void;
-  onDelete: (id: string) => void;
+  canCopy: boolean;
+  canFavorite: boolean;
+  canDelete: boolean;
+  onCopy: (id: string) => Promise<void>;
+  onFavorite: (id: string, favorite: boolean) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
   onAnnotate: (id: string) => void;
-  imageUrl?: string;
 }
 
 export function HistoryDetailModal({
   item,
   isOpen,
   onClose,
+  canCopy,
+  canFavorite,
+  canDelete,
   onCopy,
   onFavorite,
   onDelete,
   onAnnotate,
-  imageUrl,
 }: HistoryDetailModalProps) {
-  const { success } = useToast();
   const [copied, setCopied] = useState(false);
+  const [isCopying, setIsCopying] = useState(false);
+  const [isFavoriting, setIsFavoriting] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const isVisual =
+    item?.kind === "IMAGE" || item?.kind === "SCREENSHOT" || item?.kind === "GIF";
+  const image = useQuery({
+    queryKey: ["preview-image", item?.id],
+    queryFn: () => previewImage(item!.id),
+    enabled: isOpen && Boolean(item) && isVisual,
+    staleTime: 120_000,
+  });
 
   if (!item) return null;
 
-  function handleCopy() {
+  async function handleCopy() {
     if (!item) return;
-    onCopy(item.id);
-    setCopied(true);
-    success("已复制到剪贴板");
-    setTimeout(() => setCopied(false), 1500);
+    try {
+      setIsCopying(true);
+      await onCopy(item.id);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Mutation owns the user-facing error message.
+    } finally {
+      setIsCopying(false);
+    }
   }
 
-  const isVisual = item.kind === "IMAGE" || item.kind === "SCREENSHOT" || item.kind === "GIF";
+  async function handleFavorite() {
+    if (!item) return;
+    try {
+      setIsFavoriting(true);
+      await onFavorite(item.id, !item.favorite);
+    } catch {
+      // Mutation owns the user-facing error message.
+    } finally {
+      setIsFavoriting(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!item) return;
+    try {
+      setIsDeleting(true);
+      await onDelete(item.id);
+      onClose();
+    } catch {
+      // Mutation owns the user-facing error message.
+    } finally {
+      setIsDeleting(false);
+    }
+  }
 
   return (
     <Modal
@@ -48,16 +93,18 @@ export function HistoryDetailModal({
       maxWidth={740}
       footer={
         <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
-          <button
-            className="btn btn-danger"
-            onClick={() => {
-              onDelete(item.id);
-              onClose();
-            }}
-          >
-            <TrashIcon size={15} />
-            <span>删除记录</span>
-          </button>
+          <div>
+            {canDelete && (
+              <button
+                className="btn btn-danger"
+                disabled={isDeleting}
+                onClick={() => void handleDelete()}
+              >
+                <TrashIcon size={15} />
+                <span>{isDeleting ? "正在删除…" : "删除记录"}</span>
+              </button>
+            )}
+          </div>
           <div style={{ display: "flex", gap: 8 }}>
             {isVisual && (
               <button
@@ -71,17 +118,26 @@ export function HistoryDetailModal({
                 <span>进入标注</span>
               </button>
             )}
-            <button
-              className="btn btn-secondary"
-              onClick={() => onFavorite(item.id, !item.favorite)}
-            >
-              <StarIcon size={15} filled={item.favorite} />
-              <span>{item.favorite ? "取消收藏" : "加入收藏"}</span>
-            </button>
-            <button className="btn btn-primary" onClick={handleCopy}>
-              {copied ? <CheckIcon size={15} /> : <CopyIcon size={15} />}
-              <span>{copied ? "已复制" : "复制正文"}</span>
-            </button>
+            {canFavorite && (
+              <button
+                className="btn btn-secondary"
+                disabled={isFavoriting}
+                onClick={() => void handleFavorite()}
+              >
+                <StarIcon size={15} filled={item.favorite} />
+                <span>{isFavoriting ? "正在更新…" : item.favorite ? "取消收藏" : "加入收藏"}</span>
+              </button>
+            )}
+            {canCopy && (
+              <button
+                className="btn btn-primary"
+                disabled={isCopying}
+                onClick={() => void handleCopy()}
+              >
+                {copied ? <CheckIcon size={15} /> : <CopyIcon size={15} />}
+                <span>{isCopying ? "正在复制…" : copied ? "已复制" : "复制正文"}</span>
+              </button>
+            )}
           </div>
         </div>
       }
@@ -150,9 +206,9 @@ export function HistoryDetailModal({
               gap: 12,
             }}
           >
-            {imageUrl ? (
+            {image.data ? (
               <img
-                src={imageUrl}
+                src={image.data}
                 alt="图片预览"
                 style={{
                   maxWidth: "100%",
@@ -162,6 +218,17 @@ export function HistoryDetailModal({
                   boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
                 }}
               />
+            ) : image.isError ? (
+              <div style={{ color: "var(--danger)", fontSize: 13 }}>
+                图片预览加载失败
+                <button
+                  className="btn btn-secondary"
+                  style={{ marginLeft: 10 }}
+                  onClick={() => void image.refetch()}
+                >
+                  重试
+                </button>
+              </div>
             ) : (
               <div style={{ color: "var(--text-muted)", fontSize: 13 }}>加载大图预览中…</div>
             )}

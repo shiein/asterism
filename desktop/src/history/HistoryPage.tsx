@@ -47,12 +47,11 @@ export function HistoryPage({
   favoriteFilter?: boolean;
 }) {
   const queryClient = useQueryClient();
-  const { toast, success } = useToast();
+  const { toast, success, error: showError } = useToast();
   const { query, kind, favoriteOnly, setQuery, setKind, setFavoriteOnly } = useUiStore();
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const [detailItem, setDetailItem] = useState<HistoryItem | null>(null);
-  const [detailImageUrl, setDetailImageUrl] = useState<string | undefined>(undefined);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const effectiveFavorite = favoriteFilter || favoriteOnly;
@@ -113,14 +112,19 @@ export function HistoryPage({
       success("已复制到剪贴板");
       setTimeout(() => setCopiedId(null), 1200);
     },
+    onError: (e) => showError(`复制失败: ${e}`),
   });
 
   const fav = useMutation({
     mutationFn: ({ id, favorite }: { id: string; favorite: boolean }) => setFavorite(id, favorite),
-    onSuccess: (_, { favorite }) => {
+    onSuccess: (_, { id, favorite }) => {
+      setDetailItem((current) =>
+        current?.id === id ? { ...current, favorite } : current
+      );
       void queryClient.invalidateQueries({ queryKey: ["history"] });
       toast(favorite ? "已添加至收藏" : "已从收藏移除");
     },
+    onError: (e) => showError(`更新收藏失败: ${e}`),
   });
 
   const remove = useMutation({
@@ -129,11 +133,11 @@ export function HistoryPage({
       void queryClient.invalidateQueries({ queryKey: ["history"] });
       toast("已删除剪贴板记录");
     },
+    onError: (e) => showError(`删除失败: ${e}`),
   });
 
-  function handleOpenDetail(item: HistoryItem, imgUrl?: string) {
+  function handleOpenDetail(item: HistoryItem) {
     setDetailItem(item);
-    setDetailImageUrl(imgUrl);
   }
 
   return (
@@ -236,7 +240,7 @@ export function HistoryPage({
           </div>
         )}
 
-        {historyItems.length === 0 && !history.isLoading && (
+        {historyItems.length === 0 && !history.isLoading && !history.error && (
           <div className="empty-state">
             <div className="empty-state-icon">
               <SearchIcon size={24} />
@@ -266,7 +270,7 @@ export function HistoryPage({
               onFavorite={() => fav.mutate({ id: item.id, favorite: !item.favorite })}
               onDelete={() => remove.mutate(item.id)}
               onAnnotate={() => onAnnotate(item.id)}
-              onOpenDetail={(imgUrl) => handleOpenDetail(item, imgUrl)}
+              onOpenDetail={() => handleOpenDetail(item)}
             />
           ))}
         </div>
@@ -289,10 +293,12 @@ export function HistoryPage({
         item={detailItem}
         isOpen={Boolean(detailItem)}
         onClose={() => setDetailItem(null)}
-        imageUrl={detailImageUrl}
-        onCopy={(id) => copy.mutate(id)}
-        onFavorite={(id, favState) => fav.mutate({ id, favorite: favState })}
-        onDelete={(id) => remove.mutate(id)}
+        canCopy={showAction("asterism.history.copy")}
+        canFavorite={showAction("asterism.history.favorite")}
+        canDelete={showAction("asterism.history.delete")}
+        onCopy={(id) => copy.mutateAsync(id)}
+        onFavorite={(id, favState) => fav.mutateAsync({ id, favorite: favState })}
+        onDelete={(id) => remove.mutateAsync(id)}
         onAnnotate={(id) => onAnnotate(id)}
       />
     </main>
@@ -307,7 +313,7 @@ interface HistoryCardProps {
   onFavorite: () => void;
   onDelete: () => void;
   onAnnotate: () => void;
-  onOpenDetail: (imgUrl?: string) => void;
+  onOpenDetail: () => void;
 }
 
 function HistoryCard({
@@ -321,10 +327,9 @@ function HistoryCard({
   onOpenDetail,
 }: HistoryCardProps) {
   const isVisual = item.kind === "IMAGE" || item.kind === "SCREENSHOT" || item.kind === "GIF";
-  const [cachedImgUrl, setCachedImgUrl] = useState<string | undefined>();
 
   return (
-    <div className="history-card" onClick={() => onOpenDetail(cachedImgUrl)}>
+    <div className="history-card" onClick={onOpenDetail}>
       {/* Header Meta */}
       <div className="card-header">
         <div className="card-meta-left">
@@ -333,13 +338,15 @@ function HistoryCard({
           <span className="card-time">{formatRelativeTime(item.createdAtMs)}</span>
         </div>
         <div className="card-header-actions" onClick={(e) => e.stopPropagation()}>
-          <button
-            className={`fav-btn ${item.favorite ? "is-fav" : ""}`}
-            onClick={onFavorite}
-            title={item.favorite ? "取消收藏" : "加入收藏"}
-          >
-            <StarIcon size={15} filled={item.favorite} />
-          </button>
+          {showAction("asterism.history.favorite") && (
+            <button
+              className={`fav-btn ${item.favorite ? "is-fav" : ""}`}
+              onClick={onFavorite}
+              title={item.favorite ? "取消收藏" : "加入收藏"}
+            >
+              <StarIcon size={15} filled={item.favorite} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -350,11 +357,7 @@ function HistoryCard({
         )}
 
         {isVisual && (
-          <CardImageThumbnail
-            id={item.id}
-            onLoaded={(url) => setCachedImgUrl(url)}
-            onOpen={() => onOpenDetail(cachedImgUrl)}
-          />
+          <CardImageThumbnail id={item.id} />
         )}
 
         {item.kind === "FILES" && (
@@ -407,24 +410,14 @@ function HistoryCard({
 
 function CardImageThumbnail({
   id,
-  onLoaded,
-  onOpen,
 }: {
   id: string;
-  onLoaded: (url: string) => void;
-  onOpen: () => void;
 }) {
   const preview = useQuery({
     queryKey: ["preview-image", id],
     queryFn: () => previewImage(id),
     staleTime: 120_000,
   });
-
-  useEffect(() => {
-    if (preview.data) {
-      onLoaded(preview.data);
-    }
-  }, [preview.data, onLoaded]);
 
   if (preview.isLoading) {
     return (
@@ -443,7 +436,7 @@ function CardImageThumbnail({
   }
 
   return (
-    <div className="thumbnail-preview-container" onClick={onOpen}>
+    <div className="thumbnail-preview-container">
       <img className="card-thumbnail" src={preview.data} alt="缩略图" loading="lazy" />
     </div>
   );

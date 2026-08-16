@@ -13,18 +13,12 @@ interface SidebarProps {
   currentTab: NavTab;
   onSelectTab: (tab: NavTab) => void;
   identity?: DeviceIdentity | null;
-  historyCount?: number;
-  favCount?: number;
-  isOnline?: boolean;
 }
 
 export function Sidebar({
   currentTab,
   onSelectTab,
   identity,
-  historyCount,
-  favCount,
-  isOnline = true,
 }: SidebarProps) {
   return (
     <aside className="sidebar">
@@ -48,9 +42,6 @@ export function Sidebar({
               <ClipboardIcon size={17} />
               <span>剪贴板历史</span>
             </div>
-            {historyCount !== undefined && historyCount > 0 && (
-              <span className="nav-counter">{historyCount}</span>
-            )}
           </button>
 
           <button
@@ -61,9 +52,6 @@ export function Sidebar({
               <StarIcon size={17} filled={currentTab === "favorites"} />
               <span>收藏夹</span>
             </div>
-            {favCount !== undefined && favCount > 0 && (
-              <span className="nav-counter">{favCount}</span>
-            )}
           </button>
 
           <button
@@ -94,8 +82,8 @@ export function Sidebar({
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="device-name">{identity?.deviceName ?? "本机设备"}</div>
             <div className="device-sub" style={{ display: "flex", alignItems: "center", gap: 5 }}>
-              <span className={`status-dot ${isOnline ? "" : "offline"}`} />
-              <span>{isOnline ? "E2EE 保险库就绪" : "离线模式"}</span>
+              <span className="status-dot" />
+              <span>本地 E2EE 保险库就绪</span>
             </div>
           </div>
         </div>

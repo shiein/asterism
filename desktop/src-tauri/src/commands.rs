@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use asterism_capture::backend::CaptureBackend;
 use asterism_capture::{AnnotationScene, OverlaySession, XcapBackend, export_png};
-use asterism_clipboard::ClipboardBackend;
+use asterism_clipboard::{ClipboardBackend, NormalizedContent};
 use asterism_core::content::{ContentFlags, ContentKind};
 use asterism_core::id::ContentId;
 use asterism_plugin_api::ActionKey;
@@ -179,6 +179,25 @@ pub fn list_actions(state: State<'_, DesktopState>) -> Vec<ActionDescriptorDto> 
 #[tauri::command]
 pub fn recovery_key(state: State<'_, DesktopState>) -> String {
     state.vault.read().recovery_hex()
+}
+
+#[tauri::command]
+pub fn copy_recovery_key(state: State<'_, DesktopState>) -> Result<(), CmdError> {
+    let text = state.vault.read().recovery_hex();
+    let (content, dedup_tag) = recovery_clipboard_content(text);
+    state.guard.remember(ContentId::new(), dedup_tag);
+    state.clipboard.write(&content).map_err(|e| CmdError::Any(e.to_string()))
+}
+
+fn recovery_clipboard_content(text: String) -> (NormalizedContent, [u8; 32]) {
+    let dedup_tag = asterism_crypto::local_dedup_tag(text.as_bytes());
+    let content = NormalizedContent::Text {
+        text,
+        dedup_tag,
+        flags: ContentFlags::SENSITIVE,
+        source_app: Some("asterism.settings".into()),
+    };
+    (content, dedup_tag)
 }
 
 #[tauri::command]
@@ -425,5 +444,22 @@ fn to_dto(item: asterism_core::ContentItem) -> HistoryItemDto {
         image_width: item.metadata().image.as_ref().map(|i| i.width),
         image_height: item.metadata().image.as_ref().map(|i| i.height),
         file_count: item.metadata().files.as_ref().map(|f| f.file_count),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_clipboard_content_is_sensitive_and_never_remote_allowed() {
+        let (content, expected_tag) = recovery_clipboard_content("a".repeat(64));
+        let NormalizedContent::Text { dedup_tag, flags, source_app, .. } = content else {
+            panic!("recovery clipboard content must be text");
+        };
+        assert_eq!(dedup_tag, expected_tag);
+        assert!(flags.contains(ContentFlags::SENSITIVE));
+        assert!(!flags.contains(ContentFlags::REMOTE_ALLOWED));
+        assert_eq!(source_app.as_deref(), Some("asterism.settings"));
     }
 }

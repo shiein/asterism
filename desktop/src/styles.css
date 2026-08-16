@@ -189,20 +189,6 @@ html, body, #root {
   font-weight: 600;
 }
 
-.nav-counter {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 7px;
-  border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--text-muted);
-}
-
-.nav-item.active .nav-counter {
-  background: var(--accent);
-  color: white;
-}
-
 .sidebar-footer {
   display: flex;
   flex-direction: column;

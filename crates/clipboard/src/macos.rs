@@ -7,6 +7,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSArray, NSData, NSString, NSURL};
 
+use asterism_core::ContentFlags;
+
 use crate::capture::CapturedClipboard;
 use crate::error::{ClipboardError, Result};
 use crate::normalize::NormalizedContent;
@@ -79,6 +81,15 @@ pub fn write(content: &NormalizedContent) -> Result<()> {
             if !pb.writeObjects(&array) {
                 return Err(ClipboardError::Platform("failed to write file urls".into()));
             }
+        }
+    }
+    if content.flags().contains(ContentFlags::SENSITIVE) {
+        let marker = NSString::from_str("");
+        let concealed_type = NSString::from_str(MACOS_CONCEALED);
+        if !pb.setString_forType(&marker, &concealed_type) {
+            return Err(ClipboardError::Platform(
+                "failed to mark clipboard content sensitive".into(),
+            ));
         }
     }
     Ok(())

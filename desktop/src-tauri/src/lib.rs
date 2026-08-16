@@ -42,6 +42,7 @@ pub fn run() {
             commands::execute_action,
             commands::list_actions,
             commands::recovery_key,
+            commands::copy_recovery_key,
             commands::capture_fullscreen,
             commands::capture_region,
             commands::get_sync_settings,

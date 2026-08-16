@@ -27,18 +27,28 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
   const [redo, setRedo] = useState<Ann[][]>([]);
   const [tool, setTool] = useState<Tool>("rectangle");
   const [isSaving, setIsSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const surface = useRef<HTMLDivElement>(null);
   const start = useRef<[number, number] | null>(null);
 
-  useEffect(() => {
+  const loadSource = useCallback(async () => {
     setSource(null);
+    setLoadError(null);
     setItems([]);
     setUndo([]);
     setRedo([]);
-    void invoke<Source>("annotation_source", { itemId })
-      .then(setSource)
-      .catch((e) => showError(String(e)));
+    try {
+      setSource(await invoke<Source>("annotation_source", { itemId }));
+    } catch (e) {
+      const message = String(e);
+      setLoadError(message);
+      showError(`读取待标注画面失败: ${message}`);
+    }
   }, [itemId, showError]);
+
+  useEffect(() => {
+    void loadSource();
+  }, [loadSource]);
 
   const push = useCallback((next: Ann[]) => {
     setUndo((history) => [...history, items]);
@@ -180,9 +190,21 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
           background: "radial-gradient(circle at center, #111a2e 0%, #080c14 100%)",
         }}
       >
-        {!source && (
+        {!source && !loadError && (
           <div className="empty-state">
             <div className="empty-state-title">正在读取待标注画面…</div>
+          </div>
+        )}
+
+        {!source && loadError && (
+          <div className="empty-state">
+            <div className="empty-state-title" style={{ color: "var(--danger)" }}>
+              待读取画面加载失败
+            </div>
+            <div className="empty-state-sub">{loadError}</div>
+            <button className="btn btn-secondary" onClick={() => void loadSource()}>
+              重试
+            </button>
           </div>
         )}
 
