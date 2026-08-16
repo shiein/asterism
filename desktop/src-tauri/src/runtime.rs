@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use asterism_clipboard::normalize::NormalizedContent;
 use asterism_clipboard::{NativeClipboard, SelfWriteGuard};
@@ -32,6 +33,7 @@ pub struct DesktopState {
     pub(crate) avk: Arc<parking_lot::RwLock<asterism_crypto::AccountVaultKey>>,
     pub(crate) sync: SyncHandle,
     pub(crate) actions: Arc<ActionRegistry>,
+    pub(crate) recording: Arc<RecordingController>,
     /// 最后析构：先释放 sender / handler，再撤销 Registry，最后 join 线程。
     _runtime: MountedRuntime,
 }
@@ -114,6 +116,7 @@ impl DesktopState {
             avk,
             sync,
             actions,
+            recording: Arc::new(RecordingController::default()),
             _runtime: runtime,
         })
     }
@@ -124,6 +127,65 @@ impl DesktopState {
 
     pub fn query(&self) -> asterism_domain_runtime::ContentQueryService<'_> {
         asterism_domain_runtime::ContentQueryService::new(&self.ingestion)
+    }
+}
+
+#[derive(Default)]
+pub struct RecordingController {
+    next_id: AtomicU64,
+    active: parking_lot::Mutex<Option<ActiveRecording>>,
+}
+
+struct ActiveRecording {
+    id: u64,
+    stop: Arc<AtomicBool>,
+}
+
+impl RecordingController {
+    pub fn begin(self: &Arc<Self>) -> anyhow::Result<RecordingLease> {
+        let mut active = self.active.lock();
+        if active.is_some() {
+            anyhow::bail!("another recording is already active");
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        *active = Some(ActiveRecording { id, stop: Arc::clone(&stop) });
+        Ok(RecordingLease { controller: Arc::clone(self), id, stop })
+    }
+
+    pub fn request_stop(&self) -> bool {
+        let active = self.active.lock();
+        let Some(active) = active.as_ref() else {
+            return false;
+        };
+        active.stop.store(true, Ordering::Release);
+        true
+    }
+
+    fn clear(&self, id: u64) {
+        let mut active = self.active.lock();
+        if active.as_ref().is_some_and(|item| item.id == id) {
+            *active = None;
+        }
+    }
+}
+
+pub struct RecordingLease {
+    controller: Arc<RecordingController>,
+    id: u64,
+    stop: Arc<AtomicBool>,
+}
+
+impl RecordingLease {
+    pub fn stop_requested(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for RecordingLease {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.controller.clear(self.id);
     }
 }
 
@@ -315,6 +377,18 @@ fn load_bytes(item: &ContentItem, store: &impl ContentLookup) -> anyhow::Result<
 mod tests {
     use super::*;
     use asterism_core::id::DeviceId;
+
+    #[test]
+    fn recording_controller_allows_only_one_active_session() {
+        let controller = Arc::new(RecordingController::default());
+        let first = controller.begin().unwrap();
+        assert!(controller.begin().is_err());
+        assert!(controller.request_stop());
+        assert!(first.stop_requested());
+        drop(first);
+        assert!(!controller.request_stop());
+        assert!(controller.begin().is_ok());
+    }
 
     #[test]
     fn repeated_user_copy_creates_a_new_history_item() {

@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Asterism captures the screen only when you start a screenshot, GIF, or video recording.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Asterism records the microphone when you choose microphone or both audio sources.</string>
   <key>NSAudioCaptureUsageDescription</key>

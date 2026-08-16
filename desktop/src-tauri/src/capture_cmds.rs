@@ -1,5 +1,7 @@
 use asterism_capture::backend::CaptureBackend;
-use asterism_capture::{AnnotationScene, OverlaySession, XcapBackend, export_png};
+use asterism_capture::{
+    AnnotationScene, MonitorInfo, OverlaySession, Selection, XcapBackend, export_png,
+};
 use asterism_core::ContentKind;
 use asterism_media::AudioSource;
 use asterism_media::VideoFrame;
@@ -8,12 +10,11 @@ use asterism_media::avi::AviMjpeg;
 use asterism_media::gifenc::GifSession;
 #[cfg(target_os = "macos")]
 use asterism_media::macos::MacOsRecording;
-use asterism_media::video::RecordingPlan;
 use base64::Engine;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::commands::{CmdError, insert_screenshot};
-use crate::runtime::DesktopState;
+use crate::runtime::{DesktopState, RecordingLease};
 
 #[derive(serde::Serialize)]
 pub struct AnnotationSource {
@@ -60,16 +61,27 @@ pub fn annotation_source(
 
 #[tauri::command]
 pub fn list_windows() -> Result<Vec<asterism_capture::WindowInfo>, CmdError> {
+    XcapBackend.permission_preflight().map_err(|e| CmdError::Any(e.to_string()))?;
     XcapBackend.list_windows().map_err(|e| CmdError::Any(e.to_string()))
 }
 
 #[tauri::command]
-pub fn capture_window(state: State<'_, DesktopState>, id: u32) -> Result<String, CmdError> {
+pub async fn capture_window(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    id: u32,
+) -> Result<String, CmdError> {
     let session = state.begin_capture();
     if session.is_cancelled() {
         return Err(CmdError::Any("cancelled".into()));
     }
-    let frame = XcapBackend.capture_window(id).map_err(|e| CmdError::Any(e.to_string()))?;
+    crate::commands::ensure_capture_permission().await?;
+    let hidden = crate::capture_ui::HiddenMainWindow::hide(&app)?;
+    hidden.wait_until_not_captured();
+    let frame = tauri::async_runtime::spawn_blocking(move || XcapBackend.capture_window(id))
+        .await
+        .map_err(|err| CmdError::Any(err.to_string()))?
+        .map_err(|err| CmdError::Any(err.to_string()))?;
     let png = export_png(frame.width, frame.height, &frame.bgra, &AnnotationScene::default())
         .map_err(CmdError::Any)?;
     insert_screenshot(&state, png, frame.width, frame.height)
@@ -113,98 +125,138 @@ fn load_image_item(
 
 #[tauri::command]
 pub async fn record_gif(
+    app: AppHandle,
     state: State<'_, DesktopState>,
-    seconds: u32,
     fps: u16,
 ) -> Result<String, CmdError> {
     let session = state.begin_capture();
     let token = session.cancel_token();
-    let (bytes, w, h) =
-        tauri::async_runtime::spawn_blocking(move || record_gif_inner(seconds, fps, token))
-            .await
-            .map_err(|e| CmdError::Any(e.to_string()))??;
+    crate::commands::ensure_capture_permission().await?;
+    let recording = state.recording.begin().map_err(CmdError::from)?;
+    let main_window = crate::capture_ui::HiddenMainWindow::hide(&app)?;
+    main_window.wait_until_not_captured();
+    let target = tauri::async_runtime::spawn_blocking({
+        let token = token.clone();
+        move || select_recording_target(token)
+    })
+    .await
+    .map_err(|err| CmdError::Any(err.to_string()))??;
+    let (toolbar, starts_at) = crate::capture_ui::RecordingToolbar::show(
+        &app,
+        &target.monitor,
+        &target.selection,
+        "gif",
+        std::time::Duration::from_secs(3),
+    )?;
+    let (bytes, w, h) = tauri::async_runtime::spawn_blocking(move || {
+        record_gif_inner(target, fps, token, recording, starts_at)
+    })
+    .await
+    .map_err(|e| CmdError::Any(e.to_string()))??;
+    drop(toolbar);
+    drop(main_window);
     insert_blob(&state, bytes, w, h, ContentKind::Gif, Some("image/gif"))
 }
 
 fn record_gif_inner(
-    seconds: u32,
+    target: RecordingTarget,
     fps: u16,
     token: asterism_kernel::CancelToken,
+    recording: RecordingLease,
+    starts_at: std::time::Instant,
 ) -> Result<(Vec<u8>, u32, u32), CmdError> {
-    if token.is_cancelled() {
-        return Err(CmdError::Any("cancelled".into()));
-    }
     let backend = XcapBackend;
-    let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
-    let monitor = asterism_capture::preferred_monitor(&monitors)
-        .ok_or_else(|| CmdError::Any("no monitor".into()))?;
-    let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-    let sel = crate::overlay_cli::select_region_subprocess(&first, Some(&token))
+    wait_for_recording_start(starts_at, &token, &recording)?;
+    let fps = fps.clamp(8, 15);
+    let mut gif = GifSession::new(target.width, target.height, fps)
         .map_err(|e| CmdError::Any(e.to_string()))?;
-    let session = OverlaySession { frame: first.clone(), selection: sel };
-    let (w, h, _) = session.crop_bgra().ok_or_else(|| CmdError::Any("need selection".into()))?;
-    let mut gif = GifSession::new(w, h, fps);
-    let frames = (seconds.max(1) * u32::from(fps.clamp(8, 15))).min(150);
-    for _ in 0..frames {
-        if token.is_cancelled() {
-            return Err(CmdError::Any("cancelled".into()));
+    let started = std::time::Instant::now();
+    let mut frame_index = 0_u64;
+    loop {
+        if frame_index > 0 && recording.stop_requested() {
+            break;
         }
-        let frame = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-        let sess = OverlaySession { frame, selection: session.selection.clone() };
+        ensure_recording_alive(&token)?;
+        let deadline = recording_deadline(started, frame_index, u32::from(fps));
+        wait_until_recording_deadline(deadline, &token)?;
+        let frame =
+            backend.capture_display(&target.monitor).map_err(|e| CmdError::Any(e.to_string()))?;
+        let sess = OverlaySession { frame, selection: Some(target.selection.clone()) };
         if let Some((cw, ch, bgra)) = sess.crop_bgra() {
-            let vf = VideoFrame { timestamp_us: 0, width: cw, height: ch, bgra };
-            let _ = gif.push(&vf);
+            let vf = VideoFrame {
+                timestamp_us: recording_timestamp_us(frame_index, u32::from(fps)),
+                width: cw,
+                height: ch,
+                bgra,
+            };
+            gif.push(&vf).map_err(|e| CmdError::Any(e.to_string()))?;
         }
-        std::thread::sleep(std::time::Duration::from_millis(1000 / u64::from(fps.max(8))));
+        frame_index = frame_index.saturating_add(1);
     }
     let bytes = gif.finish().map_err(|e| CmdError::Any(e.to_string()))?;
-    Ok((bytes, w, h))
+    Ok((bytes, target.width, target.height))
 }
 
 #[tauri::command]
 pub async fn record_video(
+    app: AppHandle,
     state: State<'_, DesktopState>,
-    seconds: u32,
     fps: u32,
     audio: Option<String>,
 ) -> Result<String, CmdError> {
     let session = state.begin_capture();
     let token = session.cancel_token();
+    crate::commands::ensure_capture_permission().await?;
+    #[cfg(target_os = "macos")]
+    if audio.as_deref().is_some_and(|source| matches!(source, "mic" | "both"))
+        && !asterism_media::macos::mic_access_ok()
+    {
+        asterism_media::macos::request_mic_access();
+        return Err(CmdError::Any(
+            "microphone permission requested; grant it, then start recording again".into(),
+        ));
+    }
+    let recording = state.recording.begin().map_err(CmdError::from)?;
+    let main_window = crate::capture_ui::HiddenMainWindow::hide(&app)?;
+    main_window.wait_until_not_captured();
+    let target = tauri::async_runtime::spawn_blocking({
+        let token = token.clone();
+        move || select_recording_target(token)
+    })
+    .await
+    .map_err(|err| CmdError::Any(err.to_string()))??;
+    let (toolbar, starts_at) = crate::capture_ui::RecordingToolbar::show(
+        &app,
+        &target.monitor,
+        &target.selection,
+        "video",
+        std::time::Duration::from_secs(3),
+    )?;
     let (bytes, w, h, mime) = tauri::async_runtime::spawn_blocking(move || {
-        record_video_inner(seconds, fps, audio, token)
+        record_video_inner(target, fps, audio, token, recording, starts_at)
     })
     .await
     .map_err(|e| CmdError::Any(e.to_string()))??;
+    drop(toolbar);
+    drop(main_window);
     insert_blob(&state, bytes, w, h, ContentKind::Video, Some(mime))
 }
 
 fn record_video_inner(
-    seconds: u32,
+    target: RecordingTarget,
     fps: u32,
     audio: Option<String>,
     token: asterism_kernel::CancelToken,
+    recording: RecordingLease,
+    starts_at: std::time::Instant,
 ) -> Result<(Vec<u8>, u32, u32, &'static str), CmdError> {
-    if token.is_cancelled() {
-        return Err(CmdError::Any("cancelled".into()));
-    }
     #[cfg(not(target_os = "macos"))]
     if audio.as_deref().is_some_and(|source| source != "none") {
         return Err(CmdError::Any("当前平台尚不支持带音频的视频录制；未创建任何录制结果".into()));
     }
+    wait_for_recording_start(starts_at, &token, &recording)?;
     let backend = XcapBackend;
-    backend.permission_preflight().map_err(|e| CmdError::Any(e.to_string()))?;
-    let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
-    let monitor = asterism_capture::preferred_monitor(&monitors)
-        .ok_or_else(|| CmdError::Any("no monitor".into()))?;
-    let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-    let sel = crate::overlay_cli::select_region_subprocess(&first, Some(&token))
-        .map_err(|e| CmdError::Any(e.to_string()))?;
-    let session = OverlaySession { frame: first, selection: sel };
-    let (w, h, _) = session.crop_bgra().ok_or_else(|| CmdError::Any("need selection".into()))?;
-    let backend_fps = if cfg!(target_os = "macos") { fps } else { fps.min(30) };
-    let plan =
-        RecordingPlan::new(seconds, backend_fps).map_err(|e| CmdError::Any(e.to_string()))?;
-    let fps = plan.fps;
+    let fps = if cfg!(target_os = "macos") { fps.clamp(10, 60) } else { fps.clamp(10, 30) };
     let audio = match audio.as_deref() {
         Some("mic") => AudioSource::Microphone,
         Some("system") => AudioSource::System,
@@ -214,65 +266,155 @@ fn record_video_inner(
 
     #[cfg(target_os = "macos")]
     {
-        let mut rec =
-            MacOsRecording::start(w, h, fps, audio).map_err(|e| CmdError::Any(e.to_string()))?;
+        let mut rec = MacOsRecording::start(target.width, target.height, fps, audio)
+            .map_err(|e| CmdError::Any(e.to_string()))?;
         let started = std::time::Instant::now();
-        for i in 0..plan.frames {
-            if token.is_cancelled() {
-                return Err(CmdError::Any("cancelled".into()));
+        let mut frame_index = 0_u64;
+        loop {
+            if frame_index > 0 && recording.stop_requested() {
+                break;
             }
-            sleep_until(plan.deadline(started, i));
-            let frame =
-                backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-            let sess = OverlaySession { frame, selection: session.selection.clone() };
+            ensure_recording_alive(&token)?;
+            wait_until_recording_deadline(recording_deadline(started, frame_index, fps), &token)?;
+            let frame = backend
+                .capture_display(&target.monitor)
+                .map_err(|e| CmdError::Any(e.to_string()))?;
+            let sess = OverlaySession { frame, selection: Some(target.selection.clone()) };
             if let Some((cw, ch, bgra)) = sess.crop_bgra() {
-                let vf =
-                    VideoFrame { timestamp_us: plan.timestamp_us(i), width: cw, height: ch, bgra };
+                let vf = VideoFrame {
+                    timestamp_us: recording_timestamp_us(frame_index, fps),
+                    width: cw,
+                    height: ch,
+                    bgra,
+                };
                 rec.push(&vf).map_err(|e| CmdError::Any(e.to_string()))?;
             }
+            frame_index = frame_index.saturating_add(1);
         }
         let bytes = rec.finish().map_err(|e| CmdError::Any(e.to_string()))?;
-        Ok((bytes, w, h, "video/mp4"))
+        Ok((bytes, target.width, target.height, "video/mp4"))
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         let _ = audio;
-        let mut avi = AviMjpeg::new(w, h, fps);
+        let mut avi = AviMjpeg::new(target.width, target.height, fps);
         let started = std::time::Instant::now();
-        for i in 0..plan.frames {
-            if token.is_cancelled() {
-                return Err(CmdError::Any("cancelled".into()));
+        let mut frame_index = 0_u64;
+        loop {
+            if frame_index > 0 && recording.stop_requested() {
+                break;
             }
-            sleep_until(plan.deadline(started, i));
-            let frame =
-                backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-            let sess = OverlaySession { frame, selection: session.selection.clone() };
+            ensure_recording_alive(&token)?;
+            wait_until_recording_deadline(recording_deadline(started, frame_index, fps), &token)?;
+            let frame = backend
+                .capture_display(&target.monitor)
+                .map_err(|e| CmdError::Any(e.to_string()))?;
+            let sess = OverlaySession { frame, selection: Some(target.selection.clone()) };
             if let Some((cw, ch, bgra)) = sess.crop_bgra() {
-                let vf =
-                    VideoFrame { timestamp_us: plan.timestamp_us(i), width: cw, height: ch, bgra };
-                let _ = avi.push(&vf);
+                let vf = VideoFrame {
+                    timestamp_us: recording_timestamp_us(frame_index, fps),
+                    width: cw,
+                    height: ch,
+                    bgra,
+                };
+                avi.push(&vf).map_err(|e| CmdError::Any(e.to_string()))?;
             }
+            frame_index = frame_index.saturating_add(1);
         }
         let bytes = avi.finish().map_err(|e| CmdError::Any(e.to_string()))?;
-        Ok((bytes, w, h, "video/x-msvideo"))
+        Ok((bytes, target.width, target.height, "video/x-msvideo"))
     }
 }
 
-fn sleep_until(deadline: std::time::Instant) {
-    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-    if !remaining.is_zero() {
-        std::thread::sleep(remaining);
+#[derive(Clone)]
+struct RecordingTarget {
+    monitor: MonitorInfo,
+    selection: Selection,
+    width: u32,
+    height: u32,
+}
+
+fn select_recording_target(
+    token: asterism_kernel::CancelToken,
+) -> Result<RecordingTarget, CmdError> {
+    ensure_recording_alive(&token)?;
+    let backend = XcapBackend;
+    let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
+    let monitor = asterism_capture::preferred_monitor(&monitors)
+        .cloned()
+        .ok_or_else(|| CmdError::Any("no monitor".into()))?;
+    let first = backend.capture_display(&monitor).map_err(|e| CmdError::Any(e.to_string()))?;
+    let selection = crate::overlay_cli::select_region_subprocess(&first, Some(&token))
+        .map_err(|e| CmdError::Any(e.to_string()))?
+        .ok_or_else(|| CmdError::Any("cancelled".into()))?;
+    let session = OverlaySession { frame: first, selection: Some(selection.clone()) };
+    let (width, height, _) =
+        session.crop_bgra().ok_or_else(|| CmdError::Any("empty selection".into()))?;
+    Ok(RecordingTarget { monitor, selection, width, height })
+}
+
+fn ensure_recording_alive(token: &asterism_kernel::CancelToken) -> Result<(), CmdError> {
+    if token.is_cancelled() {
+        return Err(CmdError::Any("cancelled".into()));
     }
+    Ok(())
+}
+
+fn wait_for_recording_start(
+    starts_at: std::time::Instant,
+    token: &asterism_kernel::CancelToken,
+    recording: &RecordingLease,
+) -> Result<(), CmdError> {
+    wait_until_recording_deadline(starts_at, token)?;
+    if recording.stop_requested() {
+        return Err(CmdError::Any("cancelled".into()));
+    }
+    Ok(())
+}
+
+fn wait_until_recording_deadline(
+    deadline: std::time::Instant,
+    token: &asterism_kernel::CancelToken,
+) -> Result<(), CmdError> {
+    loop {
+        ensure_recording_alive(token)?;
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(20)));
+    }
+}
+
+fn recording_timestamp_us(frame_index: u64, fps: u32) -> u64 {
+    frame_index.saturating_mul(1_000_000) / u64::from(fps.max(1))
+}
+
+fn recording_deadline(
+    started: std::time::Instant,
+    frame_index: u64,
+    fps: u32,
+) -> std::time::Instant {
+    started + std::time::Duration::from_micros(recording_timestamp_us(frame_index, fps))
+}
+
+#[tauri::command]
+pub fn stop_recording(state: State<'_, DesktopState>) -> bool {
+    state.recording.request_stop()
 }
 
 #[tauri::command]
 pub async fn scroll_capture(
+    app: AppHandle,
     state: State<'_, DesktopState>,
     frames: u32,
 ) -> Result<String, CmdError> {
     let session = state.begin_capture();
     let token = session.cancel_token();
+    crate::commands::ensure_capture_permission().await?;
+    let hidden = crate::capture_ui::HiddenMainWindow::hide(&app)?;
+    hidden.wait_until_not_captured();
     let (png, w, h) =
         tauri::async_runtime::spawn_blocking(move || scroll_capture_inner(frames, token))
             .await

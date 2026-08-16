@@ -23,10 +23,10 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <div>
-        <div className="brand-section">
-          <div className="brand-icon">
-            <ClipboardIcon size={16} />
-          </div>
+          <div className="brand-section">
+            <div className="brand-icon">
+              <img src="/asterism-app-icon.svg" alt="" />
+            </div>
           <div className="brand-title">
             <span>Asterism</span>
             <span className="brand-badge">PRO</span>

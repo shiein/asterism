@@ -67,13 +67,18 @@ pub fn cursor_point() -> Option<(i32, i32)> {
     }
 }
 
+/// 只读检查当前进程的屏幕捕获权限，不弹出系统请求。
+pub fn screen_access_granted() -> bool {
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
 /// 每次截图/录屏前检查，不能只在启动时检查。
 pub fn ensure_screen_access() -> Result<(), CaptureError> {
+    if screen_access_granted() {
+        return Ok(());
+    }
     unsafe {
-        if CGPreflightScreenCaptureAccess() {
-            return Ok(());
-        }
-        if CGRequestScreenCaptureAccess() && CGPreflightScreenCaptureAccess() {
+        if CGRequestScreenCaptureAccess() && screen_access_granted() {
             return Ok(());
         }
     }

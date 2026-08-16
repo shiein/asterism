@@ -6,43 +6,33 @@ use crate::{MediaError, VideoFrame};
 pub struct GifSession {
     width: u16,
     height: u16,
-    frames: Vec<Vec<u8>>,
+    encoder: Encoder<Vec<u8>>,
     delay_cs: u16,
 }
 
 impl GifSession {
-    pub fn new(width: u32, height: u32, fps: u16) -> Self {
+    pub fn new(width: u32, height: u32, fps: u16) -> Result<Self, MediaError> {
         let fps = fps.clamp(8, 15);
-        Self {
-            width: width.min(u16::MAX as u32) as u16,
-            height: height.min(u16::MAX as u32) as u16,
-            frames: Vec::new(),
-            delay_cs: (100 / fps).max(6),
-        }
+        let width = width.min(u16::MAX as u32) as u16;
+        let height = height.min(u16::MAX as u32) as u16;
+        let mut encoder = Encoder::new(Vec::new(), width, height, &[])
+            .map_err(|e| MediaError::Failed(e.to_string()))?;
+        encoder.set_repeat(Repeat::Infinite).map_err(|e| MediaError::Failed(e.to_string()))?;
+        Ok(Self { width, height, encoder, delay_cs: (100 / fps).max(6) })
     }
 
     pub fn push(&mut self, frame: &VideoFrame) -> Result<(), MediaError> {
         if frame.width as u16 != self.width || frame.height as u16 != self.height {
             return Err(MediaError::Failed("frame size changed".into()));
         }
-        self.frames.push(bgra_to_rgba(&frame.bgra));
-        Ok(())
+        let mut rgba = bgra_to_rgba(&frame.bgra);
+        let mut frame = Frame::from_rgba_speed(self.width, self.height, &mut rgba, 10);
+        frame.delay = self.delay_cs;
+        self.encoder.write_frame(&frame).map_err(|e| MediaError::Failed(e.to_string()))
     }
 
     pub fn finish(self) -> Result<Vec<u8>, MediaError> {
-        let mut out = Vec::new();
-        {
-            let mut enc = Encoder::new(&mut out, self.width, self.height, &[])
-                .map_err(|e| MediaError::Failed(e.to_string()))?;
-            enc.set_repeat(Repeat::Infinite).map_err(|e| MediaError::Failed(e.to_string()))?;
-            for rgba in &self.frames {
-                let mut frame =
-                    Frame::from_rgba_speed(self.width, self.height, &mut rgba.clone(), 10);
-                frame.delay = self.delay_cs;
-                enc.write_frame(&frame).map_err(|e| MediaError::Failed(e.to_string()))?;
-            }
-        }
-        Ok(out)
+        self.encoder.into_inner().map_err(|e| MediaError::Failed(e.to_string()))
     }
 }
 
@@ -56,4 +46,23 @@ fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
         px.swap(0, 2);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encodes_frames_incrementally() {
+        let mut session = GifSession::new(2, 2, 10).unwrap();
+        for value in [0, 64, 128] {
+            let mut bgra = Vec::with_capacity(16);
+            for _ in 0..4 {
+                bgra.extend_from_slice(&[value, value, value, 255]);
+            }
+            session.push(&VideoFrame { timestamp_us: 0, width: 2, height: 2, bgra }).unwrap();
+        }
+        let bytes = session.finish().unwrap();
+        assert!(bytes.starts_with(b"GIF"));
+    }
 }

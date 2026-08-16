@@ -4,7 +4,9 @@ use xcap::{Monitor, Window};
 
 #[derive(Debug, Error)]
 pub enum CaptureError {
-    #[error("permission denied")]
+    #[error(
+        "screen capture permission denied for the current app process; grant Asterism in System Settings > Privacy & Security > Screen & System Audio Recording, then quit and reopen Asterism"
+    )]
     PermissionDenied,
     #[error("capture backend unavailable")]
     Unavailable,

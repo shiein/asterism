@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Asterism">
+  <defs>
+    <linearGradient id="tile" x1="176" y1="112" x2="850" y2="936" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fffdf5"/>
+      <stop offset="0.62" stop-color="#fff8e8"/>
+      <stop offset="1" stop-color="#f8e8c9"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="270" y1="220" x2="790" y2="832" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#164f82"/>
+      <stop offset="1" stop-color="#092b52"/>
+    </linearGradient>
+    <linearGradient id="flare" x1="350" y1="298" x2="690" y2="756" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff745d"/>
+      <stop offset="0.52" stop-color="#ef503f"/>
+      <stop offset="1" stop-color="#c92f2f"/>
+    </linearGradient>
+    <linearGradient id="teal" x1="700" y1="330" x2="792" y2="430" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#65d7d6"/>
+      <stop offset="1" stop-color="#0c7188"/>
+    </linearGradient>
+    <filter id="tileShadow" x="0" y="0" width="1024" height="1024" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#05182b" flood-opacity="0.16"/>
+    </filter>
+    <filter id="flareGlow" x="260" y="220" width="504" height="620" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#e94b3c" flood-opacity="0.2"/>
+    </filter>
+  </defs>
+
+  <rect x="54" y="42" width="916" height="916" rx="210" fill="url(#tile)" filter="url(#tileShadow)"/>
+  <path d="M92 316C148 178 256 92 398 50H754C874 82 938 160 970 260V454C896 300 826 202 704 116H336C218 142 138 204 92 316Z" fill="#fff" opacity="0.22"/>
+  <path d="M620 940C742 898 852 818 956 700V790C926 876 868 928 786 958H620Z" fill="#f3ca86" opacity="0.14"/>
+
+  <g fill="none" stroke="url(#ink)" stroke-width="72" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M226 390V290C226 246 262 210 306 210H406"/>
+    <path d="M618 210H718C762 210 798 246 798 290V390"/>
+    <path d="M226 634V734C226 778 262 814 306 814H406"/>
+    <path d="M618 814H718C762 814 798 778 798 734V634"/>
+  </g>
+
+  <path d="M512 264C528 396 576 466 710 488C576 510 528 580 512 760C496 580 448 510 314 488C448 466 496 396 512 264Z" fill="url(#flare)" filter="url(#flareGlow)"/>
+  <path d="M512 376C521 443 548 477 616 488C548 499 521 533 512 620C503 533 476 499 408 488C476 477 503 443 512 376Z" fill="#fff4dc" opacity="0.86"/>
+  <path d="M746 318C751 357 767 377 806 383C767 390 751 410 746 459C740 410 724 390 685 383C724 377 740 357 746 318Z" fill="url(#teal)"/>
+</svg>

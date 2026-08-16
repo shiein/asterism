@@ -2,6 +2,7 @@
 
 mod actions;
 mod capture_cmds;
+mod capture_ui;
 mod commands;
 mod host;
 mod overlay_cli;
@@ -39,6 +40,8 @@ pub fn run() {
             commands::delete_item,
             commands::copy_item,
             commands::get_identity,
+            commands::capture_permission_status,
+            commands::open_screen_capture_settings,
             commands::execute_action,
             commands::list_actions,
             commands::recovery_key,
@@ -60,6 +63,7 @@ pub fn run() {
             capture_cmds::export_annotated,
             capture_cmds::record_gif,
             capture_cmds::record_video,
+            capture_cmds::stop_recording,
             capture_cmds::scroll_capture,
         ])
         .run(tauri::generate_context!())

@@ -8,7 +8,7 @@ use asterism_core::id::ContentId;
 use asterism_plugin_api::ActionKey;
 use asterism_storage::HistoryQuery;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::actions;
 use crate::runtime::{DesktopState, ingest_image};
@@ -54,6 +54,54 @@ pub struct IdentityDto {
     pub device_id: String,
     pub account_id: String,
     pub device_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapturePermissionDto {
+    pub granted: bool,
+    pub process_name: String,
+    pub bundle_id: &'static str,
+    pub settings_available: bool,
+    pub restart_recommended_after_grant: bool,
+}
+
+#[tauri::command]
+pub fn capture_permission_status() -> CapturePermissionDto {
+    #[cfg(target_os = "macos")]
+    let granted = asterism_capture::macos_perm::screen_access_granted();
+    #[cfg(not(target_os = "macos"))]
+    let granted = true;
+    let process_name = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "Asterism".into());
+    CapturePermissionDto {
+        granted,
+        process_name,
+        bundle_id: "dev.asterism.desktop",
+        settings_available: cfg!(target_os = "macos"),
+        restart_recommended_after_grant: cfg!(target_os = "macos"),
+    }
+}
+
+#[tauri::command]
+pub fn open_screen_capture_settings() -> Result<(), CmdError> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+            .spawn()
+            .map_err(|err| CmdError::Any(err.to_string()))?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn ensure_capture_permission() -> Result<(), CmdError> {
+    tauri::async_runtime::spawn_blocking(|| XcapBackend.permission_preflight())
+        .await
+        .map_err(|err| CmdError::Any(err.to_string()))?
+        .map_err(|err| CmdError::Any(err.to_string()))
 }
 
 #[tauri::command]
@@ -201,15 +249,20 @@ fn recovery_clipboard_content(text: String) -> (NormalizedContent, [u8; 32]) {
 }
 
 #[tauri::command]
-pub async fn capture_fullscreen(state: State<'_, DesktopState>) -> Result<String, CmdError> {
+pub async fn capture_fullscreen(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<String, CmdError> {
     let session = state.begin_capture();
     let token = session.cancel_token();
+    ensure_capture_permission().await?;
+    let hidden = crate::capture_ui::HiddenMainWindow::hide(&app)?;
+    hidden.wait_until_not_captured();
     let (png, width, height) = tauri::async_runtime::spawn_blocking(move || {
         if token.is_cancelled() {
             return Err("cancelled".into());
         }
         let backend = XcapBackend;
-        backend.permission_preflight().map_err(|e| e.to_string())?;
         let monitors = backend.list_monitors().map_err(|e| e.to_string())?;
         let monitor = asterism_capture::preferred_monitor(&monitors)
             .ok_or_else(|| "no monitor".to_string())?;
@@ -258,15 +311,20 @@ pub fn insert_screenshot(
 }
 
 #[tauri::command]
-pub async fn capture_region(state: State<'_, DesktopState>) -> Result<String, CmdError> {
+pub async fn capture_region(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<String, CmdError> {
     let session = state.begin_capture();
     let token = session.cancel_token();
+    ensure_capture_permission().await?;
+    let hidden = crate::capture_ui::HiddenMainWindow::hide(&app)?;
+    hidden.wait_until_not_captured();
     let (png, w, h) = tauri::async_runtime::spawn_blocking(move || {
         if token.is_cancelled() {
             return Err("cancelled".into());
         }
         let backend = XcapBackend;
-        backend.permission_preflight().map_err(|e| e.to_string())?;
         let monitors = backend.list_monitors().map_err(|e| e.to_string())?;
         let monitor = asterism_capture::preferred_monitor(&monitors)
             .ok_or_else(|| "no monitor".to_string())?;
