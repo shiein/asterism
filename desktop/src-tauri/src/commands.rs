@@ -329,15 +329,30 @@ pub async fn capture_region(
         let monitor = asterism_capture::preferred_monitor(&monitors)
             .ok_or_else(|| "no monitor".to_string())?;
         let frame = backend.capture_display(monitor).map_err(|e| e.to_string())?;
-        let selection = crate::overlay_cli::select_region_subprocess(&frame, Some(&token))
+        let outcome = crate::overlay_cli::select_overlay_subprocess(&frame, Some(&token))
             .map_err(|e| e.to_string())?;
-        let Some(selection) = selection else {
+        let Some(outcome) = outcome else {
             return Err("cancelled".into());
         };
-        let overlay = OverlaySession { frame, selection: Some(selection) };
-        let (w, h, bgra) = overlay.crop_bgra().ok_or_else(|| "empty selection".to_string())?;
-        let png = export_png(w, h, &bgra, &AnnotationScene::default())?;
-        Ok::<_, String>((png, w, h))
+        match outcome {
+            asterism_capture::OverlayOutcome::Complete { selection, scene }
+            | asterism_capture::OverlayOutcome::Download { selection, scene }
+            | asterism_capture::OverlayOutcome::Pin { selection, scene } => {
+                let overlay = OverlaySession { frame, selection: Some(selection) };
+                let (w, h, bgra) =
+                    overlay.crop_bgra().ok_or_else(|| "empty selection".to_string())?;
+                let png = export_png(w, h, &bgra, &scene)?;
+                Ok::<_, String>((png, w, h))
+            }
+            asterism_capture::OverlayOutcome::Scroll { selection } => {
+                let overlay = OverlaySession { frame, selection: Some(selection) };
+                let (w, h, bgra) =
+                    overlay.crop_bgra().ok_or_else(|| "empty selection".to_string())?;
+                let png = export_png(w, h, &bgra, &AnnotationScene::default())?;
+                Ok::<_, String>((png, w, h))
+            }
+            asterism_capture::OverlayOutcome::Cancel => Err("cancelled".into()),
+        }
     })
     .await
     .map_err(|e| CmdError::Any(e.to_string()))?

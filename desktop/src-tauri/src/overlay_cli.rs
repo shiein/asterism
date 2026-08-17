@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 
-use asterism_capture::backend::{CapturedFrame, MonitorInfo};
-use asterism_capture::{Selection, select_region};
+use asterism_capture::backend::{CaptureBackend, CapturedFrame, MonitorInfo, XcapBackend};
+use asterism_capture::{OverlayOutcome, Selection, select_region_with_windows};
 use asterism_kernel::CancelToken;
 
 /// 独立进程入口：当前进程没有 Tauri/tao 事件循环，可以安全地跑 winit EventLoop。
@@ -44,8 +44,9 @@ pub fn run_overlay_select() -> i32 {
             capture_size: (width, height),
         },
     };
-    match select_region(&frame) {
-        Ok(Some(selection)) => match serde_json::to_string(&selection) {
+    let windows = XcapBackend.list_windows().unwrap_or_default();
+    match select_region_with_windows(&frame, &windows) {
+        Ok(Some(outcome)) => match serde_json::to_string(&outcome) {
             Ok(json) => {
                 println!("{json}");
                 0
@@ -56,7 +57,7 @@ pub fn run_overlay_select() -> i32 {
             }
         },
         Ok(None) => {
-            println!("{{\"cancelled\":true}}");
+            println!("{{\"action\":\"cancel\"}}");
             0
         }
         Err(err) => {
@@ -70,6 +71,19 @@ pub fn select_region_subprocess(
     frame: &CapturedFrame,
     cancel: Option<&CancelToken>,
 ) -> anyhow::Result<Option<Selection>> {
+    match select_overlay_subprocess(frame, cancel)? {
+        Some(OverlayOutcome::Complete { selection, .. })
+        | Some(OverlayOutcome::Download { selection, .. })
+        | Some(OverlayOutcome::Pin { selection, .. })
+        | Some(OverlayOutcome::Scroll { selection }) => Ok(Some(selection)),
+        _ => Ok(None),
+    }
+}
+
+pub fn select_overlay_subprocess(
+    frame: &CapturedFrame,
+    cancel: Option<&CancelToken>,
+) -> anyhow::Result<Option<OverlayOutcome>> {
     let exe = std::env::current_exe()?;
     let child = std::process::Command::new(exe)
         .arg("--overlay-select")
@@ -105,10 +119,14 @@ pub fn select_region_subprocess(
                 }
                 let text = String::from_utf8_lossy(&out);
                 let text = text.trim();
-                if text.contains("\"cancelled\"") {
+                if text.is_empty() {
                     return Ok(None);
                 }
-                return Ok(Some(serde_json::from_str(text)?));
+                let outcome: OverlayOutcome = serde_json::from_str(text)?;
+                match outcome {
+                    OverlayOutcome::Cancel => return Ok(None),
+                    other => return Ok(Some(other)),
+                }
             }
             None => std::thread::sleep(std::time::Duration::from_millis(20)),
         }
