@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useToast } from "../components/Toast";
 import { CheckIcon, XIcon, CropIcon } from "../components/icons";
 
-type Tool = "rectangle" | "arrow" | "mosaic" | "blur";
+type Tool = "rectangle" | "ellipse" | "arrow" | "brush" | "mosaic" | "text";
 
 interface Ann {
   id: string;
@@ -28,6 +28,8 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
   const [tool, setTool] = useState<Tool>("rectangle");
   const [isSaving, setIsSaving] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [currentStroke, setCurrentStroke] = useState<number[]>([]);
+  
   const surface = useRef<HTMLDivElement>(null);
   const start = useRef<[number, number] | null>(null);
 
@@ -72,7 +74,6 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
     setItems(next);
   }, [redo, items]);
 
-  // Keyboard shortcuts (⌘Z, ⌘⇧Z, Esc, Enter)
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key === "z") {
@@ -105,7 +106,7 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
     try {
       setIsSaving(true);
       await invoke("export_annotated", { itemId, scene: { items } });
-      success("标注已完成并保存至历史");
+      success("标注已完成并保存至剪贴板与历史");
       onDone();
     } catch (e) {
       showError(`保存失败: ${e}`);
@@ -119,35 +120,35 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
       style={{
         position: "fixed",
         inset: 0,
-        backgroundColor: "rgba(8, 12, 20, 0.95)",
+        backgroundColor: "rgba(15, 23, 42, 0.85)",
         backdropFilter: "blur(16px)",
         display: "flex",
         flexDirection: "column",
         zIndex: 1100,
       }}
     >
-      {/* Top Floating Glass Toolbar */}
+      {/* Header Toolbar */}
       <header
         style={{
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          padding: "14px 28px",
+          padding: "12px 24px",
           borderBottom: "1px solid var(--border-subtle)",
-          background: "rgba(13, 18, 31, 0.8)",
-          backdropFilter: "blur(12px)",
+          background: "var(--bg-card)",
+          boxShadow: "var(--shadow-sm)",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div className="brand-icon" style={{ width: 26, height: 26 }}>
             <CropIcon size={15} />
           </div>
-          <span style={{ fontSize: 15, fontWeight: 600 }}>图片标注画布</span>
+          <span style={{ fontSize: 15, fontWeight: 600, color: "var(--text-primary)" }}>标注工作室</span>
         </div>
 
         {/* Tools */}
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {(["rectangle", "arrow", "mosaic", "blur"] as Tool[]).map((t) => (
+          {(["rectangle", "ellipse", "arrow", "brush", "mosaic", "text"] as Tool[]).map((t) => (
             <button
               key={t}
               className={`filter-chip ${tool === t ? "active" : ""}`}
@@ -173,7 +174,7 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
           </button>
           <button className="btn btn-primary" disabled={!source || isSaving} onClick={handleExport}>
             <CheckIcon size={15} />
-            <span>{isSaving ? "正在生成…" : "完成并存入剪贴板"}</span>
+            <span>{isSaving ? "正在生成…" : "完成并复制"}</span>
           </button>
         </div>
       </header>
@@ -187,7 +188,7 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
           justifyContent: "center",
           overflow: "auto",
           padding: 24,
-          background: "radial-gradient(circle at center, #111a2e 0%, #080c14 100%)",
+          background: "var(--bg-app)",
         }}
       >
         {!source && !loadError && (
@@ -218,14 +219,26 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
               maxHeight: "100%",
               lineHeight: 0,
               cursor: "crosshair",
-              boxShadow: "0 12px 48px rgba(0, 0, 0, 0.7)",
+              boxShadow: "var(--shadow-lg)",
               borderRadius: 6,
               overflow: "hidden",
               border: "1px solid var(--border-hover)",
+              touchAction: "none",
             }}
             onPointerDown={(event) => {
-              start.current = imagePoint(event.clientX, event.clientY);
+              const pt = imagePoint(event.clientX, event.clientY);
+              if (!pt) return;
+              start.current = pt;
+              setCurrentStroke([pt[0], pt[1]]);
               event.currentTarget.setPointerCapture(event.pointerId);
+            }}
+            onPointerMove={(event) => {
+              if (!start.current) return;
+              const pt = imagePoint(event.clientX, event.clientY);
+              if (!pt) return;
+              if (tool === "brush" || tool === "mosaic") {
+                setCurrentStroke((prev) => [...prev, pt[0], pt[1]]);
+              }
             }}
             onPointerUp={(event) => {
               const from = start.current;
@@ -234,25 +247,39 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
               if (!from || !to) return;
               const [x0, y0] = from;
               const [x1, y1] = to;
-              const geometry =
-                tool === "arrow"
-                  ? [x0, y0, x1, y1]
-                  : [
-                      Math.min(x0, x1),
-                      Math.min(y0, y1),
-                      Math.max(2, Math.abs(x1 - x0)),
-                      Math.max(2, Math.abs(y1 - y0)),
-                    ];
+
+              let geometry: number[];
+              if (tool === "brush" || tool === "mosaic") {
+                geometry = currentStroke.length >= 2 ? currentStroke : [x0, y0, x1, y1];
+              } else if (tool === "arrow") {
+                geometry = [x0, y0, x1, y1];
+              } else if (tool === "text") {
+                geometry = [x0, y0];
+              } else {
+                geometry = [
+                  Math.min(x0, x1),
+                  Math.min(y0, y1),
+                  Math.max(2, Math.abs(x1 - x0)),
+                  Math.max(2, Math.abs(y1 - y0)),
+                ];
+              }
+
               push([
                 ...items,
                 {
                   id: crypto.randomUUID(),
                   kind: tool,
                   geometry,
-                  style: {},
+                  style: {
+                    stroke_width: 3.5,
+                    brush_radius: 14.0,
+                    block_size: 12,
+                    text: tool === "text" ? "标注文本" : undefined,
+                  },
                   z_index: items.length,
                 },
               ]);
+              setCurrentStroke([]);
             }}
           >
             <img
@@ -281,10 +308,26 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
                 <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
                   <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444" />
                 </marker>
+                <pattern id="mosaic-pat" width="12" height="12" patternUnits="userSpaceOnUse">
+                  <rect width="6" height="6" fill="rgba(148, 163, 184, 0.45)" />
+                  <rect x="6" width="6" height="6" fill="rgba(100, 116, 139, 0.45)" />
+                  <rect y="6" width="6" height="6" fill="rgba(100, 116, 139, 0.45)" />
+                  <rect x="6" y="6" width="6" height="6" fill="rgba(148, 163, 184, 0.45)" />
+                </pattern>
               </defs>
               {items.map((ann) => (
                 <AnnotationPreview key={ann.id} annotation={ann} />
               ))}
+              {currentStroke.length >= 2 && (tool === "brush" || tool === "mosaic") && (
+                <polyline
+                  points={currentStroke.reduce((acc, val, i) => `${acc}${i % 2 === 0 ? " " : ","}${val}`, "").trim()}
+                  fill="none"
+                  stroke={tool === "mosaic" ? "url(#mosaic-pat)" : "#ef4444"}
+                  strokeWidth={tool === "mosaic" ? 24 : 4}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              )}
             </svg>
           </div>
         )}
@@ -295,29 +338,72 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
 
 function toolLabel(tool: Tool): string {
   switch (tool) {
-    case "rectangle": return "矩形选框";
-    case "arrow": return "指向箭头";
-    case "mosaic": return "马赛克";
-    case "blur": return "高斯模糊";
+    case "rectangle": return "矩形";
+    case "ellipse": return "椭圆";
+    case "arrow": return "箭头";
+    case "brush": return "画笔";
+    case "mosaic": return "马赛克 (实时画笔)";
+    case "text": return "文字";
   }
 }
 
 function AnnotationPreview({ annotation }: { annotation: Ann }) {
-  const [x, y, a, b] = annotation.geometry;
   if (annotation.kind === "arrow") {
-    return <line x1={x} y1={y} x2={a} y2={b} stroke="#ef4444" strokeWidth="3.5" markerEnd="url(#arrowhead)" />;
+    const [x1, y1, x2, y2] = annotation.geometry;
+    return <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#ef4444" strokeWidth="3.5" markerEnd="url(#arrowhead)" />;
   }
-  const fill = annotation.kind === "rectangle" ? "none" : "rgba(148, 163, 184, 0.4)";
+
+  if (annotation.kind === "ellipse") {
+    const [x, y, w, h] = annotation.geometry;
+    return (
+      <ellipse
+        cx={x + w / 2}
+        cy={y + h / 2}
+        rx={w / 2}
+        ry={h / 2}
+        fill="none"
+        stroke="#ef4444"
+        strokeWidth="3.5"
+      />
+    );
+  }
+
+  if (annotation.kind === "brush") {
+    const points = annotation.geometry.reduce((acc, val, i) => `${acc}${i % 2 === 0 ? " " : ","}${val}`, "").trim();
+    return <polyline points={points} fill="none" stroke="#ef4444" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />;
+  }
+
+  if (annotation.kind === "mosaic") {
+    if (annotation.geometry.length === 4) {
+      const [x, y, w, h] = annotation.geometry;
+      return <rect x={x} y={y} width={w} height={h} fill="url(#mosaic-pat)" stroke="rgba(100, 116, 139, 0.4)" strokeWidth="1" />;
+    }
+
+    const points = annotation.geometry.reduce((acc, val, i) => `${acc}${i % 2 === 0 ? " " : ","}${val}`, "").trim();
+    return <polyline points={points} fill="none" stroke="url(#mosaic-pat)" strokeWidth="24" strokeLinecap="round" strokeLinejoin="round" />;
+  }
+
+  if (annotation.kind === "text") {
+    const [x, y] = annotation.geometry;
+    return (
+      <text x={x} y={y + 16} fill="#ef4444" fontSize="16" fontWeight="bold" fontFamily="sans-serif">
+        {String(annotation.style.text || "标注文本")}
+      </text>
+    );
+  }
+
+  const [x, y, a, b] = annotation.geometry;
   return (
     <rect
       x={x}
       y={y}
       width={a}
       height={b}
-      fill={fill}
+      fill="none"
       stroke="#ef4444"
       strokeWidth="3.5"
       rx="3"
     />
   );
 }
+

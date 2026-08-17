@@ -111,8 +111,8 @@ export function CaptureStudioPage({ onAnnotate }: CaptureStudioPageProps) {
         <header className="capture-hero">
           <div className="capture-hero-copy">
             <div className="capture-eyebrow"><span /> CAPTURE SUITE</div>
-            <h1>先让工具消失，<br />再留下画面。</h1>
-            <p>截图、GIF 与视频使用同一套采集流程：隐藏主窗口、选择区域、开始采集，完成后自动恢复。</p>
+            <h1>屏幕采集与标注</h1>
+            <p>支持即时窗口吸附、区域框选、浮动标注工具栏、滚动长图与动图录制。</p>
           </div>
           <PermissionPanel
             status={permission.data}
@@ -136,7 +136,7 @@ export function CaptureStudioPage({ onAnnotate }: CaptureStudioPageProps) {
             <div className="capture-primary-copy">
               <span className="capture-card-kicker">PRIMARY</span>
               <h2>{activeOperation === "region" ? "正在唤起选区…" : "选区截图"}</h2>
-              <p>自动隐藏 Asterism，冻结当前屏幕后精确拖选，完成即进入标注。</p>
+              <p>无感变暗与智能窗口吸附，框选后直接在屏幕上标注或复制。</p>
               <span className="capture-card-action"><CropIcon size={16} /> 开始截图</span>
             </div>
           </button>
