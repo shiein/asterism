@@ -4,8 +4,11 @@ import {
   CameraIcon,
   SettingsIcon,
   LaptopIcon,
+  SunIcon,
+  MoonIcon,
 } from "./icons";
 import type { DeviceIdentity } from "../types";
+import { useUiStore } from "../store";
 
 export type NavTab = "history" | "favorites" | "capture" | "settings";
 
@@ -20,13 +23,15 @@ export function Sidebar({
   onSelectTab,
   identity,
 }: SidebarProps) {
+  const { theme, setTheme } = useUiStore();
+
   return (
     <aside className="sidebar">
       <div>
-          <div className="brand-section">
-            <div className="brand-icon">
-              <img src="/asterism-app-icon.svg" alt="" />
-            </div>
+        <div className="brand-section">
+          <div className="brand-icon">
+            <img src="/asterism-app-icon.svg" alt="" />
+          </div>
           <div className="brand-title">
             <span>Asterism</span>
             <span className="brand-badge">PRO</span>
@@ -77,6 +82,33 @@ export function Sidebar({
       </div>
 
       <div className="sidebar-footer">
+        {/* Theme mode segmented toggle */}
+        <div className="theme-toggle-container">
+          <button
+            className={`theme-toggle-btn ${theme === "light" ? "active" : ""}`}
+            onClick={() => setTheme("light")}
+            title="浅色模式 (默认)"
+          >
+            <SunIcon size={14} />
+            <span>浅色</span>
+          </button>
+          <button
+            className={`theme-toggle-btn ${theme === "auto" ? "active" : ""}`}
+            onClick={() => setTheme("auto")}
+            title="跟随系统"
+          >
+            <span>自动</span>
+          </button>
+          <button
+            className={`theme-toggle-btn ${theme === "dark" ? "active" : ""}`}
+            onClick={() => setTheme("dark")}
+            title="深色模式"
+          >
+            <MoonIcon size={14} />
+            <span>深色</span>
+          </button>
+        </div>
+
         <div className="device-status-card">
           <LaptopIcon size={16} style={{ color: "var(--text-muted)" }} />
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -91,3 +123,4 @@ export function Sidebar({
     </aside>
   );
 }
+

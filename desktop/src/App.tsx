@@ -7,6 +7,7 @@ import { CaptureStudioPage } from "./capture/CaptureStudioPage";
 import { SettingsPage } from "./settings/SettingsPage";
 import { AnnotatePage } from "./capture/AnnotatePage";
 import { getIdentity } from "./api";
+import { useUiStore } from "./store";
 
 export function App() {
   return (
@@ -20,6 +21,24 @@ function MainApp() {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<NavTab>("history");
   const [annotateId, setAnnotateId] = useState<string | null>(null);
+  const theme = useUiStore((s) => s.theme);
+
+  useEffect(() => {
+    function applyTheme() {
+      const isDark =
+        theme === "dark" ||
+        (theme === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
+    }
+
+    applyTheme();
+
+    if (theme === "auto") {
+      const matcher = window.matchMedia("(prefers-color-scheme: dark)");
+      matcher.addEventListener("change", applyTheme);
+      return () => matcher.removeEventListener("change", applyTheme);
+    }
+  }, [theme]);
 
   const identity = useQuery({
     queryKey: ["identity"],

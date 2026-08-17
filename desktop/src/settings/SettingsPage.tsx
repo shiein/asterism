@@ -10,7 +10,10 @@ import {
   CheckIcon,
   CopyIcon,
   SettingsIcon,
+  SunIcon,
+  MoonIcon,
 } from "../components/icons";
+import { useUiStore } from "../store";
 
 interface SyncSettings {
   hub_url: string | null;
@@ -34,6 +37,7 @@ interface DeviceDto {
 export function SettingsPage() {
   const qc = useQueryClient();
   const { success, error: showError } = useToast();
+  const { theme, setTheme } = useUiStore();
 
   const [copiedKey, setCopiedKey] = useState(false);
   const [hubUrlInput, setHubUrlInput] = useState("");
@@ -133,12 +137,72 @@ export function SettingsPage() {
         <div>
           <h2 style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-0.02em" }}>系统设置</h2>
           <p style={{ fontSize: 13, color: "var(--text-secondary)", marginTop: 2 }}>
-            配置端到端加密、Hub 远程中转与局域网节点互联
+            配置外观主题、端到端加密、Hub 远程中转与局域网节点互联
           </p>
         </div>
       </header>
 
       <div className="settings-container">
+        {/* Appearance & Theme Section */}
+        <section className="settings-section">
+          <div className="section-header">
+            <div className="section-title">
+              <SunIcon size={18} style={{ color: "var(--accent)" }} />
+              <span>外观与主题模式</span>
+            </div>
+            <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+              当前：{theme === "light" ? "浅色模式" : theme === "dark" ? "深色模式" : "跟随系统"}
+            </span>
+          </div>
+
+          <div className="theme-options-grid">
+            <button
+              className={`theme-option-card ${theme === "light" ? "active" : ""}`}
+              onClick={() => setTheme("light")}
+            >
+              <div className="theme-option-preview light-preview">
+                <div className="preview-topbar" />
+                <div className="preview-body" />
+              </div>
+              <div className="theme-option-title">
+                <SunIcon size={15} />
+                <span>浅色模式 (默认)</span>
+              </div>
+              <p className="theme-option-desc">清新护眼、高对比度与细腻灰白层次</p>
+            </button>
+
+            <button
+              className={`theme-option-card ${theme === "auto" ? "active" : ""}`}
+              onClick={() => setTheme("auto")}
+            >
+              <div className="theme-option-preview auto-preview">
+                <div className="preview-half light-half" />
+                <div className="preview-half dark-half" />
+              </div>
+              <div className="theme-option-title">
+                <LaptopIcon size={15} />
+                <span>跟随系统 (自动)</span>
+              </div>
+              <p className="theme-option-desc">随操作系统深色/浅色偏好自适应切换</p>
+            </button>
+
+            <button
+              className={`theme-option-card ${theme === "dark" ? "active" : ""}`}
+              onClick={() => setTheme("dark")}
+            >
+              <div className="theme-option-preview dark-preview">
+                <div className="preview-topbar" />
+                <div className="preview-body" />
+              </div>
+              <div className="theme-option-title">
+                <MoonIcon size={15} />
+                <span>深色模式</span>
+              </div>
+              <p className="theme-option-desc">低照度环境舒适沉浸暗色风格</p>
+            </button>
+          </div>
+        </section>
+
         {/* Hub Sync Section */}
         <section className="settings-section">
           <div className="section-header">
