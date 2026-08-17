@@ -39,6 +39,7 @@ pub struct WindowInfo {
     pub title: String,
     pub app: String,
     pub size: (u32, u32),
+    pub position: (i32, i32),
 }
 
 pub trait CaptureBackend: Send + Sync {
@@ -102,6 +103,7 @@ impl CaptureBackend for XcapBackend {
                     title: w.title().unwrap_or_default(),
                     app: w.app_name().unwrap_or_default(),
                     size: (w.width().unwrap_or(0), w.height().unwrap_or(0)),
+                    position: (w.x().unwrap_or(0), w.y().unwrap_or(0)),
                 })
             })
             .collect())

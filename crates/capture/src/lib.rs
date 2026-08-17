@@ -12,7 +12,11 @@ pub mod macos_perm;
 
 pub use annotation::{Annotation, AnnotationKind, AnnotationScene, export_png};
 pub use backend::{
-    CaptureError, CapturedFrame, MonitorInfo, WindowInfo, XcapBackend, preferred_monitor,
+    CaptureBackend, CaptureError, CapturedFrame, MonitorInfo, WindowInfo, XcapBackend,
+    preferred_monitor,
 };
-pub use overlay::{FastOverlay, OverlayEvent, OverlaySession, Selection, select_region};
+pub use overlay::{
+    ActiveTool, FastOverlay, OverlayOutcome, OverlaySession, Selection, select_region,
+    select_region_with_windows,
+};
 pub use scroll::{ScrollCaptureEngine, StitchFrame};
