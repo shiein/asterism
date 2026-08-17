@@ -1,7 +1,9 @@
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use serde::{Deserialize, Serialize};
+use tiny_skia::Pixmap;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -11,6 +13,10 @@ use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::annotation::{Annotation, AnnotationKind, AnnotationScene};
 use crate::backend::{CaptureError, CapturedFrame, WindowInfo};
+use crate::hud::{self, Area, Hud, ToolbarAction, ToolbarLayout, ToolbarState};
+
+/// 遮罩亮度。太暗会让冻结帧看起来像"另一张图"，太亮又分不清选区。
+const DIM_FACTOR: u32 = 140; // out of 255 ≈ 0.55
 
 /// Native Fast Overlay：物理像素坐标选区
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,14 +70,6 @@ enum HandlePos {
     BottomRight,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct RectArea {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-}
-
 pub trait FastOverlay: Send {
     fn show_frozen(&mut self, frame: &CapturedFrame) -> Result<(), CaptureError>;
     fn take_outcome(&mut self) -> Option<OverlayOutcome>;
@@ -104,6 +102,21 @@ impl OverlaySession {
     }
 }
 
+/// 冻结帧来源。`Pending` 让调用方可以先把子进程/事件循环拉起来，
+/// 再把捕获结果送进来——进程启动与屏幕捕获因此可以重叠，
+/// 少掉一段"按下快捷键后什么都没发生"的空窗。
+pub enum FrameSource {
+    Ready(Box<CapturedFrame>),
+    Pending(Receiver<Result<CapturedFrame, String>>),
+}
+
+/// 窗口列表来源。`list_windows` 在 macOS 上可能要几百毫秒，
+/// 必须挪出"显示 overlay"的关键路径。
+pub enum WindowSource {
+    Ready(Vec<WindowInfo>),
+    Pending(Receiver<Vec<WindowInfo>>),
+}
+
 pub fn select_region(frame: &CapturedFrame) -> Result<Option<Selection>, CaptureError> {
     match select_region_with_windows(frame, &[])? {
         Some(OverlayOutcome::Complete { selection, .. })
@@ -118,9 +131,21 @@ pub fn select_region_with_windows(
     frame: &CapturedFrame,
     windows: &[WindowInfo],
 ) -> Result<Option<OverlayOutcome>, CaptureError> {
+    run_overlay(FrameSource::Ready(Box::new(frame.clone())), WindowSource::Ready(windows.to_vec()))
+}
+
+pub fn run_overlay(
+    frame: FrameSource,
+    windows: WindowSource,
+) -> Result<Option<OverlayOutcome>, CaptureError> {
     let event_loop = EventLoop::new().map_err(|e| CaptureError::Failed(e.to_string()))?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = OverlayApp::new(frame.clone(), windows.to_vec());
+    let waiting_for_frame = matches!(frame, FrameSource::Pending(_));
+    event_loop.set_control_flow(if waiting_for_frame {
+        ControlFlow::Poll
+    } else {
+        ControlFlow::Wait
+    });
+    let mut app = OverlayApp::new(frame, windows);
     event_loop.run_app(&mut app).map_err(|e| CaptureError::Failed(e.to_string()))?;
     if let Some(err) = app.fail {
         return Err(CaptureError::Failed(err));
@@ -129,40 +154,105 @@ pub fn select_region_with_windows(
 }
 
 struct OverlayApp {
-    frame: CapturedFrame,
+    frame: Option<CapturedFrame>,
+    frame_rx: Option<Receiver<Result<CapturedFrame, String>>>,
     windows: Vec<WindowInfo>,
+    windows_rx: Option<Receiver<Vec<WindowInfo>>>,
+
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    shown: bool,
+    hud: Hud,
 
-    // Selection state in Window coordinates
-    selection_rect: Option<RectArea>,
-    hover_window_rect: Option<RectArea>,
+    /// 预合成的两层画面，重绘时只做 memcpy，不再逐像素重算整屏。
+    layers: Option<Layers>,
 
-    // Mouse state
+    selection_rect: Option<Area>,
+    hover_window_rect: Option<Area>,
+    toolbar: Option<ToolbarLayout>,
+
     drag_mode: DragMode,
     drag_start: Option<(f64, f64)>,
     current_mouse: Option<(f64, f64)>,
     last_click_time: Option<std::time::Instant>,
 
-    // Tools and annotations
     active_tool: ActiveTool,
     annotations: Vec<Annotation>,
     current_stroke: Vec<f64>,
+    text_draft: Option<TextDraft>,
 
-    // Final outcome
     outcome: Option<OverlayOutcome>,
     fail: Option<String>,
 }
 
+struct TextDraft {
+    x: f64,
+    y: f64,
+    text: String,
+}
+
+struct Layers {
+    width: u32,
+    height: u32,
+    bright: Vec<u32>,
+    dimmed: Vec<u32>,
+}
+
+impl Layers {
+    fn build(frame: &CapturedFrame, width: u32, height: u32) -> Self {
+        let count = (width as usize) * (height as usize);
+        let mut bright = vec![0u32; count];
+        let mut dimmed = vec![0u32; count];
+        let same_size = frame.width == width && frame.height == height;
+        for y in 0..height {
+            let source_y =
+                if same_size { y } else { (y as u64 * frame.height as u64 / height as u64) as u32 };
+            for x in 0..width {
+                let source_x = if same_size {
+                    x
+                } else {
+                    (x as u64 * frame.width as u64 / width as u64) as u32
+                };
+                let i = ((source_y * frame.width + source_x) * 4) as usize;
+                let (b, g, r) = match frame.bgra.get(i..i + 3) {
+                    Some(px) => (u32::from(px[0]), u32::from(px[1]), u32::from(px[2])),
+                    None => (0, 0, 0),
+                };
+                let index = (y * width + x) as usize;
+                bright[index] = 0xFF00_0000 | (r << 16) | (g << 8) | b;
+                dimmed[index] = 0xFF00_0000
+                    | ((r * DIM_FACTOR / 255) << 16)
+                    | ((g * DIM_FACTOR / 255) << 8)
+                    | (b * DIM_FACTOR / 255);
+            }
+        }
+        Self { width, height, bright, dimmed }
+    }
+}
+
 impl OverlayApp {
-    fn new(frame: CapturedFrame, windows: Vec<WindowInfo>) -> Self {
+    fn new(frame: FrameSource, windows: WindowSource) -> Self {
+        let (frame, frame_rx) = match frame {
+            FrameSource::Ready(frame) => (Some(*frame), None),
+            FrameSource::Pending(rx) => (None, Some(rx)),
+        };
+        let (windows, windows_rx) = match windows {
+            WindowSource::Ready(list) => (list, None),
+            WindowSource::Pending(rx) => (Vec::new(), Some(rx)),
+        };
         Self {
             frame,
+            frame_rx,
             windows,
+            windows_rx,
             window: None,
             surface: None,
+            shown: false,
+            hud: Hud::new(1.0),
+            layers: None,
             selection_rect: None,
             hover_window_rect: None,
+            toolbar: None,
             drag_mode: DragMode::None,
             drag_start: None,
             current_mouse: None,
@@ -170,6 +260,7 @@ impl OverlayApp {
             active_tool: ActiveTool::None,
             annotations: Vec::new(),
             current_stroke: Vec::new(),
+            text_draft: None,
             outcome: None,
             fail: None,
         }
@@ -181,128 +272,19 @@ impl OverlayApp {
         event_loop.exit();
     }
 
-    fn translate_annotations_to_selection(&self) -> Vec<Annotation> {
-        let mut translated = self.annotations.clone();
-        if let (Some(area), Some(window)) = (self.selection_rect, &self.window) {
-            let win_size = window.inner_size();
-            if win_size.width > 0 && win_size.height > 0 {
-                let sx = self.frame.width as f64 / win_size.width as f64;
-                let sy = self.frame.height as f64 / win_size.height as f64;
-                for ann in &mut translated {
-                    match ann.kind {
-                        AnnotationKind::Rectangle | AnnotationKind::Ellipse => {
-                            if ann.geometry.len() >= 4 {
-                                ann.geometry[0] = (ann.geometry[0] - area.x) * sx;
-                                ann.geometry[1] = (ann.geometry[1] - area.y) * sy;
-                                ann.geometry[2] *= sx;
-                                ann.geometry[3] *= sy;
-                            }
-                        }
-                        AnnotationKind::Arrow
-                        | AnnotationKind::Brush
-                        | AnnotationKind::Mosaic
-                        | AnnotationKind::Text => {
-                            for chunk in ann.geometry.chunks_exact_mut(2) {
-                                chunk[0] = (chunk[0] - area.x) * sx;
-                                chunk[1] = (chunk[1] - area.y) * sy;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        translated
-    }
-
-    fn commit_outcome_and_exit(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        mut outcome: OverlayOutcome,
-    ) {
-        let translated = self.translate_annotations_to_selection();
-        match &mut outcome {
-            OverlayOutcome::Complete { scene, .. }
-            | OverlayOutcome::Download { scene, .. }
-            | OverlayOutcome::Pin { scene, .. } => {
-                scene.items = translated;
-            }
-            _ => {}
-        }
-        self.outcome = Some(outcome);
-        event_loop.exit();
-    }
-
-    fn cancel_and_exit(&mut self, event_loop: &ActiveEventLoop) {
-        self.outcome = Some(OverlayOutcome::Cancel);
-        event_loop.exit();
-    }
-
-    fn current_selection_in_frame(&self) -> Option<Selection> {
-        let area = self.selection_rect?;
-        let window = self.window.as_ref()?;
-        let win_size = window.inner_size();
-        if win_size.width == 0 || win_size.height == 0 {
-            return None;
-        }
-        let sx = self.frame.width as f64 / win_size.width as f64;
-        let sy = self.frame.height as f64 / win_size.height as f64;
-        let fx = (area.x * sx).floor().clamp(0.0, self.frame.width.saturating_sub(1) as f64);
-        let fy = (area.y * sy).floor().clamp(0.0, self.frame.height.saturating_sub(1) as f64);
-        let fw = (area.width * sx).round().clamp(1.0, (self.frame.width as f64 - fx).max(1.0));
-        let fh = (area.height * sy).round().clamp(1.0, (self.frame.height as f64 - fy).max(1.0));
-        Some(Selection { x: fx, y: fy, width: fw, height: fh })
-    }
-
-    fn find_window_under_cursor(&self, px: f64, py: f64) -> Option<RectArea> {
-        let window = self.window.as_ref()?;
-        let win_size = window.inner_size();
-        if win_size.width == 0 || win_size.height == 0 {
-            return None;
-        }
-        let origin_x = self.frame.monitor.origin_physical.0 as f64;
-        let origin_y = self.frame.monitor.origin_physical.1 as f64;
-        let phys_x = origin_x + (px * (self.frame.width as f64 / win_size.width as f64));
-        let phys_y = origin_y + (py * (self.frame.height as f64 / win_size.height as f64));
-
-        for win in self.windows.iter() {
-            let wx = win.position.0 as f64;
-            let wy = win.position.1 as f64;
-            let ww = win.size.0 as f64;
-            let wh = win.size.1 as f64;
-            if ww > 30.0
-                && wh > 30.0
-                && phys_x >= wx
-                && phys_x <= wx + ww
-                && phys_y >= wy
-                && phys_y <= wy + wh
-            {
-                let sx = win_size.width as f64 / self.frame.width as f64;
-                let sy = win_size.height as f64 / self.frame.height as f64;
-                let lx = ((wx - origin_x) * sx).clamp(0.0, win_size.width as f64);
-                let ly = ((wy - origin_y) * sy).clamp(0.0, win_size.height as f64);
-                let lw = (ww * sx).clamp(0.0, win_size.width as f64 - lx);
-                let lh = (wh * sy).clamp(0.0, win_size.height as f64 - ly);
-                if lw >= 20.0 && lh >= 20.0 {
-                    return Some(RectArea { x: lx, y: ly, width: lw, height: lh });
-                }
-            }
-        }
-        None
-    }
-}
-
-impl ApplicationHandler for OverlayApp {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let target = overlay_monitor(event_loop, self.frame.monitor.origin_physical);
+    /// 创建冻结窗口。窗口先隐藏、画完首帧再显示，
+    /// 避免用户看到"空白/上一帧窗口先出现，然后才盖上截图"的两段式过程。
+    fn create_window(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(frame) = self.frame.as_ref() else { return };
+        let target = overlay_monitor(event_loop, frame.monitor.origin_physical);
         let (pos, size) = match target.as_ref() {
             Some(monitor) => (monitor.position(), monitor.size()),
             None => (
                 PhysicalPosition::new(
-                    self.frame.monitor.origin_physical.0,
-                    self.frame.monitor.origin_physical.1,
+                    frame.monitor.origin_physical.0,
+                    frame.monitor.origin_physical.1,
                 ),
-                PhysicalSize::new(self.frame.width.max(1), self.frame.height.max(1)),
+                PhysicalSize::new(frame.width.max(1), frame.height.max(1)),
             ),
         };
         let mut attrs = Window::default_attributes()
@@ -310,6 +292,7 @@ impl ApplicationHandler for OverlayApp {
             .with_decorations(false)
             .with_resizable(false)
             .with_transparent(false)
+            .with_visible(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
             .with_position(pos)
             .with_inner_size(size);
@@ -352,334 +335,639 @@ impl ApplicationHandler for OverlayApp {
                 return;
             }
         };
+        self.hud = Hud::new(window.scale_factor());
         self.window = Some(window);
         self.surface = Some(surface);
+        event_loop.set_control_flow(ControlFlow::Wait);
         self.redraw();
+        self.reveal();
+    }
+
+    fn reveal(&mut self) {
+        if self.shown {
+            return;
+        }
+        if let Some(window) = self.window.clone() {
+            window.set_visible(true);
+            window.focus_window();
+            self.shown = true;
+            // 显示后再提交一帧，规避某些平台上"隐藏窗口的首帧被丢弃"。
+            self.redraw();
+        }
+    }
+
+    fn surface_size(&self) -> (u32, u32) {
+        self.window
+            .as_ref()
+            .map(|window| {
+                let size = window.inner_size();
+                (size.width, size.height)
+            })
+            .unwrap_or((0, 0))
+    }
+
+    /// 帧像素 / 窗口像素。正常情况是 1.0，只有捕获分辨率与窗口不一致时才生效。
+    fn frame_scale(&self) -> (f64, f64) {
+        let (w, h) = self.surface_size();
+        match (self.frame.as_ref(), w, h) {
+            (Some(frame), w, h) if w > 0 && h > 0 => {
+                (f64::from(frame.width) / f64::from(w), f64::from(frame.height) / f64::from(h))
+            }
+            _ => (1.0, 1.0),
+        }
+    }
+
+    fn translate_annotations_to_selection(&self) -> Vec<Annotation> {
+        let mut translated = self.annotations.clone();
+        let (Some(area), (sx, sy)) = (self.selection_rect, self.frame_scale()) else {
+            return translated;
+        };
+        for ann in &mut translated {
+            match ann.kind {
+                AnnotationKind::Rectangle | AnnotationKind::Ellipse => {
+                    if ann.geometry.len() >= 4 {
+                        ann.geometry[0] = (ann.geometry[0] - area.x) * sx;
+                        ann.geometry[1] = (ann.geometry[1] - area.y) * sy;
+                        ann.geometry[2] *= sx;
+                        ann.geometry[3] *= sy;
+                    }
+                }
+                AnnotationKind::Arrow
+                | AnnotationKind::Brush
+                | AnnotationKind::Mosaic
+                | AnnotationKind::Text => {
+                    for chunk in ann.geometry.chunks_exact_mut(2) {
+                        chunk[0] = (chunk[0] - area.x) * sx;
+                        chunk[1] = (chunk[1] - area.y) * sy;
+                    }
+                }
+                _ => {}
+            }
+        }
+        translated
+    }
+
+    fn commit_outcome_and_exit(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        mut outcome: OverlayOutcome,
+    ) {
+        self.commit_text_draft();
+        let translated = self.translate_annotations_to_selection();
+        match &mut outcome {
+            OverlayOutcome::Complete { scene, .. }
+            | OverlayOutcome::Download { scene, .. }
+            | OverlayOutcome::Pin { scene, .. } => {
+                scene.items = translated;
+            }
+            _ => {}
+        }
+        self.outcome = Some(outcome);
+        event_loop.exit();
+    }
+
+    fn complete(&mut self, event_loop: &ActiveEventLoop) {
+        self.commit_text_draft();
+        if let Some(selection) = self.current_selection_in_frame() {
+            self.commit_outcome_and_exit(
+                event_loop,
+                OverlayOutcome::Complete {
+                    selection,
+                    scene: AnnotationScene { items: self.annotations.clone() },
+                },
+            );
+        }
+    }
+
+    fn cancel_and_exit(&mut self, event_loop: &ActiveEventLoop) {
+        self.outcome = Some(OverlayOutcome::Cancel);
+        event_loop.exit();
+    }
+
+    /// Esc / 右键的统一退避顺序：文字草稿 → 工具 → 选区 → 退出。
+    fn step_back(&mut self, event_loop: &ActiveEventLoop) {
+        if self.text_draft.is_some() {
+            self.text_draft = None;
+        } else if self.active_tool != ActiveTool::None {
+            self.active_tool = ActiveTool::None;
+        } else if self.selection_rect.is_some() {
+            self.selection_rect = None;
+            self.toolbar = None;
+            self.annotations.clear();
+        } else {
+            self.cancel_and_exit(event_loop);
+            return;
+        }
+        self.redraw();
+    }
+
+    fn current_selection_in_frame(&self) -> Option<Selection> {
+        let area = self.selection_rect?;
+        let frame = self.frame.as_ref()?;
+        let (sx, sy) = self.frame_scale();
+        let fx = (area.x * sx).floor().clamp(0.0, frame.width.saturating_sub(1) as f64);
+        let fy = (area.y * sy).floor().clamp(0.0, frame.height.saturating_sub(1) as f64);
+        let fw = (area.width * sx).round().clamp(1.0, (f64::from(frame.width) - fx).max(1.0));
+        let fh = (area.height * sy).round().clamp(1.0, (f64::from(frame.height) - fy).max(1.0));
+        Some(Selection { x: fx, y: fy, width: fw, height: fh })
+    }
+
+    fn find_window_under_cursor(&self, px: f64, py: f64) -> Option<Area> {
+        let frame = self.frame.as_ref()?;
+        let (win_w, win_h) = self.surface_size();
+        if win_w == 0 || win_h == 0 {
+            return None;
+        }
+        let origin_x = f64::from(frame.monitor.origin_physical.0);
+        let origin_y = f64::from(frame.monitor.origin_physical.1);
+        let (fx, fy) = self.frame_scale();
+        let phys_x = origin_x + px * fx;
+        let phys_y = origin_y + py * fy;
+
+        let mut best: Option<Area> = None;
+        for win in self.windows.iter() {
+            let wx = f64::from(win.position.0);
+            let wy = f64::from(win.position.1);
+            let ww = f64::from(win.size.0);
+            let wh = f64::from(win.size.1);
+            if ww <= 30.0
+                || wh <= 30.0
+                || phys_x < wx
+                || phys_x > wx + ww
+                || phys_y < wy
+                || phys_y > wy + wh
+            {
+                continue;
+            }
+            let sx = f64::from(win_w) / f64::from(frame.width);
+            let sy = f64::from(win_h) / f64::from(frame.height);
+            let lx = ((wx - origin_x) * sx).clamp(0.0, f64::from(win_w));
+            let ly = ((wy - origin_y) * sy).clamp(0.0, f64::from(win_h));
+            let lw = (ww * sx).clamp(0.0, f64::from(win_w) - lx);
+            let lh = (wh * sy).clamp(0.0, f64::from(win_h) - ly);
+            if lw >= 20.0 && lh >= 20.0 {
+                best = Some(Area { x: lx, y: ly, width: lw, height: lh });
+                break;
+            }
+        }
+        best
+    }
+
+    fn clamp_to_selection(&self, x: f64, y: f64) -> (f64, f64) {
+        match self.selection_rect {
+            Some(area) => (x.clamp(area.x, area.right()), y.clamp(area.y, area.bottom())),
+            None => (x, y),
+        }
+    }
+
+    fn mosaic_block(&self) -> u64 {
+        let (sx, _) = self.frame_scale();
+        ((10.0 * self.hud.px(1.0) * sx).round() as u64).clamp(8, 64)
+    }
+
+    fn commit_text_draft(&mut self) {
+        let Some(draft) = self.text_draft.take() else { return };
+        if draft.text.is_empty() {
+            return;
+        }
+        let index = self.annotations.len();
+        self.annotations.push(Annotation {
+            id: format!("ann_{index}"),
+            kind: AnnotationKind::Text,
+            geometry: vec![draft.x, draft.y],
+            style: serde_json::json!({
+                "text": draft.text,
+                "color_r": 255, "color_g": 59, "color_b": 48,
+                "font_scale": self.hud.text_scale(),
+            }),
+            z_index: index as i32,
+        });
+    }
+
+    fn undo(&mut self) {
+        if self.text_draft.is_some() {
+            self.text_draft = None;
+        } else {
+            self.annotations.pop();
+        }
+        self.redraw();
+    }
+
+    fn set_tool(&mut self, tool: ActiveTool) {
+        self.commit_text_draft();
+        self.active_tool = if self.active_tool == tool { ActiveTool::None } else { tool };
+        self.redraw();
+    }
+
+    fn handle_toolbar(&mut self, event_loop: &ActiveEventLoop, action: ToolbarAction) {
+        match action {
+            ToolbarAction::SetTool(tool) => self.set_tool(tool),
+            ToolbarAction::Undo => self.undo(),
+            ToolbarAction::Scroll => {
+                if let Some(selection) = self.current_selection_in_frame() {
+                    self.commit_outcome_and_exit(event_loop, OverlayOutcome::Scroll { selection });
+                }
+            }
+            ToolbarAction::Save => {
+                self.commit_text_draft();
+                if let Some(selection) = self.current_selection_in_frame() {
+                    self.commit_outcome_and_exit(
+                        event_loop,
+                        OverlayOutcome::Download {
+                            selection,
+                            scene: AnnotationScene { items: self.annotations.clone() },
+                        },
+                    );
+                }
+            }
+            ToolbarAction::Pin => {
+                self.commit_text_draft();
+                if let Some(selection) = self.current_selection_in_frame() {
+                    self.commit_outcome_and_exit(
+                        event_loop,
+                        OverlayOutcome::Pin {
+                            selection,
+                            scene: AnnotationScene { items: self.annotations.clone() },
+                        },
+                    );
+                }
+            }
+            ToolbarAction::Cancel => self.cancel_and_exit(event_loop),
+            ToolbarAction::Done => self.complete(event_loop),
+        }
+    }
+
+    fn on_key(&mut self, event_loop: &ActiveEventLoop, key: &Key, text: Option<&str>) {
+        // 文字草稿优先吃掉所有按键，否则输入 "r" 会切成矩形工具。
+        if self.text_draft.is_some() {
+            match key {
+                Key::Named(NamedKey::Escape) => {
+                    self.text_draft = None;
+                    self.redraw();
+                }
+                Key::Named(NamedKey::Enter) => {
+                    self.commit_text_draft();
+                    self.redraw();
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    if let Some(draft) = self.text_draft.as_mut() {
+                        draft.text.pop();
+                    }
+                    self.redraw();
+                }
+                Key::Named(NamedKey::Space) => {
+                    if let Some(draft) = self.text_draft.as_mut() {
+                        draft.text.push(' ');
+                    }
+                    self.redraw();
+                }
+                _ => {
+                    // 位图字体只有 ASCII。直接丢弃其他输入，
+                    // 不让 overlay 里显示的内容和导出结果不一致。
+                    if let Some(text) = text {
+                        let printable: String =
+                            text.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').collect();
+                        if !printable.is_empty()
+                            && let Some(draft) = self.text_draft.as_mut()
+                        {
+                            draft.text.push_str(&printable);
+                            self.redraw();
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        match key {
+            Key::Named(NamedKey::Escape) => self.step_back(event_loop),
+            Key::Named(NamedKey::Enter) => self.complete(event_loop),
+            Key::Character(ch) => match ch.as_str().to_ascii_lowercase().as_str() {
+                "r" => self.set_tool(ActiveTool::Rectangle),
+                "e" => self.set_tool(ActiveTool::Ellipse),
+                "a" => self.set_tool(ActiveTool::Arrow),
+                "p" => self.set_tool(ActiveTool::Brush),
+                "m" => self.set_tool(ActiveTool::Mosaic),
+                "t" => self.set_tool(ActiveTool::Text),
+                "z" => self.undo(),
+                "s" => {
+                    if let Some(selection) = self.current_selection_in_frame() {
+                        self.commit_outcome_and_exit(
+                            event_loop,
+                            OverlayOutcome::Scroll { selection },
+                        );
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn on_press(&mut self, event_loop: &ActiveEventLoop) {
+        let Some((mx, my)) = self.current_mouse else { return };
+        let now = std::time::Instant::now();
+        let double_click =
+            self.last_click_time.is_some_and(|last| now.duration_since(last).as_millis() < 300);
+        self.last_click_time = Some(now);
+        self.drag_start = Some((mx, my));
+
+        if let Some(area) = self.selection_rect {
+            if let Some(action) = self.toolbar.as_ref().and_then(|bar| bar.hit(mx, my)) {
+                self.handle_toolbar(event_loop, action);
+                return;
+            }
+            // 点在工具栏空白处不应该穿透成"画一笔"。
+            if self.toolbar.as_ref().is_some_and(|bar| bar.contains(mx, my)) {
+                return;
+            }
+
+            if double_click && self.active_tool == ActiveTool::None && area.contains(mx, my) {
+                self.complete(event_loop);
+                return;
+            }
+
+            if self.active_tool == ActiveTool::Text {
+                self.commit_text_draft();
+                if area.contains(mx, my) {
+                    let (x, y) = self.clamp_to_selection(mx, my);
+                    self.text_draft = Some(TextDraft { x, y, text: String::new() });
+                    self.redraw();
+                }
+                return;
+            }
+
+            if self.active_tool != ActiveTool::None {
+                let (x, y) = self.clamp_to_selection(mx, my);
+                self.drag_mode = DragMode::Drawing;
+                self.current_stroke = vec![x, y];
+                return;
+            }
+
+            if let Some(handle) = self.hit_handle(mx, my, area) {
+                self.drag_mode = DragMode::Resizing(handle);
+                return;
+            }
+
+            if area.contains(mx, my) {
+                self.drag_mode = DragMode::Moving;
+                return;
+            }
+        }
+
+        if let Some(hover) = self.hover_window_rect {
+            self.selection_rect = Some(hover);
+        }
+        self.annotations.clear();
+        self.text_draft = None;
+        self.hover_window_rect = None;
+        self.drag_mode = DragMode::Creating;
+    }
+
+    fn on_release(&mut self) {
+        match self.drag_mode {
+            DragMode::Creating => {
+                if let (Some(a), Some(b)) = (self.drag_start, self.current_mouse) {
+                    let dx = (a.0 - b.0).abs();
+                    let dy = (a.1 - b.1).abs();
+                    if dx > 8.0 && dy > 8.0 {
+                        self.selection_rect =
+                            Some(Area { x: a.0.min(b.0), y: a.1.min(b.1), width: dx, height: dy });
+                    } else {
+                        // 点一下没拖动：优先吸附窗口，否则回到"没有选区"，
+                        // 而不是留下一个几像素大的废选区。
+                        self.selection_rect = self
+                            .hover_window_rect
+                            .or_else(|| self.find_window_under_cursor(b.0, b.1));
+                    }
+                }
+            }
+            DragMode::Drawing => {
+                if let (Some(a), Some(b)) = (self.drag_start, self.current_mouse) {
+                    let start = self.clamp_to_selection(a.0, a.1);
+                    let end = self.clamp_to_selection(b.0, b.1);
+                    if let Some(ann) = self.create_annotation(start, end, self.annotations.len()) {
+                        self.annotations.push(ann);
+                    }
+                    self.current_stroke.clear();
+                }
+            }
+            _ => {}
+        }
+        self.drag_mode = DragMode::None;
+        self.drag_start = None;
+        self.redraw();
+    }
+
+    fn hit_handle(&self, mx: f64, my: f64, area: Area) -> Option<HandlePos> {
+        let tolerance = self.hud.px(11.0);
+        let order = [
+            HandlePos::TopLeft,
+            HandlePos::TopCenter,
+            HandlePos::TopRight,
+            HandlePos::MidLeft,
+            HandlePos::MidRight,
+            HandlePos::BottomLeft,
+            HandlePos::BottomCenter,
+            HandlePos::BottomRight,
+        ];
+        hud::handle_points(area)
+            .iter()
+            .zip(order)
+            .find(|((hx, hy), _)| (mx - hx).abs() <= tolerance && (my - hy).abs() <= tolerance)
+            .map(|(_, pos)| pos)
+    }
+
+    fn create_annotation(
+        &self,
+        start: (f64, f64),
+        end: (f64, f64),
+        index: usize,
+    ) -> Option<Annotation> {
+        let id = format!("ann_{index}");
+        let stroke_width = self.hud.px(3.0);
+        let color = serde_json::json!({"color_r": 255, "color_g": 59, "color_b": 48});
+        let style = |extra: serde_json::Value| {
+            let mut merged = color.clone();
+            if let (Some(base), Some(extra)) = (merged.as_object_mut(), extra.as_object()) {
+                for (key, value) in extra {
+                    base.insert(key.clone(), value.clone());
+                }
+            }
+            merged
+        };
+        match self.active_tool {
+            ActiveTool::Rectangle | ActiveTool::Ellipse => {
+                let x = start.0.min(end.0);
+                let y = start.1.min(end.1);
+                let w = (start.0 - end.0).abs();
+                let h = (start.1 - end.1).abs();
+                if w < 2.0 || h < 2.0 {
+                    return None;
+                }
+                Some(Annotation {
+                    id,
+                    kind: if self.active_tool == ActiveTool::Rectangle {
+                        AnnotationKind::Rectangle
+                    } else {
+                        AnnotationKind::Ellipse
+                    },
+                    geometry: vec![x, y, w, h],
+                    style: style(serde_json::json!({"stroke_width": stroke_width})),
+                    z_index: index as i32,
+                })
+            }
+            ActiveTool::Arrow => {
+                if (start.0 - end.0).abs() < 3.0 && (start.1 - end.1).abs() < 3.0 {
+                    return None;
+                }
+                Some(Annotation {
+                    id,
+                    kind: AnnotationKind::Arrow,
+                    geometry: vec![start.0, start.1, end.0, end.1],
+                    style: style(serde_json::json!({"stroke_width": stroke_width})),
+                    z_index: index as i32,
+                })
+            }
+            ActiveTool::Brush => {
+                if self.current_stroke.len() < 4 {
+                    return None;
+                }
+                Some(Annotation {
+                    id,
+                    kind: AnnotationKind::Brush,
+                    geometry: self.current_stroke.clone(),
+                    style: style(serde_json::json!({"stroke_width": stroke_width})),
+                    z_index: index as i32,
+                })
+            }
+            ActiveTool::Mosaic => {
+                if self.current_stroke.len() < 2 {
+                    return None;
+                }
+                let block = self.mosaic_block();
+                Some(Annotation {
+                    id,
+                    kind: AnnotationKind::Mosaic,
+                    geometry: self.current_stroke.clone(),
+                    style: serde_json::json!({
+                        "brush_radius": (block * 3 / 2) as f64,
+                        "block_size": block,
+                    }),
+                    z_index: index as i32,
+                })
+            }
+            ActiveTool::Text | ActiveTool::None => None,
+        }
+    }
+}
+
+impl ApplicationHandler for OverlayApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_none() && self.frame.is_some() {
+            self.create_window(event_loop);
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(rx) = self.windows_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(list) => {
+                    self.windows = list;
+                    self.windows_rx = None;
+                }
+                Err(TryRecvError::Disconnected) => self.windows_rx = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        if self.window.is_some() || self.frame.is_some() {
+            if self.window.is_none() {
+                self.create_window(event_loop);
+            }
+            return;
+        }
+        let Some(rx) = self.frame_rx.as_ref() else {
+            self.fail_and_exit(event_loop, "overlay frame source closed".into());
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(frame)) => {
+                self.frame = Some(frame);
+                self.frame_rx = None;
+                self.create_window(event_loop);
+            }
+            Ok(Err(err)) => {
+                self.frame_rx = None;
+                self.fail_and_exit(event_loop, err);
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.frame_rx = None;
+                self.fail_and_exit(event_loop, "overlay frame producer disconnected".into());
+            }
+            Err(TryRecvError::Empty) => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => {
-                self.cancel_and_exit(event_loop);
-            }
+            WindowEvent::CloseRequested => self.cancel_and_exit(event_loop),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                match event.logical_key {
-                    Key::Named(NamedKey::Escape) => {
-                        if self.active_tool != ActiveTool::None {
-                            self.active_tool = ActiveTool::None;
-                            self.redraw();
-                        } else if self.selection_rect.is_some() {
-                            self.selection_rect = None;
-                            self.annotations.clear();
-                            self.redraw();
-                        } else {
-                            self.cancel_and_exit(event_loop);
-                        }
-                    }
-                    Key::Named(NamedKey::Enter) => {
-                        if let Some(selection) = self.current_selection_in_frame() {
-                            self.commit_outcome_and_exit(
-                                event_loop,
-                                OverlayOutcome::Complete {
-                                    selection,
-                                    scene: AnnotationScene { items: self.annotations.clone() },
-                                },
-                            );
-                        }
-                    }
-                    Key::Character(ref ch) => match ch.as_str().to_lowercase().as_str() {
-                        "r" => {
-                            self.active_tool = ActiveTool::Rectangle;
-                            self.redraw();
-                        }
-                        "e" => {
-                            self.active_tool = ActiveTool::Ellipse;
-                            self.redraw();
-                        }
-                        "a" => {
-                            self.active_tool = ActiveTool::Arrow;
-                            self.redraw();
-                        }
-                        "p" => {
-                            self.active_tool = ActiveTool::Brush;
-                            self.redraw();
-                        }
-                        "m" => {
-                            self.active_tool = ActiveTool::Mosaic;
-                            self.redraw();
-                        }
-                        "t" => {
-                            self.active_tool = ActiveTool::Text;
-                            self.redraw();
-                        }
-                        "s" => {
-                            if let Some(selection) = self.current_selection_in_frame() {
-                                self.commit_outcome_and_exit(
-                                    event_loop,
-                                    OverlayOutcome::Scroll { selection },
-                                );
-                            }
-                        }
-                        "z" => {
-                            self.annotations.pop();
-                            self.redraw();
-                        }
-                        _ => {}
-                    },
-                    _ => {}
-                }
+                let key = event.logical_key.clone();
+                let text = event.text.as_ref().map(|text| text.to_string());
+                self.on_key(event_loop, &key, text.as_deref());
             }
-            WindowEvent::MouseInput { state, button, .. } => {
-                if button == MouseButton::Right && state == ElementState::Pressed {
-                    if self.active_tool != ActiveTool::None {
-                        self.active_tool = ActiveTool::None;
-                        self.redraw();
-                    } else if self.selection_rect.is_some() {
-                        self.selection_rect = None;
-                        self.annotations.clear();
-                        self.redraw();
-                    } else {
-                        self.cancel_and_exit(event_loop);
-                    }
-                    return;
-                }
-
-                if button == MouseButton::Left {
-                    match state {
-                        ElementState::Pressed => {
-                            let now = std::time::Instant::now();
-                            if let (Some(last), Some((mx, my))) =
-                                (self.last_click_time, self.current_mouse)
-                                && now.duration_since(last).as_millis() < 300
-                                && let Some(area) = self.selection_rect
-                                && mx >= area.x
-                                && mx <= area.x + area.width
-                                && my >= area.y
-                                && my <= area.y + area.height
-                                && self.active_tool == ActiveTool::None
-                                && let Some(selection) = self.current_selection_in_frame()
-                            {
-                                self.commit_outcome_and_exit(
-                                    event_loop,
-                                    OverlayOutcome::Complete {
-                                        selection,
-                                        scene: AnnotationScene { items: self.annotations.clone() },
-                                    },
-                                );
-                                return;
-                            }
-                            self.last_click_time = Some(now);
-
-                            let Some((mx, my)) = self.current_mouse else { return };
-                            self.drag_start = Some((mx, my));
-
-                            // If selection is established, check if clicking on toolbar buttons
-                            if let Some(area) = self.selection_rect {
-                                let dh = self
-                                    .window
-                                    .as_ref()
-                                    .map(|w| w.inner_size().height as f64)
-                                    .unwrap_or(2160.0);
-                                if let Some(action) = check_toolbar_click(mx, my, area, dh) {
-                                    match action {
-                                        ToolbarAction::SetTool(t) => {
-                                            self.active_tool = if self.active_tool == t {
-                                                ActiveTool::None
-                                            } else {
-                                                t
-                                            };
-                                            self.redraw();
-                                        }
-                                        ToolbarAction::Scroll => {
-                                            if let Some(selection) =
-                                                self.current_selection_in_frame()
-                                            {
-                                                self.commit_outcome_and_exit(
-                                                    event_loop,
-                                                    OverlayOutcome::Scroll { selection },
-                                                );
-                                            }
-                                        }
-                                        ToolbarAction::Undo => {
-                                            self.annotations.pop();
-                                            self.redraw();
-                                        }
-                                        ToolbarAction::Download => {
-                                            if let Some(selection) =
-                                                self.current_selection_in_frame()
-                                            {
-                                                self.commit_outcome_and_exit(
-                                                    event_loop,
-                                                    OverlayOutcome::Download {
-                                                        selection,
-                                                        scene: AnnotationScene {
-                                                            items: self.annotations.clone(),
-                                                        },
-                                                    },
-                                                );
-                                            }
-                                        }
-                                        ToolbarAction::Pin => {
-                                            if let Some(selection) =
-                                                self.current_selection_in_frame()
-                                            {
-                                                self.commit_outcome_and_exit(
-                                                    event_loop,
-                                                    OverlayOutcome::Pin {
-                                                        selection,
-                                                        scene: AnnotationScene {
-                                                            items: self.annotations.clone(),
-                                                        },
-                                                    },
-                                                );
-                                            }
-                                        }
-                                        ToolbarAction::Cancel => {
-                                            self.cancel_and_exit(event_loop);
-                                        }
-                                        ToolbarAction::Done => {
-                                            if let Some(selection) =
-                                                self.current_selection_in_frame()
-                                            {
-                                                self.commit_outcome_and_exit(
-                                                    event_loop,
-                                                    OverlayOutcome::Complete {
-                                                        selection,
-                                                        scene: AnnotationScene {
-                                                            items: self.annotations.clone(),
-                                                        },
-                                                    },
-                                                );
-                                            }
-                                        }
-                                    }
-                                    return;
-                                }
-
-                                if self.active_tool != ActiveTool::None {
-                                    // Start drawing annotation within selection
-                                    self.drag_mode = DragMode::Drawing;
-                                    self.current_stroke = vec![mx, my];
-                                    return;
-                                }
-
-                                // Check resize handles
-                                if let Some(handle) = check_handle_hit(mx, my, area) {
-                                    self.drag_mode = DragMode::Resizing(handle);
-                                    return;
-                                }
-
-                                // Check inside selection for moving
-                                if mx >= area.x
-                                    && mx <= area.x + area.width
-                                    && my >= area.y
-                                    && my <= area.y + area.height
-                                {
-                                    self.drag_mode = DragMode::Moving;
-                                    return;
-                                }
-                            }
-
-                            // Otherwise, if hovering over snapped window, snap immediately or start creating
-                            if let Some(hover) = self.hover_window_rect {
-                                self.selection_rect = Some(hover);
-                            }
-                            self.annotations.clear();
-                            self.hover_window_rect = None;
-                            self.drag_mode = DragMode::Creating;
-                        }
-                        ElementState::Released => {
-                            match self.drag_mode {
-                                DragMode::Creating => {
-                                    if let (Some(a), Some(b)) =
-                                        (self.drag_start, self.current_mouse)
-                                    {
-                                        let dx = (a.0 - b.0).abs();
-                                        let dy = (a.1 - b.1).abs();
-                                        if dx > 8.0 && dy > 8.0 {
-                                            let x = a.0.min(b.0);
-                                            let y = a.1.min(b.1);
-                                            self.selection_rect =
-                                                Some(RectArea { x, y, width: dx, height: dy });
-                                        } else if let Some(hover) = self.hover_window_rect {
-                                            self.selection_rect = Some(hover);
-                                        }
-                                    }
-                                }
-                                DragMode::Drawing => {
-                                    if let (Some(a), Some(b)) =
-                                        (self.drag_start, self.current_mouse)
-                                    {
-                                        if let Some(ann) = create_annotation(
-                                            self.active_tool,
-                                            a,
-                                            b,
-                                            &self.current_stroke,
-                                            self.annotations.len(),
-                                        ) {
-                                            self.annotations.push(ann);
-                                        }
-                                        self.current_stroke.clear();
-                                    }
-                                }
-                                _ => {}
-                            }
-                            self.drag_mode = DragMode::None;
-                            self.drag_start = None;
-                            self.redraw();
-                        }
-                    }
-                }
-            }
+            WindowEvent::MouseInput { state, button, .. } => match (button, state) {
+                (MouseButton::Right, ElementState::Pressed) => self.step_back(event_loop),
+                (MouseButton::Left, ElementState::Pressed) => self.on_press(event_loop),
+                (MouseButton::Left, ElementState::Released) => self.on_release(),
+                _ => {}
+            },
             WindowEvent::CursorMoved { position, .. } => {
-                let px = position.x;
-                let py = position.y;
+                let (px, py) = (position.x, position.y);
                 self.current_mouse = Some((px, py));
-
                 match self.drag_mode {
                     DragMode::Creating => {
                         if let Some(start) = self.drag_start {
-                            let x = start.0.min(px);
-                            let y = start.1.min(py);
-                            let w = (start.0 - px).abs();
-                            let h = (start.1 - py).abs();
-                            self.selection_rect = Some(RectArea { x, y, width: w, height: h });
+                            self.selection_rect = Some(Area {
+                                x: start.0.min(px),
+                                y: start.1.min(py),
+                                width: (start.0 - px).abs(),
+                                height: (start.1 - py).abs(),
+                            });
                         }
-                        self.redraw();
                     }
                     DragMode::Moving => {
                         if let (Some(start), Some(area)) = (self.drag_start, self.selection_rect) {
+                            let (sw, sh) = self.surface_size();
                             let dx = px - start.0;
                             let dy = py - start.1;
-                            self.selection_rect = Some(RectArea {
-                                x: area.x + dx,
-                                y: area.y + dy,
-                                width: area.width,
-                                height: area.height,
-                            });
+                            let x = (area.x + dx).clamp(0.0, (f64::from(sw) - area.width).max(0.0));
+                            let y =
+                                (area.y + dy).clamp(0.0, (f64::from(sh) - area.height).max(0.0));
+                            self.selection_rect =
+                                Some(Area { x, y, width: area.width, height: area.height });
                             self.drag_start = Some((px, py));
                         }
-                        self.redraw();
                     }
                     DragMode::Resizing(handle) => {
                         if let Some(area) = self.selection_rect {
-                            let next = resize_rect(area, handle, px, py);
-                            self.selection_rect = Some(next);
+                            self.selection_rect = Some(resize_area(area, handle, px, py));
                         }
-                        self.redraw();
                     }
                     DragMode::Drawing => {
-                        self.current_stroke.push(px);
-                        self.current_stroke.push(py);
-                        self.redraw();
+                        let (x, y) = self.clamp_to_selection(px, py);
+                        self.current_stroke.push(x);
+                        self.current_stroke.push(y);
                     }
                     DragMode::None => {
                         if self.selection_rect.is_none() {
                             self.hover_window_rect = self.find_window_under_cursor(px, py);
                         }
-                        self.redraw();
                     }
                 }
+                self.redraw();
             }
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
@@ -687,769 +975,290 @@ impl ApplicationHandler for OverlayApp {
     }
 }
 
-enum ToolbarAction {
-    SetTool(ActiveTool),
-    Scroll,
-    Undo,
-    Download,
-    Pin,
-    Cancel,
-    Done,
-}
-
-fn check_toolbar_click(mx: f64, my: f64, area: RectArea, dh: f64) -> Option<ToolbarAction> {
-    let tb = toolbar_bounds(area, dh);
-    if mx < tb.x || mx > tb.x + tb.width || my < tb.y || my > tb.y + tb.height {
-        return None;
-    }
-    let offset = mx - tb.x - 4.0;
-    if offset < 192.0 {
-        let idx = (offset / 32.0).floor() as usize;
-        match idx {
-            0 => Some(ToolbarAction::SetTool(ActiveTool::Rectangle)),
-            1 => Some(ToolbarAction::SetTool(ActiveTool::Ellipse)),
-            2 => Some(ToolbarAction::SetTool(ActiveTool::Arrow)),
-            3 => Some(ToolbarAction::SetTool(ActiveTool::Brush)),
-            4 => Some(ToolbarAction::SetTool(ActiveTool::Mosaic)),
-            5 => Some(ToolbarAction::SetTool(ActiveTool::Text)),
-            _ => None,
-        }
-    } else if offset >= 200.0 {
-        let idx = ((offset - 200.0) / 32.0).floor() as usize;
-        match idx {
-            0 => Some(ToolbarAction::Scroll),
-            1 => Some(ToolbarAction::Undo),
-            2 => Some(ToolbarAction::Download),
-            3 => Some(ToolbarAction::Pin),
-            4 => Some(ToolbarAction::Cancel),
-            5 => Some(ToolbarAction::Done),
-            _ => None,
-        }
-    } else {
-        None
-    }
-}
-
-fn toolbar_bounds(area: RectArea, dh: f64) -> RectArea {
-    let tw = 400.0;
-    let th = 38.0;
-    let tx = (area.x + area.width - tw).max(area.x).max(8.0);
-    let mut ty = area.y + area.height + 8.0;
-    if ty + th > dh {
-        ty = (area.y - th - 8.0).max(8.0);
-    }
-    RectArea { x: tx, y: ty, width: tw, height: th }
-}
-
-fn check_handle_hit(mx: f64, my: f64, area: RectArea) -> Option<HandlePos> {
-    let size = 10.0;
-    let (sx, sy, sw, sh) = (area.x, area.y, area.width, area.height);
-    let handles = [
-        (HandlePos::TopLeft, sx, sy),
-        (HandlePos::TopCenter, sx + sw / 2.0, sy),
-        (HandlePos::TopRight, sx + sw, sy),
-        (HandlePos::MidLeft, sx, sy + sh / 2.0),
-        (HandlePos::MidRight, sx + sw, sy + sh / 2.0),
-        (HandlePos::BottomLeft, sx, sy + sh),
-        (HandlePos::BottomCenter, sx + sw / 2.0, sy + sh),
-        (HandlePos::BottomRight, sx + sw, sy + sh),
-    ];
-    for (pos, hx, hy) in handles {
-        if (mx - hx).abs() <= size && (my - hy).abs() <= size {
-            return Some(pos);
-        }
-    }
-    None
-}
-
-fn resize_rect(area: RectArea, handle: HandlePos, mx: f64, my: f64) -> RectArea {
-    let (sx, sy, sw, sh) = (area.x, area.y, area.width, area.height);
-    match handle {
-        HandlePos::TopLeft => {
-            let right = sx + sw;
-            let bottom = sy + sh;
-            let nx = mx.min(right - 10.0);
-            let ny = my.min(bottom - 10.0);
-            RectArea { x: nx, y: ny, width: right - nx, height: bottom - ny }
-        }
-        HandlePos::TopCenter => {
-            let bottom = sy + sh;
-            let ny = my.min(bottom - 10.0);
-            RectArea { x: sx, y: ny, width: sw, height: bottom - ny }
-        }
-        HandlePos::TopRight => {
-            let bottom = sy + sh;
-            let nw = (mx - sx).max(10.0);
-            let ny = my.min(bottom - 10.0);
-            RectArea { x: sx, y: ny, width: nw, height: bottom - ny }
-        }
-        HandlePos::MidLeft => {
-            let right = sx + sw;
-            let nx = mx.min(right - 10.0);
-            RectArea { x: nx, y: sy, width: right - nx, height: sh }
-        }
-        HandlePos::MidRight => {
-            let nw = (mx - sx).max(10.0);
-            RectArea { x: sx, y: sy, width: nw, height: sh }
-        }
-        HandlePos::BottomLeft => {
-            let right = sx + sw;
-            let nx = mx.min(right - 10.0);
-            let nh = (my - sy).max(10.0);
-            RectArea { x: nx, y: sy, width: right - nx, height: nh }
-        }
-        HandlePos::BottomCenter => {
-            let nh = (my - sy).max(10.0);
-            RectArea { x: sx, y: sy, width: sw, height: nh }
-        }
-        HandlePos::BottomRight => {
-            let nw = (mx - sx).max(10.0);
-            let nh = (my - sy).max(10.0);
-            RectArea { x: sx, y: sy, width: nw, height: nh }
-        }
-    }
-}
-
-fn create_annotation(
-    tool: ActiveTool,
-    start: (f64, f64),
-    end: (f64, f64),
-    stroke: &[f64],
-    index: usize,
-) -> Option<Annotation> {
-    let id = format!("ann_{}", index);
-    match tool {
-        ActiveTool::Rectangle => {
-            let x = start.0.min(end.0);
-            let y = start.1.min(end.1);
-            let w = (start.0 - end.0).abs();
-            let h = (start.1 - end.1).abs();
-            Some(Annotation {
-                id,
-                kind: AnnotationKind::Rectangle,
-                geometry: vec![x, y, w, h],
-                style: serde_json::json!({"stroke_width": 3.0, "color_r": 255, "color_g": 70, "color_b": 70}),
-                z_index: index as i32,
-            })
-        }
-        ActiveTool::Ellipse => {
-            let x = start.0.min(end.0);
-            let y = start.1.min(end.1);
-            let w = (start.0 - end.0).abs();
-            let h = (start.1 - end.1).abs();
-            Some(Annotation {
-                id,
-                kind: AnnotationKind::Ellipse,
-                geometry: vec![x, y, w, h],
-                style: serde_json::json!({"stroke_width": 3.0, "color_r": 255, "color_g": 70, "color_b": 70}),
-                z_index: index as i32,
-            })
-        }
-        ActiveTool::Arrow => Some(Annotation {
-            id,
-            kind: AnnotationKind::Arrow,
-            geometry: vec![start.0, start.1, end.0, end.1],
-            style: serde_json::json!({"stroke_width": 3.5, "color_r": 255, "color_g": 70, "color_b": 70}),
-            z_index: index as i32,
-        }),
-        ActiveTool::Brush => {
-            if stroke.len() >= 4 {
-                Some(Annotation {
-                    id,
-                    kind: AnnotationKind::Brush,
-                    geometry: stroke.to_vec(),
-                    style: serde_json::json!({"stroke_width": 3.0, "color_r": 255, "color_g": 70, "color_b": 70}),
-                    z_index: index as i32,
-                })
-            } else {
-                None
-            }
-        }
-        ActiveTool::Mosaic => {
-            if stroke.len() >= 2 {
-                Some(Annotation {
-                    id,
-                    kind: AnnotationKind::Mosaic,
-                    geometry: stroke.to_vec(),
-                    style: serde_json::json!({"brush_radius": 14.0, "block_size": 10}),
-                    z_index: index as i32,
-                })
-            } else {
-                None
-            }
-        }
-        ActiveTool::Text => Some(Annotation {
-            id,
-            kind: AnnotationKind::Text,
-            geometry: vec![start.0, start.1],
-            style: serde_json::json!({"text": "TEXT", "color_r": 255, "color_g": 70, "color_b": 70}),
-            z_index: index as i32,
-        }),
-        ActiveTool::None => None,
-    }
+fn resize_area(area: Area, handle: HandlePos, mx: f64, my: f64) -> Area {
+    let min = 12.0;
+    let (left, top, right, bottom) = (area.x, area.y, area.right(), area.bottom());
+    let (nx, ny, nr, nb) = match handle {
+        HandlePos::TopLeft => (mx.min(right - min), my.min(bottom - min), right, bottom),
+        HandlePos::TopCenter => (left, my.min(bottom - min), right, bottom),
+        HandlePos::TopRight => (left, my.min(bottom - min), mx.max(left + min), bottom),
+        HandlePos::MidLeft => (mx.min(right - min), top, right, bottom),
+        HandlePos::MidRight => (left, top, mx.max(left + min), bottom),
+        HandlePos::BottomLeft => (mx.min(right - min), top, right, my.max(top + min)),
+        HandlePos::BottomCenter => (left, top, right, my.max(top + min)),
+        HandlePos::BottomRight => (left, top, mx.max(left + min), my.max(top + min)),
+    };
+    Area { x: nx, y: ny, width: nr - nx, height: nb - ny }
 }
 
 impl OverlayApp {
     fn redraw(&mut self) {
-        let Some(window) = &self.window else { return };
-        let Some(surface) = &mut self.surface else { return };
+        let Some(window) = self.window.clone() else { return };
         let size = window.inner_size();
-        let Some(w) = NonZeroU32::new(size.width) else { return };
-        let Some(h) = NonZeroU32::new(size.height) else { return };
-        if surface.resize(w, h).is_err() {
+        let Some(nz_w) = NonZeroU32::new(size.width) else { return };
+        let Some(nz_h) = NonZeroU32::new(size.height) else { return };
+        let (dw, dh) = (size.width, size.height);
+
+        if self.layers.as_ref().is_none_or(|layers| layers.width != dw || layers.height != dh) {
+            let Some(frame) = self.frame.as_ref() else { return };
+            self.layers = Some(Layers::build(frame, dw, dh));
+        }
+
+        let hud = self.hud;
+        let selection = self.selection_rect;
+        let hover = self.hover_window_rect;
+        let active_tool = self.active_tool;
+        let can_undo = !self.annotations.is_empty() || self.text_draft.is_some();
+        let hovered_action = self
+            .current_mouse
+            .zip(self.toolbar.as_ref())
+            .and_then(|((mx, my), bar)| bar.hit(mx, my));
+
+        // 预览时把"正在画的一笔"当成临时标注，和最终导出走同一套绘制。
+        let live = if self.drag_mode == DragMode::Drawing {
+            match (self.drag_start, self.current_mouse) {
+                (Some(a), Some(b)) => {
+                    let start = self.clamp_to_selection(a.0, a.1);
+                    let end = self.clamp_to_selection(b.0, b.1);
+                    self.create_annotation(start, end, usize::MAX)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let draft_preview = self.text_draft.as_ref().map(|draft| Annotation {
+            id: "draft".into(),
+            kind: AnnotationKind::Text,
+            geometry: vec![draft.x, draft.y],
+            style: serde_json::json!({
+                "text": format!("{}_", draft.text),
+                "color_r": 255, "color_g": 59, "color_b": 48,
+                "font_scale": hud.text_scale(),
+            }),
+            z_index: i32::MAX,
+        });
+
+        let annotations = self.annotations.clone();
+        let frame_scale = self.frame_scale();
+        let magnifier_source = self.frame.clone();
+
+        let Some(surface) = self.surface.as_mut() else { return };
+        if surface.resize(nz_w, nz_h).is_err() {
             return;
         }
         let Ok(mut buf) = surface.buffer_mut() else { return };
+        let Some(layers) = self.layers.as_ref() else { return };
 
-        let dw = size.width;
-        let dh = size.height;
-
-        let hole = self.selection_rect.or(self.hover_window_rect).map(|area| {
-            (
-                area.x.max(0.0) as u32,
-                area.y.max(0.0) as u32,
-                (area.x + area.width).min(dw as f64 - 1.0) as u32,
-                (area.y + area.height).min(dh as f64 - 1.0) as u32,
-            )
-        });
-
-        // 1. Blit dimmed background with clear cutout
-        blit_dimmed(&self.frame, &mut buf, dw, dh, hole);
-
-        // 2. Render real-time mosaic & annotations
-        for ann in &self.annotations {
-            render_overlay_annotation(&mut buf, dw, dh, ann);
-        }
-
-        // 3. Render active stroke preview
-        if self.drag_mode == DragMode::Drawing
-            && let (Some(a), Some(b)) = (self.drag_start, self.current_mouse)
-            && let Some(ann) = create_annotation(self.active_tool, a, b, &self.current_stroke, 999)
-        {
-            render_overlay_annotation(&mut buf, dw, dh, &ann);
-        }
-
-        // 4. Render selection border or hover snap border
-        if let Some(area) = self.selection_rect {
-            stroke_selection_rect(&mut buf, dw, dh, area);
-            render_handles(&mut buf, dw, dh, area);
-            render_dimension_tag(&mut buf, dw, dh, area);
-            render_floating_toolbar(&mut buf, dw, dh, area, self.active_tool);
-        } else if let Some(hover) = self.hover_window_rect {
-            stroke_hover_rect(&mut buf, dw, dh, hover);
-        }
-
-        // 5. Render Magnifier / Color Picker HUD when hovering or selecting
-        if (self.selection_rect.is_none() || self.drag_mode == DragMode::Creating)
-            && let Some((mx, my)) = self.current_mouse
-        {
-            render_magnifier_hud(&self.frame, &mut buf, dw, dh, mx, my);
-        }
-
-        let _ = buf.present();
-    }
-}
-
-fn blit_dimmed(
-    frame: &CapturedFrame,
-    buf: &mut [u32],
-    dw: u32,
-    dh: u32,
-    hole: Option<(u32, u32, u32, u32)>,
-) {
-    for y in 0..dh {
-        let sy = (y as u64 * frame.height as u64 / dh as u64) as u32;
-        for x in 0..dw {
-            let sx = (x as u64 * frame.width as u64 / dw as u64) as u32;
-            let i = ((sy * frame.width + sx) * 4) as usize;
-            if i + 2 >= frame.bgra.len() {
-                continue;
-            }
-            let in_hole =
-                hole.is_some_and(|(x0, y0, x1, y1)| x >= x0 && x <= x1 && y >= y0 && y <= y1);
-            let (b, g, r) = if in_hole {
-                (frame.bgra[i] as u32, frame.bgra[i + 1] as u32, frame.bgra[i + 2] as u32)
-            } else {
-                (
-                    (frame.bgra[i] as u32) / 3,
-                    (frame.bgra[i + 1] as u32) / 3,
-                    (frame.bgra[i + 2] as u32) / 3,
-                )
-            };
-            buf[(y * dw + x) as usize] = (0xFF << 24) | (r << 16) | (g << 8) | b;
-        }
-    }
-}
-
-fn stroke_selection_rect(buf: &mut [u32], dw: u32, dh: u32, area: RectArea) {
-    let x0 = area.x.max(0.0) as u32;
-    let y0 = area.y.max(0.0) as u32;
-    let x1 = (area.x + area.width).min(dw as f64 - 1.0) as u32;
-    let y1 = (area.y + area.height).min(dh as f64 - 1.0) as u32;
-    let color = 0xFF_02_84_C7; // Vibrant crisp blue border
-    for x in x0..=x1 {
-        put_pixel_safe(buf, dw, dh, x as i32, y0 as i32, color);
-        put_pixel_safe(buf, dw, dh, x as i32, y0.saturating_add(1) as i32, color);
-        put_pixel_safe(buf, dw, dh, x as i32, y1 as i32, color);
-        put_pixel_safe(buf, dw, dh, x as i32, y1.saturating_sub(1) as i32, color);
-    }
-    for y in y0..=y1 {
-        put_pixel_safe(buf, dw, dh, x0 as i32, y as i32, color);
-        put_pixel_safe(buf, dw, dh, x0.saturating_add(1) as i32, y as i32, color);
-        put_pixel_safe(buf, dw, dh, x1 as i32, y as i32, color);
-        put_pixel_safe(buf, dw, dh, x1.saturating_sub(1) as i32, y as i32, color);
-    }
-}
-
-fn stroke_hover_rect(buf: &mut [u32], dw: u32, dh: u32, area: RectArea) {
-    let x0 = area.x.max(0.0) as u32;
-    let y0 = area.y.max(0.0) as u32;
-    let x1 = (area.x + area.width).min(dw as f64 - 1.0) as u32;
-    let y1 = (area.y + area.height).min(dh as f64 - 1.0) as u32;
-    let color = 0xFF_38_BD_F8; // Light cyan hover frame
-    for x in x0..=x1 {
-        if (x / 6) % 2 == 0 {
-            put_pixel_safe(buf, dw, dh, x as i32, y0 as i32, color);
-            put_pixel_safe(buf, dw, dh, x as i32, y1 as i32, color);
-        }
-    }
-    for y in y0..=y1 {
-        if (y / 6) % 2 == 0 {
-            put_pixel_safe(buf, dw, dh, x0 as i32, y as i32, color);
-            put_pixel_safe(buf, dw, dh, x1 as i32, y as i32, color);
-        }
-    }
-}
-
-fn render_handles(buf: &mut [u32], dw: u32, dh: u32, area: RectArea) {
-    let (sx, sy, sw, sh) = (area.x, area.y, area.width, area.height);
-    let pts = [
-        (sx, sy),
-        (sx + sw / 2.0, sy),
-        (sx + sw, sy),
-        (sx, sy + sh / 2.0),
-        (sx + sw, sy + sh / 2.0),
-        (sx, sy + sh),
-        (sx + sw / 2.0, sy + sh),
-        (sx + sw, sy + sh),
-    ];
-    for (hx, hy) in pts {
-        fill_solid_rect(buf, dw, dh, hx as i32 - 4, hy as i32 - 4, 8, 8, 0xFF_02_84_C7);
-        fill_solid_rect(buf, dw, dh, hx as i32 - 3, hy as i32 - 3, 6, 6, 0xFF_FF_FF_FF);
-    }
-}
-
-fn render_dimension_tag(buf: &mut [u32], dw: u32, dh: u32, area: RectArea) {
-    let tag_y = (area.y - 22.0).max(4.0) as i32;
-    let tag_x = area.x.max(4.0) as i32;
-    let text = format!("{} x {}", area.width as i32, area.height as i32);
-    fill_solid_rect(buf, dw, dh, tag_x, tag_y, (text.len() * 7 + 10) as i32, 18, 0xDD_0F_17_2A);
-    draw_simple_text(buf, dw, dh, tag_x + 5, tag_y + 4, &text, 0xFF_F8_FA_FC);
-}
-
-fn render_floating_toolbar(
-    buf: &mut [u32],
-    dw: u32,
-    dh: u32,
-    area: RectArea,
-    active_tool: ActiveTool,
-) {
-    let tb = toolbar_bounds(area, dh as f64);
-    let x = tb.x as i32;
-    let y = tb.y as i32;
-    let w = tb.width as i32;
-
-    // Background bar
-    fill_solid_rect(buf, dw, dh, x, y, w, 38, 0xF5_1E_29_3B);
-    stroke_solid_rect(buf, dw, dh, x, y, w, 38, 0xFF_33_41_55);
-
-    let tools = [
-        ("[]", ActiveTool::Rectangle),
-        ("()", ActiveTool::Ellipse),
-        ("->", ActiveTool::Arrow),
-        ("~~", ActiveTool::Brush),
-        ("##", ActiveTool::Mosaic),
-        ("T", ActiveTool::Text),
-    ];
-
-    let mut cur_x = x + 4;
-    for (label, tool) in tools {
-        let is_active = active_tool == tool;
-        let bg = if is_active { 0xFF_02_84_C7 } else { 0x00_00_00_00 };
-        if is_active {
-            fill_solid_rect(buf, dw, dh, cur_x, y + 4, 30, 30, bg);
-        }
-        let fg = if is_active { 0xFF_FF_FF_FF } else { 0xFF_E2_E8_F0 };
-        draw_simple_text(buf, dw, dh, cur_x + 8, y + 12, label, fg);
-        cur_x += 32;
-    }
-
-    // Divider
-    fill_solid_rect(buf, dw, dh, cur_x + 2, y + 8, 1, 22, 0xFF_47_55_69);
-    cur_x += 8;
-
-    let actions = [
-        ("SC", 0xFF_E2_E8_F0),  // Scroll
-        ("UN", 0xFF_E2_E8_F0),  // Undo
-        ("DL", 0xFF_E2_E8_F0),  // Download
-        ("PIN", 0xFF_E2_E8_F0), // Pin
-        ("X", 0xFF_F8_71_71),   // Cancel
-        ("OK", 0xFF_10_B9_81),  // Done
-    ];
-
-    for (label, fg) in actions {
-        draw_simple_text(buf, dw, dh, cur_x + 6, y + 12, label, fg);
-        cur_x += 32;
-    }
-}
-
-fn render_magnifier_hud(
-    frame: &CapturedFrame,
-    buf: &mut [u32],
-    dw: u32,
-    dh: u32,
-    mx: f64,
-    my: f64,
-) {
-    let hud_w = 136i32;
-    let hud_h = 110i32;
-    let mut hx = mx as i32 + 20;
-    let mut hy = my as i32 + 20;
-    if hx + hud_w > dw as i32 - 10 {
-        hx = mx as i32 - hud_w - 20;
-    }
-    if hy + hud_h > dh as i32 - 10 {
-        hy = my as i32 - hud_h - 20;
-    }
-
-    // Main HUD frame
-    fill_solid_rect(buf, dw, dh, hx, hy, hud_w, hud_h, 0xEE_0B_11_1A);
-    stroke_solid_rect(buf, dw, dh, hx, hy, hud_w, hud_h, 0xFF_38_BD_F8);
-
-    // Zoom grid (9x9 pixels rendered at 5x zoom = 45x45 box)
-    let zoom_box_x = hx + 8;
-    let zoom_box_y = hy + 8;
-    let sx = (mx * frame.width as f64 / dw as f64) as i32;
-    let sy = (my * frame.height as f64 / dh as f64) as i32;
-
-    let center_color = get_frame_pixel_color(frame, sx, sy);
-    let (cr, cg, cb) = (
-        ((center_color >> 16) & 0xFF) as u8,
-        ((center_color >> 8) & 0xFF) as u8,
-        (center_color & 0xFF) as u8,
-    );
-
-    for gy in -4..=4 {
-        for gx in -4..=4 {
-            let px = sx + gx;
-            let py = sy + gy;
-            let color = get_frame_pixel_color(frame, px, py);
-            let zx = zoom_box_x + (gx + 4) * 5;
-            let zy = zoom_box_y + (gy + 4) * 5;
-            fill_solid_rect(buf, dw, dh, zx, zy, 5, 5, color);
-        }
-    }
-
-    // Zoom box center reticle
-    stroke_solid_rect(buf, dw, dh, zoom_box_x + 20, zoom_box_y + 20, 5, 5, 0xFF_EF_44_44);
-
-    // Color Swatch
-    fill_solid_rect(buf, dw, dh, hx + 62, hy + 8, 20, 20, center_color);
-    stroke_solid_rect(buf, dw, dh, hx + 62, hy + 8, 20, 20, 0xFF_FFFFFF);
-
-    // Coordinates & RGB text
-    let coord_text = format!("X:{} Y:{}", sx, sy);
-    let hex_text = format!("#{:02X}{:02X}{:02X}", cr, cg, cb);
-    let rgb_text = format!("RGB({},{},{})", cr, cg, cb);
-
-    draw_simple_text(buf, dw, dh, hx + 8, hy + 58, &coord_text, 0xFF_F8_FA_FC);
-    draw_simple_text(buf, dw, dh, hx + 8, hy + 74, &hex_text, 0xFF_38_BD_F8);
-    draw_simple_text(buf, dw, dh, hx + 8, hy + 90, &rgb_text, 0xFF_94_A3_B8);
-}
-
-fn get_frame_pixel_color(frame: &CapturedFrame, x: i32, y: i32) -> u32 {
-    if x < 0 || y < 0 || x >= frame.width as i32 || y >= frame.height as i32 {
-        return 0xFF_00_00_00;
-    }
-    let idx = (y as usize * frame.width as usize + x as usize) * 4;
-    if idx + 2 < frame.bgra.len() {
-        let b = frame.bgra[idx] as u32;
-        let g = frame.bgra[idx + 1] as u32;
-        let r = frame.bgra[idx + 2] as u32;
-        (0xFF << 24) | (r << 16) | (g << 8) | b
-    } else {
-        0xFF_00_00_00
-    }
-}
-
-fn render_overlay_annotation(buf: &mut [u32], dw: u32, dh: u32, ann: &Annotation) {
-    match ann.kind {
-        AnnotationKind::Rectangle if ann.geometry.len() >= 4 => {
-            stroke_solid_rect(
-                buf,
-                dw,
-                dh,
-                ann.geometry[0] as i32,
-                ann.geometry[1] as i32,
-                ann.geometry[2] as i32,
-                ann.geometry[3] as i32,
-                0xFF_EF_44_44,
-            );
-        }
-        AnnotationKind::Ellipse if ann.geometry.len() >= 4 => {
-            let cx = ann.geometry[0] as i32 + ann.geometry[2] as i32 / 2;
-            let cy = ann.geometry[1] as i32 + ann.geometry[3] as i32 / 2;
-            let rx = ann.geometry[2] as i32 / 2;
-            let ry = ann.geometry[3] as i32 / 2;
-            let steps = 60;
-            for i in 0..steps {
-                let t1 = (i as f32) * std::f32::consts::TAU / (steps as f32);
-                let t2 = ((i + 1) as f32) * std::f32::consts::TAU / (steps as f32);
-                let x1 = cx + (rx as f32 * t1.cos()) as i32;
-                let y1 = cy + (ry as f32 * t1.sin()) as i32;
-                let x2 = cx + (rx as f32 * t2.cos()) as i32;
-                let y2 = cy + (ry as f32 * t2.sin()) as i32;
-                draw_line(buf, dw, dh, x1, y1, x2, y2, 0xFF_EF_44_44, 3);
-            }
-        }
-        AnnotationKind::Arrow if ann.geometry.len() >= 4 => {
-            let x1 = ann.geometry[0] as i32;
-            let y1 = ann.geometry[1] as i32;
-            let x2 = ann.geometry[2] as i32;
-            let y2 = ann.geometry[3] as i32;
-            draw_line(buf, dw, dh, x1, y1, x2, y2, 0xFF_EF_44_44, 3);
-
-            let dx = x2 as f32 - x1 as f32;
-            let dy = y2 as f32 - y1 as f32;
-            let len = (dx * dx + dy * dy).sqrt();
-            if len > 0.0 {
-                let ux = dx / len;
-                let uy = dy / len;
-                let arrow_len = 15.0;
-                let c = 0.87758256; // cos(0.5 rad)
-                let s = 0.47942554; // sin(0.5 rad)
-
-                let rx1 = x2 as f32 - arrow_len * (ux * c - uy * s);
-                let ry1 = y2 as f32 - arrow_len * (ux * s + uy * c);
-                let rx2 = x2 as f32 - arrow_len * (ux * c + uy * s);
-                let ry2 = y2 as f32 - arrow_len * (-ux * s + uy * c);
-
-                draw_line(buf, dw, dh, x2, y2, rx1 as i32, ry1 as i32, 0xFF_EF_44_44, 3);
-                draw_line(buf, dw, dh, x2, y2, rx2 as i32, ry2 as i32, 0xFF_EF_44_44, 3);
-            }
-        }
-        AnnotationKind::Mosaic => {
-            if ann.geometry.len() >= 2 {
-                for chunk in ann.geometry.chunks_exact(2) {
-                    let cx = chunk[0] as i32;
-                    let cy = chunk[1] as i32;
-                    apply_buf_mosaic_block(buf, dw, dh, cx - 14, cy - 14, 28, 28);
-                }
-            }
-        }
-        AnnotationKind::Brush => {
-            for chunk in ann.geometry.chunks_exact(2) {
-                fill_solid_rect(
-                    buf,
-                    dw,
-                    dh,
-                    chunk[0] as i32 - 2,
-                    chunk[1] as i32 - 2,
-                    4,
-                    4,
-                    0xFF_EF_44_44,
-                );
-            }
-        }
-        AnnotationKind::Text if ann.geometry.len() >= 2 => {
-            let text = ann.style.get("text").and_then(|v| v.as_str()).unwrap_or("TEXT");
-            draw_simple_text(
-                buf,
-                dw,
-                dh,
-                ann.geometry[0] as i32,
-                ann.geometry[1] as i32,
-                text,
-                0xFF_EF_44_44,
-            );
-        }
-        _ => {}
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_line(
-    buf: &mut [u32],
-    dw: u32,
-    dh: u32,
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
-    color: u32,
-    thickness: i32,
-) {
-    let dx = (x1 - x0).abs();
-    let dy = -(y1 - y0).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let sy = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx + dy;
-    let mut x = x0;
-    let mut y = y0;
-
-    loop {
-        for ty in -thickness / 2..=thickness / 2 {
-            for tx in -thickness / 2..=thickness / 2 {
-                if tx * tx + ty * ty <= (thickness * thickness) / 4 {
-                    put_pixel_safe(buf, dw, dh, x + tx, y + ty, color);
-                }
-            }
-        }
-        if x == x1 && y == y1 {
-            break;
-        }
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y += sy;
-        }
-    }
-}
-
-fn apply_buf_mosaic_block(buf: &mut [u32], dw: u32, dh: u32, x: i32, y: i32, w: i32, h: i32) {
-    let x0 = x.clamp(0, dw as i32);
-    let y0 = y.clamp(0, dh as i32);
-    let x1 = (x + w).clamp(0, dw as i32);
-    let y1 = (y + h).clamp(0, dh as i32);
-    let b = 8;
-    for by in (y0..y1).step_by(b as usize) {
-        for bx in (x0..x1).step_by(b as usize) {
-            let sample_idx = (by * dw as i32 + bx) as usize;
-            if sample_idx < buf.len() {
-                let color = buf[sample_idx];
-                for yy in by..(by + b).min(y1) {
-                    for xx in bx..(bx + b).min(x1) {
-                        put_pixel_safe(buf, dw, dh, xx, yy, color);
+        // 1. 背景：整屏 memcpy 变暗层，再把选区行拷回原亮度。
+        let cutout = selection.or(hover);
+        if buf.len() == layers.dimmed.len() {
+            buf.copy_from_slice(&layers.dimmed);
+            if let Some(area) = cutout {
+                let x0 = area.x.max(0.0).floor() as u32;
+                let y0 = area.y.max(0.0).floor() as u32;
+                let x1 = area.right().min(f64::from(dw)).ceil() as u32;
+                let y1 = area.bottom().min(f64::from(dh)).ceil() as u32;
+                for y in y0..y1.min(dh) {
+                    let start = (y * dw + x0) as usize;
+                    let end = (y * dw + x1.min(dw)) as usize;
+                    if start < end && end <= buf.len() {
+                        buf[start..end].copy_from_slice(&layers.bright[start..end]);
                     }
                 }
             }
         }
-    }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn fill_solid_rect(buf: &mut [u32], dw: u32, dh: u32, x: i32, y: i32, w: i32, h: i32, color: u32) {
-    let x0 = x.clamp(0, dw as i32);
-    let y0 = y.clamp(0, dh as i32);
-    let x1 = (x + w).clamp(0, dw as i32);
-    let y1 = (y + h).clamp(0, dh as i32);
-    for py in y0..y1 {
-        for px in x0..x1 {
-            put_pixel_safe(buf, dw, dh, px, py, color);
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn stroke_solid_rect(
-    buf: &mut [u32],
-    dw: u32,
-    dh: u32,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    color: u32,
-) {
-    let x0 = x.clamp(0, dw as i32);
-    let y0 = y.clamp(0, dh as i32);
-    let x1 = (x + w).clamp(0, dw as i32 - 1);
-    let y1 = (y + h).clamp(0, dh as i32 - 1);
-    for px in x0..=x1 {
-        put_pixel_safe(buf, dw, dh, px, y0, color);
-        put_pixel_safe(buf, dw, dh, px, y1, color);
-    }
-    for py in y0..=y1 {
-        put_pixel_safe(buf, dw, dh, x0, py, color);
-        put_pixel_safe(buf, dw, dh, x1, py, color);
-    }
-}
-
-fn draw_simple_text(buf: &mut [u32], dw: u32, dh: u32, x: i32, y: i32, text: &str, color: u32) {
-    let mut cx = x;
-    for ch in text.chars() {
-        let glyph = simple_glyph_for(ch);
-        for (row, bits) in glyph.iter().enumerate() {
-            for col in 0..5 {
-                if bits & (1 << (4 - col)) != 0 {
-                    put_pixel_safe(buf, dw, dh, cx + col, y + row as i32, color);
-                }
+        // 2. 马赛克直接在合成结果上按格子做块平均，和导出用同一份 mask。
+        for ann in annotations.iter().chain(live.iter()) {
+            if matches!(ann.kind, AnnotationKind::Mosaic)
+                && let Some(mask) = crate::annotation::mosaic_mask(ann)
+            {
+                apply_buffer_mosaic(&mut buf, dw, dh, &mask);
             }
         }
-        cx += 6;
+
+        // 3. 其余标注交给 tiny-skia，抗锯齿且与导出完全一致。
+        for ann in annotations.iter().chain(live.iter()).chain(draft_preview.iter()) {
+            if !matches!(ann.kind, AnnotationKind::Mosaic) {
+                render_annotation(&mut buf, dw, dh, ann);
+            }
+        }
+
+        // 4. 选区装饰。
+        if let Some(area) = selection {
+            hud::draw_selection_chrome(&mut buf, dw, dh, area, hud);
+            hud::draw_size_tag(&mut buf, dw, dh, area, frame_scale, hud);
+        } else if let Some(area) = hover {
+            hud::draw_snap_hint(&mut buf, dw, dh, area, hud);
+        }
+
+        // 5. 放大镜只在还没定下选区时出现，定好后不再遮挡内容。
+        if selection.is_none()
+            && let (Some((mx, my)), Some(frame)) = (self.current_mouse, magnifier_source.as_ref())
+        {
+            let fx = (mx * frame_scale.0).round() as i32;
+            let fy = (my * frame_scale.1).round() as i32;
+            hud::draw_magnifier(
+                &mut buf,
+                dw,
+                dh,
+                |x, y| sample_frame(frame, x, y),
+                (mx, my),
+                (fx, fy),
+                hud,
+            );
+        }
+
+        let toolbar =
+            selection.map(|area| ToolbarLayout::compute(area, f64::from(dw), f64::from(dh), hud));
+        if let Some(layout) = toolbar.as_ref() {
+            hud::draw_toolbar(
+                &mut buf,
+                dw,
+                dh,
+                layout,
+                ToolbarState { active_tool, hovered: hovered_action, can_undo, can_scroll: true },
+            );
+        }
+
+        let _ = buf.present();
+        self.toolbar = toolbar;
     }
 }
 
-fn simple_glyph_for(ch: char) -> [u8; 7] {
-    match ch.to_ascii_uppercase() {
-        ' ' => [0; 7],
-        'A' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        'B' => [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
-        'C' => [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
-        'D' => [0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C],
-        'E' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
-        'F' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
-        'G' => [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
-        'H' => [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        'I' => [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        'K' => [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
-        'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
-        'M' => [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
-        'N' => [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11],
-        'O' => [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        'P' => [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
-        'R' => [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
-        'S' => [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
-        'T' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
-        'U' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        'X' => [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
-        'Y' => [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
-        '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
-        '1' => [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        '2' => [0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F],
-        '3' => [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
-        '4' => [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
-        '5' => [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
-        '6' => [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
-        '7' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
-        '8' => [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
-        '9' => [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
-        ':' => [0x00, 0x04, 0x00, 0x00, 0x04, 0x00, 0x00],
-        ',' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08],
-        '#' => [0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A],
-        '(' => [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
-        ')' => [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
-        '[' => [0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E],
-        ']' => [0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E],
-        '-' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
-        '>' => [0x10, 0x08, 0x04, 0x02, 0x04, 0x08, 0x10],
-        '~' => [0x00, 0x00, 0x0D, 0x16, 0x00, 0x00, 0x00],
-        _ => [0x1F, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1F],
+fn sample_frame(frame: &CapturedFrame, x: i32, y: i32) -> (u8, u8, u8) {
+    if x < 0 || y < 0 || x >= frame.width as i32 || y >= frame.height as i32 {
+        return (0, 0, 0);
+    }
+    let index = (y as usize * frame.width as usize + x as usize) * 4;
+    match frame.bgra.get(index..index + 3) {
+        Some(px) => (px[2], px[1], px[0]),
+        None => (0, 0, 0),
     }
 }
 
-fn put_pixel_safe(buf: &mut [u32], dw: u32, dh: u32, x: i32, y: i32, color: u32) {
-    if x < 0 || y < 0 || x >= dw as i32 || y >= dh as i32 {
-        return;
+/// 与导出完全一致的块平均马赛克，只是目标换成 u32 缓冲。
+fn apply_buffer_mosaic(buf: &mut [u32], dw: u32, dh: u32, mask: &crate::MosaicMask) {
+    let block = mask.block.max(1) as i32;
+    for &(cell_x, cell_y) in &mask.cells {
+        let x0 = (cell_x * block).clamp(0, dw as i32);
+        let y0 = (cell_y * block).clamp(0, dh as i32);
+        let x1 = (cell_x * block + block).clamp(0, dw as i32);
+        let y1 = (cell_y * block + block).clamp(0, dh as i32);
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        let mut sum = [0u64; 3];
+        let mut count = 0u64;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let pixel = buf[(y as u32 * dw + x as u32) as usize];
+                sum[0] += u64::from((pixel >> 16) & 0xFF);
+                sum[1] += u64::from((pixel >> 8) & 0xFF);
+                sum[2] += u64::from(pixel & 0xFF);
+                count += 1;
+            }
+        }
+        if count == 0 {
+            continue;
+        }
+        let packed = 0xFF00_0000
+            | ((sum[0] / count) as u32) << 16
+            | ((sum[1] / count) as u32) << 8
+            | (sum[2] / count) as u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                buf[(y as u32 * dw + x as u32) as usize] = packed;
+            }
+        }
     }
-    let i = (y as u32 * dw + x as u32) as usize;
-    if i < buf.len() {
-        buf[i] = color;
+}
+
+/// 把单个标注画到自己的包围盒 Pixmap 里再合成，避免每帧分配整屏 Pixmap。
+fn render_annotation(buf: &mut [u32], dw: u32, dh: u32, ann: &Annotation) {
+    let Some((ox, oy, w, h)) = annotation_bounds(ann, dw, dh) else { return };
+    let Some(mut pixmap) = Pixmap::new(w, h) else { return };
+    let mut local = ann.clone();
+    translate_geometry(&mut local, -f64::from(ox), -f64::from(oy));
+    crate::annotation::draw_annotation(&mut pixmap, &local);
+    hud::blend_pixmap(buf, dw, dh, ox, oy, &pixmap);
+}
+
+fn translate_geometry(ann: &mut Annotation, dx: f64, dy: f64) {
+    match ann.kind {
+        AnnotationKind::Rectangle | AnnotationKind::Ellipse | AnnotationKind::Blur => {
+            if ann.geometry.len() >= 4 {
+                ann.geometry[0] += dx;
+                ann.geometry[1] += dy;
+            }
+        }
+        _ => {
+            for chunk in ann.geometry.chunks_exact_mut(2) {
+                chunk[0] += dx;
+                chunk[1] += dy;
+            }
+        }
     }
+}
+
+fn annotation_bounds(ann: &Annotation, dw: u32, dh: u32) -> Option<(i32, i32, u32, u32)> {
+    let stroke = ann.style.get("stroke_width").and_then(|v| v.as_f64()).unwrap_or(3.0);
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = match ann.kind {
+        AnnotationKind::Rectangle | AnnotationKind::Ellipse | AnnotationKind::Blur => {
+            if ann.geometry.len() < 4 {
+                return None;
+            }
+            (
+                ann.geometry[0],
+                ann.geometry[1],
+                ann.geometry[0] + ann.geometry[2],
+                ann.geometry[1] + ann.geometry[3],
+            )
+        }
+        AnnotationKind::Text => {
+            if ann.geometry.len() < 2 {
+                return None;
+            }
+            let text = ann.style.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let scale = crate::annotation::text_pixel_scale(ann);
+            let (tw, th) = crate::annotation::measure_bitmap_text(text, scale);
+            (
+                ann.geometry[0],
+                ann.geometry[1],
+                ann.geometry[0] + f64::from(tw),
+                ann.geometry[1] + f64::from(th),
+            )
+        }
+        _ => {
+            if ann.geometry.len() < 2 {
+                return None;
+            }
+            let mut bounds = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            for chunk in ann.geometry.chunks_exact(2) {
+                bounds.0 = bounds.0.min(chunk[0]);
+                bounds.1 = bounds.1.min(chunk[1]);
+                bounds.2 = bounds.2.max(chunk[0]);
+                bounds.3 = bounds.3.max(chunk[1]);
+            }
+            bounds
+        }
+    };
+    // 箭头头部、圆角描边都会溢出几何范围，统一留出余量。
+    let pad = stroke * 2.0 + 24.0;
+    min_x -= pad;
+    min_y -= pad;
+    max_x += pad;
+    max_y += pad;
+
+    let x0 = min_x.floor().clamp(0.0, f64::from(dw)) as i32;
+    let y0 = min_y.floor().clamp(0.0, f64::from(dh)) as i32;
+    let x1 = max_x.ceil().clamp(0.0, f64::from(dw)) as i32;
+    let y1 = max_y.ceil().clamp(0.0, f64::from(dh)) as i32;
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some((x0, y0, (x1 - x0) as u32, (y1 - y0) as u32))
 }
 
 fn overlay_monitor(
@@ -1468,6 +1277,28 @@ fn overlay_monitor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::MonitorInfo;
+
+    fn monitor(width: u32, height: u32) -> MonitorInfo {
+        MonitorInfo {
+            id: 0,
+            name: "test".into(),
+            origin_physical: (0, 0),
+            origin_logical: (0.0, 0.0),
+            scale_factor: 2.0,
+            capture_size: (width, height),
+        }
+    }
+
+    fn frame(width: u32, height: u32) -> CapturedFrame {
+        let mut bgra = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                bgra.extend_from_slice(&[(x % 256) as u8, (y % 256) as u8, 200, 255]);
+            }
+        }
+        CapturedFrame { width, height, bgra, monitor: monitor(width, height) }
+    }
 
     #[test]
     fn maps_overlay_outcome_roundtrip() {
@@ -1479,10 +1310,82 @@ mod tests {
         assert!(json.contains("\"action\":\"complete\""));
         let parsed: OverlayOutcome = serde_json::from_str(&json).unwrap();
         match parsed {
-            OverlayOutcome::Complete { selection, .. } => {
-                assert_eq!(selection.width, 300.0);
-            }
+            OverlayOutcome::Complete { selection, .. } => assert_eq!(selection.width, 300.0),
             _ => panic!("unexpected outcome"),
         }
+    }
+
+    #[test]
+    fn dim_layer_is_darker_but_keeps_the_picture() {
+        let frame = frame(16, 8);
+        let layers = Layers::build(&frame, 16, 8);
+        for (bright, dim) in layers.bright.iter().zip(layers.dimmed.iter()) {
+            assert_eq!(bright >> 24, 0xFF);
+            assert_eq!(dim >> 24, 0xFF);
+            for shift in [16, 8, 0] {
+                let b = (bright >> shift) & 0xFF;
+                let d = (dim >> shift) & 0xFF;
+                assert!(d <= b, "遮罩层不能比原图更亮");
+            }
+        }
+        // 不能暗到看不见内容：遮罩仍需保留原图的相对差异。
+        assert_ne!(layers.dimmed.first(), layers.dimmed.last());
+    }
+
+    #[test]
+    fn layers_resample_when_surface_differs_from_capture() {
+        let frame = frame(32, 16);
+        let layers = Layers::build(&frame, 16, 8);
+        assert_eq!(layers.bright.len(), 16 * 8);
+        assert_eq!(layers.dimmed.len(), 16 * 8);
+    }
+
+    #[test]
+    fn buffer_mosaic_flattens_each_grid_cell() {
+        let (dw, dh) = (32u32, 32u32);
+        let mut buf: Vec<u32> = (0..dw * dh).map(|i| 0xFF00_0000 | i).collect();
+        let ann = Annotation {
+            id: "m".into(),
+            kind: AnnotationKind::Mosaic,
+            geometry: vec![0.0, 0.0, 16.0, 16.0],
+            style: serde_json::json!({"block_size": 8}),
+            z_index: 0,
+        };
+        let mask = crate::annotation::mosaic_mask(&ann).unwrap();
+        apply_buffer_mosaic(&mut buf, dw, dh, &mask);
+        for cell in 0..2u32 {
+            let anchor = buf[(cell * 8 * dw) as usize];
+            for y in 0..8 {
+                for x in 0..8 {
+                    assert_eq!(buf[((cell * 8 + y) * dw + x) as usize], anchor);
+                }
+            }
+            assert_eq!(anchor >> 24, 0xFF, "马赛克必须保持不透明");
+        }
+        // 覆盖区外保持原值。
+        assert_eq!(buf[(20 * dw + 20) as usize], 0xFF00_0000 | (20 * dw + 20));
+    }
+
+    #[test]
+    fn annotation_bounds_pad_for_stroke_and_arrow_heads() {
+        let ann = Annotation {
+            id: "a".into(),
+            kind: AnnotationKind::Arrow,
+            geometry: vec![100.0, 100.0, 140.0, 140.0],
+            style: serde_json::json!({"stroke_width": 4.0}),
+            z_index: 0,
+        };
+        let (x, y, w, h) = annotation_bounds(&ann, 500, 500).unwrap();
+        assert!(x < 100 && y < 100);
+        assert!(w > 40 && h > 40);
+    }
+
+    #[test]
+    fn resize_keeps_minimum_size_when_handle_crosses_opposite_edge() {
+        let area = Area { x: 100.0, y: 100.0, width: 200.0, height: 200.0 };
+        let resized = resize_area(area, HandlePos::TopLeft, 999.0, 999.0);
+        assert!(resized.width >= 12.0 && resized.height >= 12.0);
+        let resized = resize_area(area, HandlePos::BottomRight, -999.0, -999.0);
+        assert!(resized.width >= 12.0 && resized.height >= 12.0);
     }
 }

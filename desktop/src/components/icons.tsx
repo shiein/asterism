@@ -512,3 +512,109 @@ export function MoonIcon({ size = 18, className = "", ...props }: IconProps) {
   );
 }
 
+
+/* 标注工具图标。与原生 overlay 工具栏保持同一套图形语言。 */
+
+function Stroked({ size = 18, className = "", children, ...props }: IconProps & { children: React.ReactNode }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      {...props}
+    >
+      {children}
+    </svg>
+  );
+}
+
+export function SquareIcon(props: IconProps) {
+  return (
+    <Stroked {...props}>
+      <rect x="4" y="6" width="16" height="12" rx="2" />
+    </Stroked>
+  );
+}
+
+export function CircleIcon(props: IconProps) {
+  return (
+    <Stroked {...props}>
+      <ellipse cx="12" cy="12" rx="8.5" ry="6.5" />
+    </Stroked>
+  );
+}
+
+export function ArrowIcon(props: IconProps) {
+  return (
+    <Stroked {...props}>
+      <path d="M5 19 19 5" />
+      <path d="M11 5h8v8" />
+    </Stroked>
+  );
+}
+
+export function PenIcon(props: IconProps) {
+  return (
+    <Stroked {...props}>
+      <path d="M4 17c2-6 4 4 6-2s4 4 6-4 2 3 4 1" />
+    </Stroked>
+  );
+}
+
+export function MosaicIcon({ size = 18, className = "", ...props }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className}
+      {...props}
+    >
+      <rect x="3" y="3" width="6" height="6" />
+      <rect x="15" y="3" width="6" height="6" />
+      <rect x="9" y="9" width="6" height="6" />
+      <rect x="3" y="15" width="6" height="6" />
+      <rect x="15" y="15" width="6" height="6" />
+      <g opacity="0.32">
+        <rect x="9" y="3" width="6" height="6" />
+        <rect x="3" y="9" width="6" height="6" />
+        <rect x="15" y="9" width="6" height="6" />
+        <rect x="9" y="15" width="6" height="6" />
+      </g>
+    </svg>
+  );
+}
+
+export function TypeIcon(props: IconProps) {
+  return (
+    <Stroked {...props}>
+      <path d="M5 6h14" />
+      <path d="M12 6v13" />
+    </Stroked>
+  );
+}
+
+export function UndoIcon(props: IconProps) {
+  return (
+    <Stroked {...props}>
+      <path d="M4 10h10a5 5 0 0 1 0 10H8" />
+      <path d="m8 6-4 4 4 4" />
+    </Stroked>
+  );
+}
+
+export function RedoIcon(props: IconProps) {
+  return (
+    <Stroked {...props}>
+      <path d="M20 10H10a5 5 0 0 0 0 10h6" />
+      <path d="m16 6 4 4-4 4" />
+    </Stroked>
+  );
+}

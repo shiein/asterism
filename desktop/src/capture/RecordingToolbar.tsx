@@ -24,7 +24,7 @@ export function RecordingToolbar() {
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  });
+  }, [countdown, stopping]);
 
   async function stop() {
     if (stopping || countdown > 0) return;
@@ -38,17 +38,26 @@ export function RecordingToolbar() {
   }
 
   return (
-    <div className="recording-toolbar" data-tauri-drag-region>
-      <div className="recording-toolbar-status" data-tauri-drag-region>
-        <span className={`toolbar-live-dot ${countdown > 0 ? "waiting" : ""}`} />
+    <div className="rec-hud" data-tauri-drag-region>
+      <div className="rec-hud-status" data-tauri-drag-region>
+        <span className={`rec-live ${countdown > 0 ? "waiting" : ""}`} />
         <div data-tauri-drag-region>
-          <strong data-tauri-drag-region>{countdown > 0 ? `${countdown} 秒后开始` : mode === "gif" ? "GIF 录制中" : "视频录制中"}</strong>
+          <strong data-tauri-drag-region>
+            {countdown > 0 ? `${countdown} 秒后开始` : mode === "gif" ? "GIF 录制中" : "视频录制中"}
+          </strong>
           <small data-tauri-drag-region>{mode === "gif" ? "12 FPS · GIF" : "30 FPS · H.264"}</small>
         </div>
       </div>
-      <time dateTime={`PT${elapsedSeconds}S`} data-tauri-drag-region>{formatDuration(elapsedSeconds)}</time>
-      <button className="toolbar-stop-button" disabled={countdown > 0 || stopping} onClick={() => void stop()} aria-label="停止录制">
-        <span />
+      <time dateTime={`PT${elapsedSeconds}S`} data-tauri-drag-region>
+        {formatDuration(elapsedSeconds)}
+      </time>
+      <button
+        className="rec-stop"
+        disabled={countdown > 0 || stopping}
+        onClick={() => void stop()}
+        aria-label="停止录制"
+      >
+        <i />
         {stopping ? "保存中" : "停止"}
       </button>
     </div>

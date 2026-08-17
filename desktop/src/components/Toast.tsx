@@ -38,11 +38,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={{ toast, success, error }}>
       {children}
-      <div className="toast-container" role="status" aria-live="polite">
+      <div className="toasts" role="status" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className={`toast ${t.type}`}>
-            {t.type === "success" && <CheckIcon size={16} />}
-            {t.type === "error" && <XIcon size={16} />}
+            {t.type === "success" && <CheckIcon size={15} className="toast-icon" />}
+            {t.type === "error" && <XIcon size={15} className="toast-icon" />}
             <span>{t.text}</span>
           </div>
         ))}

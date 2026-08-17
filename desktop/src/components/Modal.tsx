@@ -10,12 +10,11 @@ interface ModalProps {
   maxWidth?: string | number;
 }
 
-export function Modal({ isOpen, onClose, title, children, footer, maxWidth = 640 }: ModalProps) {
+export function Modal({ isOpen, onClose, title, children, footer, maxWidth = 620 }: ModalProps) {
   useEffect(() => {
+    if (!isOpen) return;
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape" && isOpen) {
-        onClose();
-      }
+      if (e.key === "Escape") onClose();
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -24,22 +23,23 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth = 640
   if (!isOpen) return null;
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="sheet-scrim" onClick={onClose}>
       <div
-        className="modal-card"
+        className="sheet"
         style={{ maxWidth }}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
+        aria-label={title}
       >
-        <div className="modal-header">
-          <h3 style={{ fontSize: 16, fontWeight: 600, color: "var(--text-primary)" }}>{title}</h3>
-          <button className="btn btn-ghost btn-icon" onClick={onClose} aria-label="关闭">
-            <XIcon size={18} />
+        <div className="sheet-head">
+          <h3>{title}</h3>
+          <button className="btn btn-plain btn-icon" onClick={onClose} aria-label="关闭">
+            <XIcon size={16} />
           </button>
         </div>
-        <div className="modal-body">{children}</div>
-        {footer && <div className="modal-footer">{footer}</div>}
+        <div className="sheet-body">{children}</div>
+        {footer && <div className="sheet-foot">{footer}</div>}
       </div>
     </div>
   );

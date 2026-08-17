@@ -74,21 +74,14 @@ function MainApp() {
   }, []);
 
   return (
-    <div className="app-layout">
-      {/* Left Modern Sidebar */}
-      <Sidebar
-        currentTab={tab}
-        onSelectTab={setTab}
-        identity={identity.data}
-      />
+    <div className="app-shell">
+      <Sidebar currentTab={tab} onSelectTab={setTab} identity={identity.data} />
 
-      {/* Main Content Area */}
       {tab === "history" && <HistoryPage onAnnotate={setAnnotateId} />}
       {tab === "favorites" && <HistoryPage onAnnotate={setAnnotateId} favoriteFilter={true} />}
       {tab === "capture" && <CaptureStudioPage onAnnotate={setAnnotateId} />}
       {tab === "settings" && <SettingsPage />}
 
-      {/* Annotation Canvas Overlay */}
       {annotateId && <AnnotatePage itemId={annotateId} onDone={closeAnnotate} />}
     </div>
   );

@@ -7,8 +7,8 @@ use crate::commands::CmdError;
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const TOOLBAR_WINDOW_LABEL: &str = "capture-toolbar";
-const TOOLBAR_WIDTH: f64 = 332.0;
-const TOOLBAR_HEIGHT: f64 = 64.0;
+const TOOLBAR_WIDTH: f64 = 300.0;
+const TOOLBAR_HEIGHT: f64 = 52.0;
 const TOOLBAR_GAP: f64 = 12.0;
 
 pub struct HiddenMainWindow {
@@ -91,7 +91,8 @@ impl RecordingToolbar {
                 .focused(true)
                 .accept_first_mouse(true)
                 .prevent_overflow()
-                .background_color(tauri::utils::config::Color(13, 20, 30, 255))
+                // 与前端 --hud-surface 同色，避免窗口底色与内容边缘不一致。
+                .background_color(tauri::utils::config::Color(28, 28, 30, 255))
                 .build()
                 .map_err(|err| CmdError::Any(err.to_string()))?;
         Ok((Self { window }, starts_at))
@@ -153,7 +154,7 @@ mod tests {
             &monitor(),
             &Selection { x: 200.0, y: 100.0, width: 1000.0, height: 500.0 },
         );
-        assert_eq!(pos, (268.0, 312.0));
+        assert_eq!(pos, (300.0, 312.0));
     }
 
     #[test]
@@ -162,7 +163,7 @@ mod tests {
             &monitor(),
             &Selection { x: 0.0, y: 0.0, width: 2880.0, height: 1800.0 },
         );
-        assert!((0.0..=1108.0).contains(&x));
-        assert!((0.0..=836.0).contains(&y));
+        assert!((0.0..=(1440.0 - TOOLBAR_WIDTH)).contains(&x));
+        assert!((0.0..=(900.0 - TOOLBAR_HEIGHT)).contains(&y));
     }
 }

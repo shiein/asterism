@@ -14,7 +14,15 @@ interface UiState {
   setTheme: (theme: AppTheme) => void;
 }
 
-const savedTheme = (typeof localStorage !== "undefined" && (localStorage.getItem("asterism_theme") as AppTheme)) || "light";
+const THEMES: readonly AppTheme[] = ["light", "dark", "auto"];
+
+function readSavedTheme(): AppTheme {
+  if (typeof localStorage === "undefined") return "light";
+  const saved = localStorage.getItem("asterism_theme");
+  return THEMES.includes(saved as AppTheme) ? (saved as AppTheme) : "light";
+}
+
+const savedTheme = readSavedTheme();
 
 export const useUiStore = create<UiState>((set) => ({
   query: "",

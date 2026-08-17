@@ -31,9 +31,7 @@ export function HistoryDetailModal({
   onAnnotate,
 }: HistoryDetailModalProps) {
   const [copied, setCopied] = useState(false);
-  const [isCopying, setIsCopying] = useState(false);
-  const [isFavoriting, setIsFavoriting] = useState(false);
-  const [isDeleting, setIsDeleting] = useState(false);
+  const [busy, setBusy] = useState<"copy" | "favorite" | "delete" | null>(null);
 
   const isVisual =
     item?.kind === "IMAGE" || item?.kind === "SCREENSHOT" || item?.kind === "GIF";
@@ -46,42 +44,24 @@ export function HistoryDetailModal({
 
   if (!item) return null;
 
-  async function handleCopy() {
+  async function run(kind: "copy" | "favorite" | "delete") {
     if (!item) return;
     try {
-      setIsCopying(true);
-      await onCopy(item.id);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      setBusy(kind);
+      if (kind === "copy") {
+        await onCopy(item.id);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      } else if (kind === "favorite") {
+        await onFavorite(item.id, !item.favorite);
+      } else {
+        await onDelete(item.id);
+        onClose();
+      }
     } catch {
-      // Mutation owns the user-facing error message.
+      // 错误提示由发起 mutation 的一方负责。
     } finally {
-      setIsCopying(false);
-    }
-  }
-
-  async function handleFavorite() {
-    if (!item) return;
-    try {
-      setIsFavoriting(true);
-      await onFavorite(item.id, !item.favorite);
-    } catch {
-      // Mutation owns the user-facing error message.
-    } finally {
-      setIsFavoriting(false);
-    }
-  }
-
-  async function handleDelete() {
-    if (!item) return;
-    try {
-      setIsDeleting(true);
-      await onDelete(item.id);
-      onClose();
-    } catch {
-      // Mutation owns the user-facing error message.
-    } finally {
-      setIsDeleting(false);
+      setBusy(null);
     }
   }
 
@@ -89,174 +69,127 @@ export function HistoryDetailModal({
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title={`历史详情 · ${formatKind(item.kind)}`}
-      maxWidth={740}
+      title={`详情 · ${formatKind(item.kind)}`}
+      maxWidth={680}
       footer={
-        <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
-          <div>
-            {canDelete && (
-              <button
-                className="btn btn-danger"
-                disabled={isDeleting}
-                onClick={() => void handleDelete()}
-              >
-                <TrashIcon size={15} />
-                <span>{isDeleting ? "正在删除…" : "删除记录"}</span>
-              </button>
-            )}
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            {isVisual && (
-              <button
-                className="btn btn-secondary"
-                onClick={() => {
-                  onClose();
-                  onAnnotate(item.id);
-                }}
-              >
-                <EditIcon size={15} />
-                <span>进入标注</span>
-              </button>
-            )}
-            {canFavorite && (
-              <button
-                className="btn btn-secondary"
-                disabled={isFavoriting}
-                onClick={() => void handleFavorite()}
-              >
-                <StarIcon size={15} filled={item.favorite} />
-                <span>{isFavoriting ? "正在更新…" : item.favorite ? "取消收藏" : "加入收藏"}</span>
-              </button>
-            )}
-            {canCopy && (
-              <button
-                className="btn btn-primary"
-                disabled={isCopying}
-                onClick={() => void handleCopy()}
-              >
-                {copied ? <CheckIcon size={15} /> : <CopyIcon size={15} />}
-                <span>{isCopying ? "正在复制…" : copied ? "已复制" : "复制正文"}</span>
-              </button>
-            )}
-          </div>
-        </div>
+        <>
+          {canDelete && (
+            <button
+              className="btn btn-danger"
+              disabled={busy !== null}
+              onClick={() => void run("delete")}
+            >
+              <TrashIcon size={14} />
+              <span>{busy === "delete" ? "删除中…" : "删除"}</span>
+            </button>
+          )}
+          <div className="spacer" />
+          {isVisual && (
+            <button
+              className="btn"
+              onClick={() => {
+                onClose();
+                onAnnotate(item.id);
+              }}
+            >
+              <EditIcon size={14} />
+              <span>标注</span>
+            </button>
+          )}
+          {canFavorite && (
+            <button
+              className="btn"
+              disabled={busy !== null}
+              onClick={() => void run("favorite")}
+            >
+              <StarIcon size={14} filled={item.favorite} />
+              <span>{item.favorite ? "取消收藏" : "收藏"}</span>
+            </button>
+          )}
+          {canCopy && (
+            <button
+              className="btn btn-primary"
+              disabled={busy !== null}
+              onClick={() => void run("copy")}
+            >
+              {copied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+              <span>{busy === "copy" ? "复制中…" : copied ? "已复制" : "复制"}</span>
+            </button>
+          )}
+        </>
       }
     >
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        {/* Meta Info Bar */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "10px 14px",
-            background: "rgba(255, 255, 255, 0.03)",
-            borderRadius: "var(--radius-md)",
-            fontSize: 12,
-            color: "var(--text-secondary)",
-          }}
-        >
+      <div style={{ display: "grid", gap: 14 }}>
+        <dl className="meta-grid">
           <div>
-            创建时间：<span style={{ color: "var(--text-primary)" }}>{new Date(item.createdAtMs).toLocaleString()}</span>
+            <dt>创建时间</dt>
+            <dd>{new Date(item.createdAtMs).toLocaleString()}</dd>
           </div>
           {item.sourceApp && (
             <div>
-              来源应用：<span style={{ color: "var(--text-primary)" }}>{item.sourceApp}</span>
+              <dt>来源应用</dt>
+              <dd>{item.sourceApp}</dd>
             </div>
           )}
           <div>
-            大小：<span style={{ color: "var(--text-primary)" }}>{formatBytes(item.logicalSize)}</span>
+            <dt>大小</dt>
+            <dd>{formatBytes(item.logicalSize)}</dd>
           </div>
-        </div>
+          {item.imageWidth && item.imageHeight && (
+            <div>
+              <dt>分辨率</dt>
+              <dd>
+                {item.imageWidth} × {item.imageHeight}
+              </dd>
+            </div>
+          )}
+          {item.kind === "FILES" && (
+            <div>
+              <dt>文件数</dt>
+              <dd>{item.fileCount ?? 1}</dd>
+            </div>
+          )}
+        </dl>
 
-        {/* Content Viewer */}
         {item.kind === "TEXT" && (
           <div
+            className="text-block"
             style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: 13,
-              lineHeight: 1.6,
-              padding: "14px 16px",
-              background: "rgba(0, 0, 0, 0.35)",
-              border: "1px solid var(--border-subtle)",
-              borderRadius: "var(--radius-md)",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-all",
-              maxHeight: 380,
+              maxHeight: 360,
               overflowY: "auto",
-              color: "#f1f5f9",
+              display: "block",
+              WebkitLineClamp: "unset",
               userSelect: "text",
             }}
           >
-            {item.preview || "无预览文本"}
+            {item.preview || "（无预览）"}
           </div>
         )}
 
         {isVisual && (
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: 16,
-              background: "rgba(0, 0, 0, 0.4)",
-              borderRadius: "var(--radius-md)",
-              border: "1px solid var(--border-subtle)",
-              gap: 12,
-            }}
-          >
+          <div className="viewer">
             {image.data ? (
-              <img
-                src={image.data}
-                alt="图片预览"
-                style={{
-                  maxWidth: "100%",
-                  maxHeight: 360,
-                  objectFit: "contain",
-                  borderRadius: 6,
-                  boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
-                }}
-              />
+              <img src={image.data} alt="预览" />
             ) : image.isError ? (
-              <div style={{ color: "var(--danger)", fontSize: 13 }}>
-                图片预览加载失败
-                <button
-                  className="btn btn-secondary"
-                  style={{ marginLeft: 10 }}
-                  onClick={() => void image.refetch()}
-                >
+              <div className="row">
+                <span style={{ color: "var(--danger)" }}>预览加载失败</span>
+                <button className="btn" onClick={() => void image.refetch()}>
                   重试
                 </button>
               </div>
             ) : (
-              <div style={{ color: "var(--text-muted)", fontSize: 13 }}>加载大图预览中…</div>
-            )}
-            {item.imageWidth && item.imageHeight && (
-              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                分辨率：{item.imageWidth} × {item.imageHeight} px
-              </div>
+              <span style={{ color: "var(--text-tertiary)" }}>载入预览…</span>
             )}
           </div>
         )}
 
         {item.kind === "FILES" && (
-          <div
-            style={{
-              padding: "16px 20px",
-              background: "rgba(0, 0, 0, 0.3)",
-              borderRadius: "var(--radius-md)",
-              border: "1px solid var(--border-subtle)",
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-            }}
-          >
-            <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text-primary)" }}>
-              {item.preview || "文件列表"}
-            </div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-              包含 {item.fileCount ?? 1} 个文件 · 总大小 {formatBytes(item.logicalSize)}
+          <div className="file-block">
+            <div>
+              <div className="list-row-title">{item.preview || "文件列表"}</div>
+              <div className="list-row-sub">
+                {item.fileCount ?? 1} 个文件 · {formatBytes(item.logicalSize)}
+              </div>
             </div>
           </div>
         )}
@@ -267,13 +200,20 @@ export function HistoryDetailModal({
 
 function formatKind(kind: string): string {
   switch (kind) {
-    case "TEXT": return "纯文本";
-    case "IMAGE": return "图片文件";
-    case "SCREENSHOT": return "屏幕截屏";
-    case "FILES": return "文件传输";
-    case "GIF": return "GIF 动图";
-    case "VIDEO": return "高清录像";
-    default: return kind;
+    case "TEXT":
+      return "文本";
+    case "IMAGE":
+      return "图片";
+    case "SCREENSHOT":
+      return "截图";
+    case "FILES":
+      return "文件";
+    case "GIF":
+      return "GIF";
+    case "VIDEO":
+      return "视频";
+    default:
+      return kind;
   }
 }
 

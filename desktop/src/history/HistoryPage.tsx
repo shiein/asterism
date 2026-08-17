@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   captureFullscreen,
@@ -22,12 +22,14 @@ import {
   TrashIcon,
   CropIcon,
   MaximizeIcon,
-  CameraIcon,
+  ClipboardIcon,
   EditIcon,
   FolderIcon,
   CheckIcon,
 } from "../components/icons";
 import type { ContentKind, HistoryItem } from "../types";
+
+const PAGE_SIZE = 80;
 
 const KINDS: Array<{ key: ContentKind | "ALL"; label: string }> = [
   { key: "ALL", label: "全部" },
@@ -38,6 +40,15 @@ const KINDS: Array<{ key: ContentKind | "ALL"; label: string }> = [
   { key: "GIF", label: "GIF" },
   { key: "VIDEO", label: "视频" },
 ];
+
+const KIND_BADGE: Record<ContentKind, { label: string; tone: string }> = {
+  TEXT: { label: "文本", tone: "" },
+  IMAGE: { label: "图片", tone: "accent" },
+  SCREENSHOT: { label: "截图", tone: "success" },
+  FILES: { label: "文件", tone: "warning" },
+  GIF: { label: "GIF", tone: "info" },
+  VIDEO: { label: "视频", tone: "info" },
+};
 
 export function HistoryPage({
   onAnnotate,
@@ -53,6 +64,7 @@ export function HistoryPage({
 
   const [detailItem, setDetailItem] = useState<HistoryItem | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [capturing, setCapturing] = useState<"region" | "fullscreen" | null>(null);
 
   const effectiveFavorite = favoriteFilter || favoriteOnly;
 
@@ -71,11 +83,11 @@ export function HistoryPage({
         query: query.trim() || undefined,
         kind: kind === "ALL" ? undefined : kind,
         favoriteOnly: effectiveFavorite,
-        limit: 80,
+        limit: PAGE_SIZE,
         cursor: pageParam,
       }),
     getNextPageParam: (page) => {
-      if (page.length < 80) return undefined;
+      if (page.length < PAGE_SIZE) return undefined;
       const last = page.at(-1);
       return last ? `${last.createdAtMs}:${last.id}` : undefined;
     },
@@ -93,10 +105,11 @@ export function HistoryPage({
     return () => unlisten?.();
   }, [queryClient]);
 
-  // Global hotkey to focus search bar with '/'
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "/" && document.activeElement !== searchInputRef.current) {
+      const target = e.target as HTMLElement | null;
+      const typing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA";
+      if (e.key === "/" && !typing) {
         e.preventDefault();
         searchInputRef.current?.focus();
       }
@@ -112,147 +125,154 @@ export function HistoryPage({
       success("已复制到剪贴板");
       setTimeout(() => setCopiedId(null), 1200);
     },
-    onError: (e) => showError(`复制失败: ${e}`),
+    onError: (e) => showError(`复制失败：${e}`),
   });
 
   const fav = useMutation({
     mutationFn: ({ id, favorite }: { id: string; favorite: boolean }) => setFavorite(id, favorite),
     onSuccess: (_, { id, favorite }) => {
-      setDetailItem((current) =>
-        current?.id === id ? { ...current, favorite } : current
-      );
+      setDetailItem((current) => (current?.id === id ? { ...current, favorite } : current));
       void queryClient.invalidateQueries({ queryKey: ["history"] });
-      toast(favorite ? "已添加至收藏" : "已从收藏移除");
+      toast(favorite ? "已加入收藏" : "已取消收藏");
     },
-    onError: (e) => showError(`更新收藏失败: ${e}`),
+    onError: (e) => showError(`更新收藏失败：${e}`),
   });
 
   const remove = useMutation({
     mutationFn: deleteItem,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["history"] });
-      toast("已删除剪贴板记录");
+      toast("已删除该记录");
     },
-    onError: (e) => showError(`删除失败: ${e}`),
+    onError: (e) => showError(`删除失败：${e}`),
   });
 
-  function handleOpenDetail(item: HistoryItem) {
-    setDetailItem(item);
+  async function runCapture(mode: "region" | "fullscreen") {
+    try {
+      setCapturing(mode);
+      const id = mode === "region" ? await captureRegion() : await captureFullscreen();
+      await queryClient.invalidateQueries({ queryKey: ["history"] });
+      success(mode === "region" ? "选区截图已保存并复制" : "全屏截图已保存并复制");
+      onAnnotate(id);
+    } catch (cause) {
+      const detail = String(cause);
+      if (!detail.includes("cancelled")) {
+        showError(`截图失败：${detail}`);
+      }
+    } finally {
+      setCapturing(null);
+    }
   }
 
+  const isEmpty = historyItems.length === 0 && !history.isLoading && !history.error;
+
   return (
-    <main className="main-content">
-      {/* Top Command & Search Bar */}
-      <header className="page-header">
-        <div className="header-top">
-          <div className="search-container">
-            <SearchIcon size={16} className="search-icon" />
+    <main className="pane">
+      <header className="pane-header">
+        <div className="pane-header-row">
+          <div className="search">
+            <SearchIcon size={14} />
             <input
               ref={searchInputRef}
-              className="search-input"
               value={query}
-              placeholder="搜索剪贴板文本、文件名、应用..."
+              placeholder="搜索文本、文件名或来源应用"
               onChange={(e) => setQuery(e.target.value)}
             />
-            {query ? (
-              <button
-                className="btn btn-ghost btn-icon search-shortcut"
-                style={{ right: 8, height: 24, width: 24 }}
-                onClick={() => setQuery("")}
-                aria-label="清空搜索"
-              >
-                <XIcon size={14} />
-              </button>
-            ) : (
-              <span className="search-shortcut">/</span>
-            )}
+            <span className="search-trailing">
+              {query ? (
+                <button
+                  className="btn btn-plain btn-icon"
+                  style={{ width: 22, height: 22, flex: "0 0 22px" }}
+                  onClick={() => setQuery("")}
+                  aria-label="清空搜索"
+                >
+                  <XIcon size={13} />
+                </button>
+              ) : (
+                <kbd className="hint">/</kbd>
+              )}
+            </span>
           </div>
 
-          <div className="header-actions">
+          <div className="row">
             <button
               className="btn btn-primary"
-              onClick={() => {
-                void captureRegion().then((id) => {
-                  void queryClient.invalidateQueries({ queryKey: ["history"] });
-                  success("选区截图已生成");
-                  onAnnotate(id);
-                });
-              }}
+              disabled={capturing !== null}
+              onClick={() => void runCapture("region")}
             >
-              <CropIcon size={15} />
-              <span>选区截图</span>
+              <CropIcon size={14} />
+              <span>{capturing === "region" ? "正在选区…" : "选区截图"}</span>
             </button>
             <button
-              className="btn btn-secondary"
-              onClick={() => {
-                void captureFullscreen().then((id) => {
-                  void queryClient.invalidateQueries({ queryKey: ["history"] });
-                  success("全屏截图已生成");
-                  onAnnotate(id);
-                });
-              }}
+              className="btn"
+              disabled={capturing !== null}
+              onClick={() => void runCapture("fullscreen")}
             >
-              <MaximizeIcon size={15} />
-              <span>全屏截图</span>
+              <MaximizeIcon size={14} />
+              <span>全屏</span>
             </button>
           </div>
         </div>
 
-        {/* Filter Pills */}
-        <div className="filter-bar">
+        <div className="row wrap">
           {KINDS.map((k) => (
             <button
               key={k.key}
-              className={`filter-chip ${kind === k.key ? "active" : ""}`}
+              className="chip"
+              aria-pressed={kind === k.key}
               onClick={() => setKind(k.key)}
             >
-              <span>{k.label}</span>
+              {k.label}
             </button>
           ))}
           {!favoriteFilter && (
             <button
-              className={`filter-chip ${favoriteOnly ? "active-fav" : ""}`}
+              className="chip starred"
+              aria-pressed={favoriteOnly}
               onClick={() => setFavoriteOnly(!favoriteOnly)}
             >
-              <StarIcon size={13} filled={favoriteOnly} />
-              <span>仅看收藏</span>
+              <StarIcon size={12} filled={favoriteOnly} />
+              仅收藏
             </button>
           )}
         </div>
       </header>
 
-      {/* History Grid / Feed */}
-      <div className="history-feed">
+      <div className="pane-body">
         {history.isLoading && (
-          <div className="empty-state">
-            <div className="empty-state-icon">
-              <CameraIcon size={24} />
+          <div className="empty">
+            <div className="empty-icon">
+              <ClipboardIcon size={20} />
             </div>
-            <div className="empty-state-title">正在读取剪贴板历史…</div>
+            <div className="empty-title">正在读取历史…</div>
           </div>
         )}
 
         {history.error && (
-          <div className="empty-state">
-            <div className="empty-state-title" style={{ color: "var(--danger)" }}>
-              读取失败：{(history.error as Error).message}
+          <div className="notice danger" style={{ marginBottom: 12 }}>
+            <XIcon size={15} className="notice-icon" />
+            <div>
+              <strong>读取历史失败</strong>
+              {(history.error as Error).message}
             </div>
           </div>
         )}
 
-        {historyItems.length === 0 && !history.isLoading && !history.error && (
-          <div className="empty-state">
-            <div className="empty-state-icon">
-              <SearchIcon size={24} />
+        {isEmpty && (
+          <div className="empty">
+            <div className="empty-icon">
+              <SearchIcon size={20} />
             </div>
-            <div className="empty-state-title">
-              {query ? "未找到匹配的剪贴板内容" : "还没有可显示的剪贴板历史"}
+            <div className="empty-title">
+              {query ? "没有匹配的内容" : favoriteFilter ? "还没有收藏" : "还没有剪贴板记录"}
             </div>
-            <div className="empty-state-sub">
-              {query ? "尝试更换搜索词，或清空筛选条件" : "复制任何文本、图片或截图，即可在此即时记录与同步"}
+            <div className="empty-sub">
+              {query
+                ? "换个关键词，或清空筛选条件"
+                : "复制任意文本、图片或截图，就会出现在这里"}
             </div>
             {query && (
-              <button className="btn btn-secondary" onClick={() => setQuery("")} style={{ marginTop: 8 }}>
+              <button className="btn" onClick={() => setQuery("")}>
                 清空搜索
               </button>
             )}
@@ -261,7 +281,7 @@ export function HistoryPage({
 
         <div className="history-grid">
           {historyItems.map((item) => (
-            <HistoryCard
+            <Entry
               key={item.id}
               item={item}
               copied={copiedId === item.id}
@@ -270,25 +290,24 @@ export function HistoryPage({
               onFavorite={() => fav.mutate({ id: item.id, favorite: !item.favorite })}
               onDelete={() => remove.mutate(item.id)}
               onAnnotate={() => onAnnotate(item.id)}
-              onOpenDetail={() => handleOpenDetail(item)}
+              onOpenDetail={() => setDetailItem(item)}
             />
           ))}
         </div>
 
         {history.hasNextPage && (
-          <div style={{ textAlign: "center", marginTop: 24 }}>
+          <div style={{ display: "grid", placeItems: "center", marginTop: 18 }}>
             <button
-              className="btn btn-secondary"
+              className="btn"
               disabled={history.isFetchingNextPage}
               onClick={() => void history.fetchNextPage()}
             >
-              {history.isFetchingNextPage ? "正在加载更多…" : "加载更多历史"}
+              {history.isFetchingNextPage ? "加载中…" : "加载更多"}
             </button>
           </div>
         )}
       </div>
 
-      {/* History Detail Modal */}
       <HistoryDetailModal
         item={detailItem}
         isOpen={Boolean(detailItem)}
@@ -305,7 +324,7 @@ export function HistoryPage({
   );
 }
 
-interface HistoryCardProps {
+interface EntryProps {
   item: HistoryItem;
   copied: boolean;
   showAction: (id: string) => boolean;
@@ -316,7 +335,7 @@ interface HistoryCardProps {
   onOpenDetail: () => void;
 }
 
-function HistoryCard({
+function Entry({
   item,
   copied,
   showAction,
@@ -325,47 +344,51 @@ function HistoryCard({
   onDelete,
   onAnnotate,
   onOpenDetail,
-}: HistoryCardProps) {
+}: EntryProps) {
   const isVisual = item.kind === "IMAGE" || item.kind === "SCREENSHOT" || item.kind === "GIF";
+  const badge = KIND_BADGE[item.kind];
 
   return (
-    <div className="history-card" onClick={onOpenDetail}>
-      {/* Header Meta */}
-      <div className="card-header">
-        <div className="card-meta-left">
-          <span className={`kind-badge ${item.kind.toLowerCase()}`}>{kindLabel(item.kind)}</span>
-          {item.sourceApp && <span className="source-app-tag">{item.sourceApp}</span>}
-          <span className="card-time">{formatRelativeTime(item.createdAtMs)}</span>
-        </div>
-        <div className="card-header-actions" onClick={(e) => e.stopPropagation()}>
-          {showAction("asterism.history.favorite") && (
-            <button
-              className={`fav-btn ${item.favorite ? "is-fav" : ""}`}
-              onClick={onFavorite}
-              title={item.favorite ? "取消收藏" : "加入收藏"}
-            >
-              <StarIcon size={15} filled={item.favorite} />
-            </button>
-          )}
-        </div>
+    <article className="entry" onClick={onOpenDetail}>
+      <div className="entry-head">
+        <span className={`badge ${badge.tone}`}>{badge.label}</span>
+        {item.sourceApp && <span className="entry-source">{item.sourceApp}</span>}
+        <span className="entry-time">{formatRelativeTime(item.createdAtMs)}</span>
+        {showAction("asterism.history.favorite") && (
+          <button
+            className={`star-btn ${item.favorite ? "on" : ""}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onFavorite();
+            }}
+            title={item.favorite ? "取消收藏" : "加入收藏"}
+          >
+            <StarIcon size={14} filled={item.favorite} />
+          </button>
+        )}
       </div>
 
-      {/* Body Content */}
-      <div className="card-body">
-        {item.kind === "TEXT" && (
-          <div className="text-preview-box">{item.preview || "无预览文本"}</div>
-        )}
+      <div className="entry-body">
+        {item.kind === "TEXT" && <div className="text-block">{item.preview || "（无预览）"}</div>}
 
-        {isVisual && (
-          <CardImageThumbnail id={item.id} />
+        {isVisual && <Thumbnail id={item.id} />}
+
+        {item.kind === "VIDEO" && (
+          <div className="file-block">
+            <FolderIcon size={18} style={{ color: "var(--text-tertiary)" }} />
+            <div>
+              <div className="list-row-title">视频片段</div>
+              <div className="list-row-sub">{formatBytes(item.logicalSize)}</div>
+            </div>
+          </div>
         )}
 
         {item.kind === "FILES" && (
-          <div className="files-preview-box">
-            <FolderIcon size={22} style={{ color: "var(--warning)" }} />
+          <div className="file-block">
+            <FolderIcon size={18} style={{ color: "var(--warning)" }} />
             <div>
-              <div className="files-info-title">{item.preview || "文件集合"}</div>
-              <div className="files-info-sub">
+              <div className="list-row-title">{item.preview || "文件集合"}</div>
+              <div className="list-row-sub">
                 {item.fileCount ?? 1} 个文件 · {formatBytes(item.logicalSize)}
               </div>
             </div>
@@ -373,46 +396,32 @@ function HistoryCard({
         )}
       </div>
 
-      {/* Footer Actions */}
-      <div className="card-footer" onClick={(e) => e.stopPropagation()}>
-        <span className="card-size-label">{formatBytes(item.logicalSize)}</span>
-        <div className="card-action-btns">
+      <div className="entry-foot" onClick={(e) => e.stopPropagation()}>
+        <span className="entry-size">{formatBytes(item.logicalSize)}</span>
+        <div className="row" style={{ gap: 4 }}>
           {isVisual && (
-            <button className="btn btn-ghost btn-icon" onClick={onAnnotate} title="标注">
+            <button className="btn btn-plain btn-icon" onClick={onAnnotate} title="标注">
               <EditIcon size={14} />
             </button>
           )}
           {showAction("asterism.history.delete") && (
-            <button
-              className="btn btn-ghost btn-icon"
-              style={{ color: "var(--text-muted)" }}
-              onClick={onDelete}
-              title="删除"
-            >
+            <button className="btn btn-plain btn-icon" onClick={onDelete} title="删除">
               <TrashIcon size={14} />
             </button>
           )}
           {showAction("asterism.history.copy") && (
-            <button
-              className={`btn ${copied ? "btn-secondary" : "btn-primary"}`}
-              style={{ padding: "4px 10px", fontSize: 12 }}
-              onClick={onCopy}
-            >
+            <button className={copied ? "btn" : "btn btn-primary"} onClick={onCopy}>
               {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
               <span>{copied ? "已复制" : "复制"}</span>
             </button>
           )}
         </div>
       </div>
-    </div>
+    </article>
   );
 }
 
-function CardImageThumbnail({
-  id,
-}: {
-  id: string;
-}) {
+function Thumbnail({ id }: { id: string }) {
   const preview = useQuery({
     queryKey: ["preview-image", id],
     queryFn: () => previewImage(id),
@@ -420,50 +429,32 @@ function CardImageThumbnail({
   });
 
   if (preview.isLoading) {
-    return (
-      <div className="thumbnail-preview-container" style={{ height: 110 }}>
-        <span style={{ fontSize: 12, color: "var(--text-muted)" }}>载入图片中…</span>
-      </div>
-    );
+    return <div className="thumb">载入图片…</div>;
   }
-
   if (preview.error || !preview.data) {
     return (
-      <div className="thumbnail-preview-container" style={{ height: 90 }}>
-        <span style={{ fontSize: 12, color: "var(--danger)" }}>缩略图无法展示</span>
+      <div className="thumb" style={{ color: "var(--danger)" }}>
+        缩略图不可用
       </div>
     );
   }
-
   return (
-    <div className="thumbnail-preview-container">
-      <img className="card-thumbnail" src={preview.data} alt="缩略图" loading="lazy" />
+    <div className="thumb">
+      <img src={preview.data} alt="缩略图" loading="lazy" />
     </div>
   );
 }
 
-function kindLabel(kind: ContentKind): string {
-  switch (kind) {
-    case "TEXT": return "文本";
-    case "IMAGE": return "图片";
-    case "SCREENSHOT": return "截图";
-    case "FILES": return "文件";
-    case "GIF": return "GIF";
-    case "VIDEO": return "视频";
-  }
-}
-
 function formatRelativeTime(ms: number): string {
-  const diff = Date.now() - ms;
-  const seconds = Math.floor(diff / 1000);
+  const seconds = Math.floor((Date.now() - ms) / 1000);
   if (seconds < 45) return "刚刚";
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}分钟前`;
+  if (minutes < 60) return `${minutes} 分钟前`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}小时前`;
+  if (hours < 24) return `${hours} 小时前`;
   const days = Math.floor(hours / 24);
   if (days === 1) return "昨天";
-  if (days < 7) return `${days}天前`;
+  if (days < 7) return `${days} 天前`;
   return new Date(ms).toLocaleDateString();
 }
 

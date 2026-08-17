@@ -340,18 +340,34 @@ fn select_recording_target(
 ) -> Result<RecordingTarget, CmdError> {
     ensure_recording_alive(&token)?;
     let backend = XcapBackend;
+    // 与截图同理：先拉起 overlay 进程，再去捕获，掩盖子进程启动时间。
+    let mut overlay = crate::overlay_cli::spawn_overlay().map_err(CmdError::from)?;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitor = asterism_capture::preferred_monitor(&monitors)
         .cloned()
         .ok_or_else(|| CmdError::Any("no monitor".into()))?;
     let first = backend.capture_display(&monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-    let selection = crate::overlay_cli::select_region_subprocess(&first, Some(&token))
+    overlay.submit(&first).map_err(|e| CmdError::Any(e.to_string()))?;
+    let selection = overlay
+        .wait(Some(&token))
         .map_err(|e| CmdError::Any(e.to_string()))?
+        .and_then(selection_of)
         .ok_or_else(|| CmdError::Any("cancelled".into()))?;
     let session = OverlaySession { frame: first, selection: Some(selection.clone()) };
     let (width, height, _) =
         session.crop_bgra().ok_or_else(|| CmdError::Any("empty selection".into()))?;
     Ok(RecordingTarget { monitor, selection, width, height })
+}
+
+/// 录制与滚动截图只关心选区，忽略 overlay 返回的标注场景。
+fn selection_of(outcome: asterism_capture::OverlayOutcome) -> Option<Selection> {
+    match outcome {
+        asterism_capture::OverlayOutcome::Complete { selection, .. }
+        | asterism_capture::OverlayOutcome::Download { selection, .. }
+        | asterism_capture::OverlayOutcome::Pin { selection, .. }
+        | asterism_capture::OverlayOutcome::Scroll { selection } => Some(selection),
+        asterism_capture::OverlayOutcome::Cancel => None,
+    }
 }
 
 fn ensure_recording_alive(token: &asterism_kernel::CancelToken) -> Result<(), CmdError> {
@@ -430,12 +446,16 @@ fn scroll_capture_inner(
         return Err(CmdError::Any("cancelled".into()));
     }
     let backend = XcapBackend;
+    let mut overlay = crate::overlay_cli::spawn_overlay().map_err(CmdError::from)?;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitor = asterism_capture::preferred_monitor(&monitors)
         .ok_or_else(|| CmdError::Any("no monitor".into()))?;
     let first = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
-    let sel = crate::overlay_cli::select_region_subprocess(&first, Some(&token))
-        .map_err(|e| CmdError::Any(e.to_string()))?;
+    overlay.submit(&first).map_err(|e| CmdError::Any(e.to_string()))?;
+    let sel = overlay
+        .wait(Some(&token))
+        .map_err(|e| CmdError::Any(e.to_string()))?
+        .and_then(selection_of);
     let mut engine = asterism_capture::ScrollCaptureEngine::default();
     let n = frames.clamp(2, 40);
     for i in 0..n {

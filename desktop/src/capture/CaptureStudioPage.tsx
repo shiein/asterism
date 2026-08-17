@@ -9,6 +9,7 @@ import {
   VideoIcon,
   PlayIcon,
   ShieldCheckIcon,
+  XIcon,
 } from "../components/icons";
 
 interface CaptureStudioPageProps {
@@ -42,12 +43,12 @@ export function CaptureStudioPage({ onAnnotate }: CaptureStudioPageProps) {
   function reportCaptureError(label: string, cause: unknown) {
     const detail = String(cause);
     if (detail.includes("screen capture permission denied")) {
-      error("当前运行的 Asterism 尚未获得屏幕录制权限。授权后请完全退出并重新打开应用，再点击重试。");
+      error("当前实例没有屏幕录制权限。授权后请完全退出并重新打开应用。");
       void permission.refetch();
       return;
     }
     if (detail.includes("microphone permission requested")) {
-      error("已发起麦克风授权。允许访问后，请再次开始视频录制。");
+      error("已发起麦克风授权。允许后请重新开始视频录制。");
       return;
     }
     if (!detail.includes("cancelled")) {
@@ -55,9 +56,14 @@ export function CaptureStudioPage({ onAnnotate }: CaptureStudioPageProps) {
     }
   }
 
-  async function runStillCapture(kind: Exclude<ActiveOperation, "gif" | "video" | null>) {
-    const command = kind === "region" ? "capture_region" : kind === "fullscreen" ? "capture_fullscreen" : "scroll_capture";
-    const label = kind === "region" ? "选区截图" : kind === "fullscreen" ? "全屏截图" : "滚动截图";
+  async function runStillCapture(kind: "region" | "fullscreen" | "scroll") {
+    const command =
+      kind === "region"
+        ? "capture_region"
+        : kind === "fullscreen"
+          ? "capture_fullscreen"
+          : "scroll_capture";
+    const label = kind === "region" ? "选区截图" : kind === "fullscreen" ? "全屏截图" : "滚动长图";
     try {
       setActiveOperation(kind);
       const id = await invoke<string>(command, kind === "scroll" ? { frames: 8 } : undefined);
@@ -76,19 +82,19 @@ export function CaptureStudioPage({ onAnnotate }: CaptureStudioPageProps) {
   async function startRecording(kind: "gif" | "video") {
     const label = kind === "gif" ? "GIF 录制" : "视频录制";
     if (kind === "video" && !isMac) {
-      toast("当前平台尚未提供 H.264 高清录制，未创建降级文件");
+      toast("当前平台还没有 H.264 原生编码，不提供降级格式");
       return;
     }
     try {
       setActiveOperation(kind);
-      toast("主窗口将隐藏：拖选区域后，倒计时 3 秒开始录制");
+      toast("主窗口将隐藏：拖选区域后倒计时 3 秒开始");
       if (kind === "gif") {
         await invoke("record_gif", { fps: 12 });
       } else {
         await invoke("record_video", { fps: 30, audio: audioMode });
       }
       await queryClient.invalidateQueries({ queryKey: ["history"] });
-      success(kind === "gif" ? "GIF 已生成并保存到历史" : "H.264 视频已保存到历史");
+      success(kind === "gif" ? "GIF 已保存到历史" : "视频已保存到历史");
     } catch (cause) {
       reportCaptureError(label, cause);
     } finally {
@@ -99,110 +105,159 @@ export function CaptureStudioPage({ onAnnotate }: CaptureStudioPageProps) {
   async function openPermissionSettings() {
     try {
       await invoke("open_screen_capture_settings");
-      toast("请为当前 Asterism 打开“屏幕与系统音频录制”，然后完全退出并重新打开应用");
+      toast("请勾选「屏幕与系统音频录制」，然后完全退出并重新打开应用");
     } catch (cause) {
       error(`无法打开系统设置：${cause}`);
     }
   }
 
   return (
-    <main className="main-content capture-studio">
-      <div className="capture-studio-scroll">
-        <header className="capture-hero">
-          <div className="capture-hero-copy">
-            <div className="capture-eyebrow"><span /> CAPTURE SUITE</div>
-            <h1>屏幕采集与标注</h1>
-            <p>支持即时窗口吸附、区域框选、浮动标注工具栏、滚动长图与动图录制。</p>
+    <main className="pane">
+      <header className="pane-header">
+        <div className="pane-header-row">
+          <div>
+            <div className="pane-title">采集工作台</div>
+            <div className="pane-subtitle">截图、滚动长图与屏幕录制</div>
           </div>
-          <PermissionPanel
-            status={permission.data}
-            loading={permission.isLoading}
-            onOpenSettings={() => void openPermissionSettings()}
-            onRefresh={() => void permission.refetch()}
-          />
-        </header>
+          <div className="flow" aria-label="录制流程">
+            <span>隐藏窗口</span>
+            <span>框选</span>
+            <span>倒计时</span>
+            <span>悬浮停止</span>
+          </div>
+        </div>
+      </header>
 
-        <section className="capture-primary-grid" aria-label="截图方式">
-          <button
-            className="capture-primary-card"
-            disabled={busy}
-            onClick={() => void runStillCapture("region")}
-          >
-            <div className="capture-focus-mark" aria-hidden="true">
-              <span className="corner corner-tl" /><span className="corner corner-tr" />
-              <span className="corner corner-bl" /><span className="corner corner-br" />
-              <span className="focus-star">✦</span>
-            </div>
-            <div className="capture-primary-copy">
-              <span className="capture-card-kicker">PRIMARY</span>
-              <h2>{activeOperation === "region" ? "正在唤起选区…" : "选区截图"}</h2>
-              <p>无感变暗与智能窗口吸附，框选后直接在屏幕上标注或复制。</p>
-              <span className="capture-card-action"><CropIcon size={16} /> 开始截图</span>
-            </div>
-          </button>
+      <div className="pane-body">
+        <PermissionNotice
+          status={permission.data}
+          loading={permission.isLoading}
+          onOpenSettings={() => void openPermissionSettings()}
+          onRefresh={() => void permission.refetch()}
+        />
 
-          <div className="capture-quick-stack">
-            <button className="capture-quick-card" disabled={busy} onClick={() => void runStillCapture("fullscreen")}>
-              <span className="capture-quick-icon cyan"><MaximizeIcon size={21} /></span>
-              <span><strong>全屏截图</strong><small>隐藏窗口后捕获光标所在屏幕</small></span>
-              <span className="capture-arrow">↗</span>
-            </button>
-            <button className="capture-quick-card" disabled={busy} onClick={() => void runStillCapture("scroll")}>
-              <span className="capture-quick-icon amber"><ScrollIcon size={21} /></span>
-              <span><strong>滚动长图</strong><small>选区后自动滚动并智能拼接</small></span>
-              <span className="capture-arrow">↗</span>
-            </button>
+        <section className="section">
+          <div className="section-head">
+            <h3>
+              <CropIcon size={15} />
+              截图
+            </h3>
+            <span className="badge">Esc 取消 · 右键回退</span>
+          </div>
+          <div className="section-body">
+            <div className="capture-grid">
+              <button
+                className="capture-tile primary"
+                disabled={busy}
+                onClick={() => void runStillCapture("region")}
+              >
+                <span className="capture-tile-icon">
+                  <CropIcon size={17} />
+                </span>
+                <span className="capture-tile-title">
+                  {activeOperation === "region" ? "正在框选…" : "选区截图"}
+                </span>
+                <span className="capture-tile-desc">
+                  直接在当前画面上框选，自动吸附窗口，框好即可标注
+                </span>
+                <span className="capture-tile-meta">工具栏支持矩形 / 箭头 / 马赛克 / 文字</span>
+              </button>
+
+              <button
+                className="capture-tile"
+                disabled={busy}
+                onClick={() => void runStillCapture("fullscreen")}
+              >
+                <span className="capture-tile-icon">
+                  <MaximizeIcon size={17} />
+                </span>
+                <span className="capture-tile-title">
+                  {activeOperation === "fullscreen" ? "正在截图…" : "全屏截图"}
+                </span>
+                <span className="capture-tile-desc">捕获光标所在的整块屏幕</span>
+                <span className="capture-tile-meta">自动写入剪贴板与历史</span>
+              </button>
+
+              <button
+                className="capture-tile"
+                disabled={busy}
+                onClick={() => void runStillCapture("scroll")}
+              >
+                <span className="capture-tile-icon">
+                  <ScrollIcon size={17} />
+                </span>
+                <span className="capture-tile-title">
+                  {activeOperation === "scroll" ? "正在滚动拼接…" : "滚动长图"}
+                </span>
+                <span className="capture-tile-desc">框选后自动滚动，按重叠区域拼接</span>
+                <span className="capture-tile-meta">匹配置信度过低会提前停止</span>
+              </button>
+            </div>
           </div>
         </section>
 
-        <section className="recording-section">
-          <div className="capture-section-heading">
-            <div>
-              <span className="capture-card-kicker">RECORD</span>
-              <h2>动态录制</h2>
-            </div>
-            <div className="capture-flow-pills" aria-label="录制流程">
-              <span>窗口隐藏</span><i>→</i><span>选区</span><i>→</i><span>3 秒倒计时</span><i>→</i><span>悬浮停止</span>
-            </div>
+        <section className="section">
+          <div className="section-head">
+            <h3>
+              <VideoIcon size={15} />
+              录制
+            </h3>
+            <span className="badge">悬浮控制条不会进入画面</span>
           </div>
-
-          <div className="recording-grid">
-            <article className="recording-card gif-card">
-              <div className="recording-card-top">
-                <span className="recording-format-icon"><PlayIcon size={17} /></span>
-                <span className="recording-format">GIF · 12 FPS</span>
-              </div>
-              <h3>录到你点击停止</h3>
-              <p>不再预设 3 秒或 5 秒上限。浮动控制条受系统防捕获保护，不会进入最终画面。</p>
-              <button className="recording-start-button" disabled={busy} onClick={() => void startRecording("gif")}>
-                <span className="record-dot" />
-                {activeOperation === "gif" ? "录制进行中" : "开始 GIF 录制"}
+          <div className="section-body">
+            <div className="capture-grid">
+              <button
+                className="capture-tile"
+                disabled={busy}
+                onClick={() => void startRecording("gif")}
+              >
+                <span className="capture-tile-icon">
+                  <PlayIcon size={16} />
+                </span>
+                <span className="capture-tile-title">
+                  {activeOperation === "gif" ? "GIF 录制中…" : "录制 GIF"}
+                </span>
+                <span className="capture-tile-desc">12 FPS，录到你点击停止为止</span>
+                <span className="capture-tile-meta">
+                  <i className="record-dot" />
+                  无时长上限
+                </span>
               </button>
-            </article>
 
-            <article className="recording-card video-card">
-              <div className="recording-card-top">
-                <span className="recording-format-icon"><VideoIcon size={18} /></span>
-                <span className="recording-format">H.264 · 原始选区 · 30 FPS</span>
-              </div>
-              <h3>高清视频，同一套顺手流程</h3>
-              <p>{isMac ? "硬件编码 MP4；时长由你控制。可按场景选择是否录入声音。" : "当前平台的 H.264 原生编码尚未完成，因此不会用低清格式伪装成功。"}</p>
-              <div className="recording-controls">
-                <label>
-                  <span>音频</span>
-                  <select value={audioMode} onChange={(event) => setAudioMode(event.target.value as AudioMode)} disabled={busy || !isMac}>
+              <div className="capture-tile" style={{ cursor: "default" }}>
+                <span className="capture-tile-icon">
+                  <VideoIcon size={17} />
+                </span>
+                <span className="capture-tile-title">录制视频</span>
+                <span className="capture-tile-desc">
+                  {isMac
+                    ? "H.264 硬件编码 MP4，30 FPS，可选录入声音"
+                    : "当前平台的 H.264 原生编码尚未完成，不会用低清格式冒充"}
+                </span>
+                <div className="row" style={{ width: "100%", marginTop: "auto" }}>
+                  <select
+                    className="select"
+                    style={{ maxWidth: 132 }}
+                    value={audioMode}
+                    onChange={(event) => setAudioMode(event.target.value as AudioMode)}
+                    disabled={busy || !isMac}
+                    aria-label="音频来源"
+                  >
                     <option value="none">无音频</option>
                     <option value="system">系统声音</option>
                     <option value="mic">麦克风</option>
                     <option value="both">系统 + 麦克风</option>
                   </select>
-                </label>
-                <button className="recording-start-button" disabled={busy || !isMac} onClick={() => void startRecording("video")}>
-                  <span className="record-dot" />
-                  {activeOperation === "video" ? "录制进行中" : isMac ? "开始视频录制" : "当前平台不可用"}
-                </button>
+                  <button
+                    className="btn btn-primary"
+                    disabled={busy || !isMac}
+                    onClick={() => void startRecording("video")}
+                  >
+                    {activeOperation === "video" ? "录制中…" : isMac ? "开始" : "不可用"}
+                  </button>
+                </div>
               </div>
-            </article>
+            </div>
           </div>
         </section>
       </div>
@@ -210,7 +265,7 @@ export function CaptureStudioPage({ onAnnotate }: CaptureStudioPageProps) {
   );
 }
 
-function PermissionPanel({
+function PermissionNotice({
   status,
   loading,
   onOpenSettings,
@@ -222,29 +277,45 @@ function PermissionPanel({
   onRefresh: () => void;
 }) {
   if (loading || !status) {
-    return <div className="permission-panel checking"><span className="permission-pulse" />正在检测屏幕捕获权限…</div>;
+    return (
+      <div className="notice" style={{ marginBottom: 14 }}>
+        <ShieldCheckIcon size={15} className="notice-icon" />
+        <div>正在检测屏幕捕获权限…</div>
+      </div>
+    );
   }
   if (status.granted) {
     return (
-      <div className="permission-panel granted">
-        <ShieldCheckIcon size={20} />
-        <div><strong>屏幕捕获已授权</strong><small>当前进程 · {status.processName}</small></div>
+      <div className="notice success" style={{ marginBottom: 14 }}>
+        <ShieldCheckIcon size={15} className="notice-icon" />
+        <div>
+          <strong>屏幕捕获已授权</strong>
+          当前进程 {status.processName}
+        </div>
       </div>
     );
   }
   return (
-    <div className="permission-panel denied">
-      <div className="permission-panel-copy">
-        <span className="permission-alert">!</span>
+    <div className="notice danger" style={{ marginBottom: 14, flexDirection: "column" }}>
+      <div className="row" style={{ alignItems: "flex-start" }}>
+        <XIcon size={15} className="notice-icon" />
         <div>
           <strong>当前运行实例未获授权</strong>
-          <small>系统权限按应用身份绑定；列表里已有旧 Asterism，也不代表当前进程已获授权。</small>
-          <code>{status.bundleId} · {status.processName}</code>
+          系统权限按应用身份绑定：列表里存在旧的 Asterism，不代表当前进程已获授权。
+          <div style={{ marginTop: 4, fontFamily: "var(--font-mono)", fontSize: 11 }}>
+            {status.bundleId} · {status.processName}
+          </div>
         </div>
       </div>
-      <div className="permission-actions">
-        {status.settingsAvailable && <button onClick={onOpenSettings}>打开系统设置</button>}
-        <button className="permission-refresh" onClick={onRefresh}>重新检测</button>
+      <div className="row" style={{ marginTop: 10 }}>
+        {status.settingsAvailable && (
+          <button className="btn" onClick={onOpenSettings}>
+            打开系统设置
+          </button>
+        )}
+        <button className="btn btn-plain" onClick={onRefresh}>
+          重新检测
+        </button>
       </div>
     </div>
   );

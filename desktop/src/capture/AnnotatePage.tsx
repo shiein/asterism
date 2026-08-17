@@ -1,7 +1,19 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useToast } from "../components/Toast";
-import { CheckIcon, XIcon, CropIcon } from "../components/icons";
+import {
+  CheckIcon,
+  XIcon,
+  EditIcon,
+  SquareIcon,
+  CircleIcon,
+  ArrowIcon,
+  PenIcon,
+  MosaicIcon,
+  TypeIcon,
+  UndoIcon,
+  RedoIcon,
+} from "../components/icons";
 
 type Tool = "rectangle" | "ellipse" | "arrow" | "brush" | "mosaic" | "text";
 
@@ -19,32 +31,62 @@ interface Source {
   height: number;
 }
 
+/** 标注墨色。必须与 Rust `annotation::draw_annotation` 的默认色 (255,59,48) 一致。 */
+const MARK_COLOR = "#ff3b30";
+
+const TOOLS: Array<{ key: Tool; label: string; icon: React.ReactNode }> = [
+  { key: "rectangle", label: "矩形", icon: <SquareIcon size={15} /> },
+  { key: "ellipse", label: "椭圆", icon: <CircleIcon size={15} /> },
+  { key: "arrow", label: "箭头", icon: <ArrowIcon size={15} /> },
+  { key: "brush", label: "画笔", icon: <PenIcon size={15} /> },
+  { key: "mosaic", label: "马赛克", icon: <MosaicIcon size={15} /> },
+  { key: "text", label: "文字（仅 ASCII）", icon: <TypeIcon size={15} /> },
+];
+
+/// 与 Rust 侧 `annotation::mosaic_mask` 保持同一套取值规则，
+/// 保证预览看到的糊法就是导出结果。
+function mosaicMetrics(source: Source) {
+  const block = Math.max(8, Math.round(Math.min(source.width, source.height) / 90));
+  return { block, radius: block * 1.5 };
+}
+
+function strokeWidth(source: Source) {
+  return Math.max(2, Math.round(Math.min(source.width, source.height) / 320));
+}
+
+function fontScale(source: Source) {
+  return Math.max(2, Math.round(Math.min(source.width, source.height) / 220));
+}
+
 export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () => void }) {
   const { success, error: showError } = useToast();
   const [source, setSource] = useState<Source | null>(null);
   const [items, setItems] = useState<Ann[]>([]);
-  const [undo, setUndo] = useState<Ann[][]>([]);
-  const [redo, setRedo] = useState<Ann[][]>([]);
+  const [undoStack, setUndoStack] = useState<Ann[][]>([]);
+  const [redoStack, setRedoStack] = useState<Ann[][]>([]);
   const [tool, setTool] = useState<Tool>("rectangle");
   const [isSaving, setIsSaving] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [currentStroke, setCurrentStroke] = useState<number[]>([]);
-  
-  const surface = useRef<HTMLDivElement>(null);
-  const start = useRef<[number, number] | null>(null);
+  const [draftStroke, setDraftStroke] = useState<number[] | null>(null);
+  const [textDraft, setTextDraft] = useState<{ x: number; y: number; value: string } | null>(null);
+  const [asciiWarning, setAsciiWarning] = useState(false);
+
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const dragStart = useRef<[number, number] | null>(null);
 
   const loadSource = useCallback(async () => {
     setSource(null);
     setLoadError(null);
     setItems([]);
-    setUndo([]);
-    setRedo([]);
+    setUndoStack([]);
+    setRedoStack([]);
     try {
       setSource(await invoke<Source>("annotation_source", { itemId }));
     } catch (e) {
       const message = String(e);
       setLoadError(message);
-      showError(`读取待标注画面失败: ${message}`);
+      showError(`读取待标注画面失败：${message}`);
     }
   }, [itemId, showError]);
 
@@ -52,37 +94,52 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
     void loadSource();
   }, [loadSource]);
 
-  const push = useCallback((next: Ann[]) => {
-    setUndo((history) => [...history, items]);
-    setRedo([]);
-    setItems(next);
-  }, [items]);
+  // 解码原图，之后每次重绘都从它开始，避免在已经画过的画面上叠加。
+  useEffect(() => {
+    if (!source) {
+      imageRef.current = null;
+      return;
+    }
+    const image = new Image();
+    image.onload = () => {
+      imageRef.current = image;
+      setItems((current) => [...current]);
+    };
+    image.src = source.data_url;
+  }, [source]);
 
-  const undoOnce = useCallback(() => {
-    const previous = undo.at(-1);
+  const commit = useCallback(
+    (next: Ann[]) => {
+      setUndoStack((history) => [...history, items]);
+      setRedoStack([]);
+      setItems(next);
+    },
+    [items]
+  );
+
+  const undo = useCallback(() => {
+    const previous = undoStack.at(-1);
     if (!previous) return;
-    setUndo((history) => history.slice(0, -1));
-    setRedo((history) => [...history, items]);
+    setUndoStack((history) => history.slice(0, -1));
+    setRedoStack((history) => [...history, items]);
     setItems(previous);
-  }, [undo, items]);
+  }, [undoStack, items]);
 
-  const redoOnce = useCallback(() => {
-    const next = redo.at(-1);
+  const redo = useCallback(() => {
+    const next = redoStack.at(-1);
     if (!next) return;
-    setRedo((history) => history.slice(0, -1));
-    setUndo((history) => [...history, items]);
+    setRedoStack((history) => history.slice(0, -1));
+    setUndoStack((history) => [...history, items]);
     setItems(next);
-  }, [redo, items]);
+  }, [redoStack, items]);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key === "z") {
+      if (textDraft) return;
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
-        if (e.shiftKey) {
-          redoOnce();
-        } else {
-          undoOnce();
-        }
+        if (e.shiftKey) redo();
+        else undo();
       } else if (e.key === "Escape") {
         e.preventDefault();
         onDone();
@@ -90,15 +147,111 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [undoOnce, redoOnce, onDone]);
+  }, [undo, redo, onDone, textDraft]);
 
-  function imagePoint(clientX: number, clientY: number): [number, number] | null {
-    if (!source || !surface.current) return null;
-    const rect = surface.current.getBoundingClientRect();
+  const liveAnnotation = useMemo<Ann | null>(() => {
+    if (!source || !draftStroke || draftStroke.length < 2) return null;
+    return buildAnnotation(tool, draftStroke, source, "__live__", items.length);
+  }, [draftStroke, tool, source, items.length]);
+
+  const draftText = useMemo<Ann | null>(() => {
+    if (!source || !textDraft || !textDraft.value) return null;
+    return {
+      id: "__draft__",
+      kind: "text",
+      geometry: [textDraft.x, textDraft.y],
+      style: { text: textDraft.value, font_scale: fontScale(source) },
+      z_index: Number.MAX_SAFE_INTEGER,
+    };
+  }, [textDraft, source]);
+
+  // 重绘：原图 → 标注（按 z_index 顺序），马赛克走真实像素化。
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const image = imageRef.current;
+    if (!canvas || !image || !source) return;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    const all = [...items];
+    if (liveAnnotation) all.push(liveAnnotation);
+    if (draftText) all.push(draftText);
+    all.sort((a, b) => a.z_index - b.z_index);
+    for (const ann of all) {
+      drawAnnotation(ctx, ann, source);
+    }
+  }, [items, liveAnnotation, draftText, source]);
+
+  function imagePoint(event: React.PointerEvent): [number, number] | null {
+    const canvas = canvasRef.current;
+    if (!canvas || !source) return null;
+    const rect = canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return null;
-    const x = ((clientX - rect.left) * source.width) / rect.width;
-    const y = ((clientY - rect.top) * source.height) / rect.height;
-    return [Math.max(0, Math.min(source.width, x)), Math.max(0, Math.min(source.height, y))];
+    const x = ((event.clientX - rect.left) * source.width) / rect.width;
+    const y = ((event.clientY - rect.top) * source.height) / rect.height;
+    return [
+      Math.max(0, Math.min(source.width, x)),
+      Math.max(0, Math.min(source.height, y)),
+    ];
+  }
+
+  function handlePointerDown(event: React.PointerEvent) {
+    const point = imagePoint(event);
+    if (!point || !source) return;
+    if (tool === "text") {
+      setTextDraft({ x: point[0], y: point[1], value: "" });
+      return;
+    }
+    dragStart.current = point;
+    setDraftStroke([point[0], point[1]]);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handlePointerMove(event: React.PointerEvent) {
+    if (!dragStart.current) return;
+    const point = imagePoint(event);
+    if (!point) return;
+    setDraftStroke((previous) => {
+      if (!previous) return previous;
+      if (tool === "brush" || tool === "mosaic") return [...previous, point[0], point[1]];
+      return [previous[0], previous[1], point[0], point[1]];
+    });
+  }
+
+  function handlePointerUp(event: React.PointerEvent) {
+    if (!dragStart.current || !source) return;
+    const point = imagePoint(event) ?? dragStart.current;
+    const stroke =
+      draftStroke && draftStroke.length >= 4
+        ? draftStroke
+        : [dragStart.current[0], dragStart.current[1], point[0], point[1]];
+    dragStart.current = null;
+    setDraftStroke(null);
+    const annotation = buildAnnotation(tool, stroke, source, crypto.randomUUID(), items.length);
+    if (annotation) commit([...items, annotation]);
+  }
+
+  function commitTextDraft() {
+    if (!textDraft || !source) {
+      setTextDraft(null);
+      return;
+    }
+    if (textDraft.value) {
+      commit([
+        ...items,
+        {
+          id: crypto.randomUUID(),
+          kind: "text",
+          geometry: [textDraft.x, textDraft.y],
+          style: { text: textDraft.value, font_scale: fontScale(source) },
+          z_index: items.length,
+        },
+      ]);
+    }
+    setTextDraft(null);
   }
 
   async function handleExport() {
@@ -106,229 +259,141 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
     try {
       setIsSaving(true);
       await invoke("export_annotated", { itemId, scene: { items } });
-      success("标注已完成并保存至剪贴板与历史");
+      success("标注已保存并复制到剪贴板");
       onDone();
     } catch (e) {
-      showError(`保存失败: ${e}`);
+      showError(`保存失败：${e}`);
     } finally {
       setIsSaving(false);
     }
   }
 
+  const displayScale = useMemo(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !source) return 1;
+    const rect = canvas.getBoundingClientRect();
+    return rect.width > 0 ? rect.width / source.width : 1;
+  }, [source, items]);
+
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        backgroundColor: "rgba(15, 23, 42, 0.85)",
-        backdropFilter: "blur(16px)",
-        display: "flex",
-        flexDirection: "column",
-        zIndex: 1100,
-      }}
-    >
-      {/* Header Toolbar */}
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "12px 24px",
-          borderBottom: "1px solid var(--border-subtle)",
-          background: "var(--bg-card)",
-          boxShadow: "var(--shadow-sm)",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div className="brand-icon" style={{ width: 26, height: 26 }}>
-            <CropIcon size={15} />
-          </div>
-          <span style={{ fontSize: 15, fontWeight: 600, color: "var(--text-primary)" }}>标注工作室</span>
+    <div className="studio">
+      <header className="studio-bar">
+        <div className="row" style={{ gap: 7 }}>
+          <EditIcon size={15} style={{ color: "var(--text-tertiary)" }} />
+          <span style={{ fontSize: 13, fontWeight: 600 }}>标注</span>
         </div>
 
-        {/* Tools */}
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {(["rectangle", "ellipse", "arrow", "brush", "mosaic", "text"] as Tool[]).map((t) => (
+        <div className="studio-tools" role="group" aria-label="标注工具">
+          {TOOLS.map((entry) => (
             <button
-              key={t}
-              className={`filter-chip ${tool === t ? "active" : ""}`}
-              onClick={() => setTool(t)}
+              key={entry.key}
+              className="tool-btn"
+              aria-pressed={tool === entry.key}
+              title={entry.label}
+              onClick={() => {
+                commitTextDraft();
+                setTool(entry.key);
+              }}
             >
-              <span>{toolLabel(t)}</span>
+              {entry.icon}
             </button>
           ))}
-          <div style={{ width: 1, height: 20, background: "var(--border-subtle)", margin: "0 4px" }} />
-          <button className="btn btn-secondary" disabled={undo.length === 0} onClick={undoOnce} title="撤销 (⌘Z)">
-            <span>撤销</span>
+        </div>
+
+        <div className="studio-tools">
+          <button
+            className="tool-btn"
+            title="撤销 (⌘Z)"
+            disabled={undoStack.length === 0}
+            onClick={undo}
+          >
+            <UndoIcon size={15} />
           </button>
-          <button className="btn btn-secondary" disabled={redo.length === 0} onClick={redoOnce} title="重做 (⌘⇧Z)">
-            <span>重做</span>
+          <button
+            className="tool-btn"
+            title="重做 (⌘⇧Z)"
+            disabled={redoStack.length === 0}
+            onClick={redo}
+          >
+            <RedoIcon size={15} />
           </button>
         </div>
 
-        {/* Actions */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <button className="btn btn-ghost" onClick={onDone}>
-            <XIcon size={15} />
-            <span>取消</span>
-          </button>
-          <button className="btn btn-primary" disabled={!source || isSaving} onClick={handleExport}>
-            <CheckIcon size={15} />
-            <span>{isSaving ? "正在生成…" : "完成并复制"}</span>
-          </button>
-        </div>
-      </header>
+        <div className="spacer" />
 
-      {/* Main Canvas Area */}
-      <div
-        style={{
-          flex: 1,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          overflow: "auto",
-          padding: 24,
-          background: "var(--bg-app)",
-        }}
-      >
-        {!source && !loadError && (
-          <div className="empty-state">
-            <div className="empty-state-title">正在读取待标注画面…</div>
-          </div>
+        {asciiWarning && (
+          <span className="badge warning">导出字体仅支持 ASCII，非 ASCII 字符已忽略</span>
         )}
 
+        <button className="btn" onClick={onDone}>
+          <XIcon size={14} />
+          <span>取消</span>
+        </button>
+        <button
+          className="btn btn-primary"
+          disabled={!source || isSaving}
+          onClick={() => void handleExport()}
+        >
+          <CheckIcon size={14} />
+          <span>{isSaving ? "生成中…" : "完成并复制"}</span>
+        </button>
+      </header>
+
+      <div className="studio-stage">
+        {!source && !loadError && <div className="empty-title">正在读取画面…</div>}
+
         {!source && loadError && (
-          <div className="empty-state">
-            <div className="empty-state-title" style={{ color: "var(--danger)" }}>
-              待读取画面加载失败
+          <div className="empty">
+            <div className="empty-title" style={{ color: "var(--danger)" }}>
+              画面加载失败
             </div>
-            <div className="empty-state-sub">{loadError}</div>
-            <button className="btn btn-secondary" onClick={() => void loadSource()}>
+            <div className="empty-sub">{loadError}</div>
+            <button className="btn" onClick={() => void loadSource()}>
               重试
             </button>
           </div>
         )}
 
         {source && (
-          <div
-            ref={surface}
-            style={{
-              position: "relative",
-              display: "inline-block",
-              maxWidth: "100%",
-              maxHeight: "100%",
-              lineHeight: 0,
-              cursor: "crosshair",
-              boxShadow: "var(--shadow-lg)",
-              borderRadius: 6,
-              overflow: "hidden",
-              border: "1px solid var(--border-hover)",
-              touchAction: "none",
-            }}
-            onPointerDown={(event) => {
-              const pt = imagePoint(event.clientX, event.clientY);
-              if (!pt) return;
-              start.current = pt;
-              setCurrentStroke([pt[0], pt[1]]);
-              event.currentTarget.setPointerCapture(event.pointerId);
-            }}
-            onPointerMove={(event) => {
-              if (!start.current) return;
-              const pt = imagePoint(event.clientX, event.clientY);
-              if (!pt) return;
-              if (tool === "brush" || tool === "mosaic") {
-                setCurrentStroke((prev) => [...prev, pt[0], pt[1]]);
-              }
-            }}
-            onPointerUp={(event) => {
-              const from = start.current;
-              const to = imagePoint(event.clientX, event.clientY);
-              start.current = null;
-              if (!from || !to) return;
-              const [x0, y0] = from;
-              const [x1, y1] = to;
-
-              let geometry: number[];
-              if (tool === "brush" || tool === "mosaic") {
-                geometry = currentStroke.length >= 2 ? currentStroke : [x0, y0, x1, y1];
-              } else if (tool === "arrow") {
-                geometry = [x0, y0, x1, y1];
-              } else if (tool === "text") {
-                geometry = [x0, y0];
-              } else {
-                geometry = [
-                  Math.min(x0, x1),
-                  Math.min(y0, y1),
-                  Math.max(2, Math.abs(x1 - x0)),
-                  Math.max(2, Math.abs(y1 - y0)),
-                ];
-              }
-
-              push([
-                ...items,
-                {
-                  id: crypto.randomUUID(),
-                  kind: tool,
-                  geometry,
-                  style: {
-                    stroke_width: 3.5,
-                    brush_radius: 14.0,
-                    block_size: 12,
-                    text: tool === "text" ? "标注文本" : undefined,
-                  },
-                  z_index: items.length,
-                },
-              ]);
-              setCurrentStroke([]);
-            }}
-          >
-            <img
-              src={source.data_url}
-              alt="待标注截图"
-              draggable={false}
-              style={{
-                display: "block",
-                maxWidth: "100%",
-                maxHeight: "calc(100vh - 120px)",
-                objectFit: "contain",
-                userSelect: "none",
-              }}
+          <div className="studio-canvas">
+            <canvas
+              ref={canvasRef}
+              width={source.width}
+              height={source.height}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
             />
-            <svg
-              viewBox={`0 0 ${source.width} ${source.height}`}
-              style={{
-                position: "absolute",
-                inset: 0,
-                width: "100%",
-                height: "100%",
-                pointerEvents: "none",
-              }}
-            >
-              <defs>
-                <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-                  <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444" />
-                </marker>
-                <pattern id="mosaic-pat" width="12" height="12" patternUnits="userSpaceOnUse">
-                  <rect width="6" height="6" fill="rgba(148, 163, 184, 0.45)" />
-                  <rect x="6" width="6" height="6" fill="rgba(100, 116, 139, 0.45)" />
-                  <rect y="6" width="6" height="6" fill="rgba(100, 116, 139, 0.45)" />
-                  <rect x="6" y="6" width="6" height="6" fill="rgba(148, 163, 184, 0.45)" />
-                </pattern>
-              </defs>
-              {items.map((ann) => (
-                <AnnotationPreview key={ann.id} annotation={ann} />
-              ))}
-              {currentStroke.length >= 2 && (tool === "brush" || tool === "mosaic") && (
-                <polyline
-                  points={currentStroke.reduce((acc, val, i) => `${acc}${i % 2 === 0 ? " " : ","}${val}`, "").trim()}
-                  fill="none"
-                  stroke={tool === "mosaic" ? "url(#mosaic-pat)" : "#ef4444"}
-                  strokeWidth={tool === "mosaic" ? 24 : 4}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              )}
-            </svg>
+            {textDraft && (
+              <input
+                autoFocus
+                className="input"
+                value={textDraft.value}
+                style={{
+                  position: "absolute",
+                  left: textDraft.x * displayScale,
+                  top: textDraft.y * displayScale,
+                  width: 200,
+                  zIndex: 2,
+                }}
+                placeholder="输入文字后回车"
+                onChange={(event) => {
+                  const filtered = event.target.value.replace(/[^\x20-\x7E]/g, "");
+                  setAsciiWarning(filtered !== event.target.value);
+                  setTextDraft((draft) => (draft ? { ...draft, value: filtered } : draft));
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitTextDraft();
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    setTextDraft(null);
+                  }
+                }}
+                onBlur={commitTextDraft}
+              />
+            )}
           </div>
         )}
       </div>
@@ -336,74 +401,210 @@ export function AnnotatePage({ itemId, onDone }: { itemId: string; onDone: () =>
   );
 }
 
-function toolLabel(tool: Tool): string {
-  switch (tool) {
-    case "rectangle": return "矩形";
-    case "ellipse": return "椭圆";
-    case "arrow": return "箭头";
-    case "brush": return "画笔";
-    case "mosaic": return "马赛克 (实时画笔)";
-    case "text": return "文字";
+function buildAnnotation(
+  tool: Tool,
+  stroke: number[],
+  source: Source,
+  id: string,
+  index: number
+): Ann | null {
+  const width = strokeWidth(source);
+  const { block, radius } = mosaicMetrics(source);
+  const [x0, y0] = stroke;
+  const x1 = stroke[stroke.length - 2];
+  const y1 = stroke[stroke.length - 1];
+
+  if (tool === "brush") {
+    if (stroke.length < 4) return null;
+    return { id, kind: tool, geometry: stroke, style: { stroke_width: width }, z_index: index };
   }
+  if (tool === "mosaic") {
+    if (stroke.length < 2) return null;
+    return {
+      id,
+      kind: tool,
+      geometry: stroke,
+      style: { block_size: block, brush_radius: radius },
+      z_index: index,
+    };
+  }
+  if (tool === "arrow") {
+    if (Math.abs(x1 - x0) < 3 && Math.abs(y1 - y0) < 3) return null;
+    return {
+      id,
+      kind: tool,
+      geometry: [x0, y0, x1, y1],
+      style: { stroke_width: width },
+      z_index: index,
+    };
+  }
+  if (tool === "text") return null;
+
+  const w = Math.abs(x1 - x0);
+  const h = Math.abs(y1 - y0);
+  if (w < 2 || h < 2) return null;
+  return {
+    id,
+    kind: tool,
+    geometry: [Math.min(x0, x1), Math.min(y0, y1), w, h],
+    style: { stroke_width: width },
+    z_index: index,
+  };
 }
 
-function AnnotationPreview({ annotation }: { annotation: Ann }) {
-  if (annotation.kind === "arrow") {
-    const [x1, y1, x2, y2] = annotation.geometry;
-    return <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#ef4444" strokeWidth="3.5" markerEnd="url(#arrowhead)" />;
-  }
+function drawAnnotation(ctx: CanvasRenderingContext2D, ann: Ann, source: Source) {
+  const width = Number(ann.style.stroke_width ?? strokeWidth(source));
+  ctx.save();
+  ctx.strokeStyle = MARK_COLOR;
+  ctx.fillStyle = MARK_COLOR;
+  ctx.lineWidth = width;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
 
-  if (annotation.kind === "ellipse") {
-    const [x, y, w, h] = annotation.geometry;
-    return (
-      <ellipse
-        cx={x + w / 2}
-        cy={y + h / 2}
-        rx={w / 2}
-        ry={h / 2}
-        fill="none"
-        stroke="#ef4444"
-        strokeWidth="3.5"
-      />
-    );
-  }
-
-  if (annotation.kind === "brush") {
-    const points = annotation.geometry.reduce((acc, val, i) => `${acc}${i % 2 === 0 ? " " : ","}${val}`, "").trim();
-    return <polyline points={points} fill="none" stroke="#ef4444" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />;
-  }
-
-  if (annotation.kind === "mosaic") {
-    if (annotation.geometry.length === 4) {
-      const [x, y, w, h] = annotation.geometry;
-      return <rect x={x} y={y} width={w} height={h} fill="url(#mosaic-pat)" stroke="rgba(100, 116, 139, 0.4)" strokeWidth="1" />;
+  switch (ann.kind) {
+    case "rectangle": {
+      const [x, y, w, h] = ann.geometry;
+      ctx.strokeRect(x, y, w, h);
+      break;
     }
-
-    const points = annotation.geometry.reduce((acc, val, i) => `${acc}${i % 2 === 0 ? " " : ","}${val}`, "").trim();
-    return <polyline points={points} fill="none" stroke="url(#mosaic-pat)" strokeWidth="24" strokeLinecap="round" strokeLinejoin="round" />;
+    case "ellipse": {
+      const [x, y, w, h] = ann.geometry;
+      ctx.beginPath();
+      ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      break;
+    }
+    case "arrow": {
+      const [x0, y0, x1, y1] = ann.geometry;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+      const angle = Math.atan2(y1 - y0, x1 - x0);
+      const head = Math.max(10, width * 4);
+      const spread = Math.PI / 6;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x1 - head * Math.cos(angle - spread), y1 - head * Math.sin(angle - spread));
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x1 - head * Math.cos(angle + spread), y1 - head * Math.sin(angle + spread));
+      ctx.stroke();
+      break;
+    }
+    case "brush": {
+      ctx.beginPath();
+      ctx.moveTo(ann.geometry[0], ann.geometry[1]);
+      for (let i = 2; i + 1 < ann.geometry.length; i += 2) {
+        ctx.lineTo(ann.geometry[i], ann.geometry[i + 1]);
+      }
+      ctx.stroke();
+      break;
+    }
+    case "mosaic": {
+      applyMosaic(ctx, ann, source);
+      break;
+    }
+    case "text": {
+      const [x, y] = ann.geometry;
+      const scale = Number(ann.style.font_scale ?? fontScale(source));
+      // 位图字体 7 像素高，导出侧按 font_scale 整数放大，这里用同样的字号预览。
+      const size = 7 * scale;
+      ctx.font = `600 ${size}px ${"ui-monospace, SFMono-Regular, Menlo, monospace"}`;
+      ctx.textBaseline = "top";
+      ctx.fillText(String(ann.style.text ?? ""), x, y);
+      break;
+    }
   }
-
-  if (annotation.kind === "text") {
-    const [x, y] = annotation.geometry;
-    return (
-      <text x={x} y={y + 16} fill="#ef4444" fontSize="16" fontWeight="bold" fontFamily="sans-serif">
-        {String(annotation.style.text || "标注文本")}
-      </text>
-    );
-  }
-
-  const [x, y, a, b] = annotation.geometry;
-  return (
-    <rect
-      x={x}
-      y={y}
-      width={a}
-      height={b}
-      fill="none"
-      stroke="#ef4444"
-      strokeWidth="3.5"
-      rx="3"
-    />
-  );
+  ctx.restore();
 }
 
+/**
+ * 真实马赛克：格子对齐到图片原点，块内取平均色后整块填充，完全不透明。
+ * 与 Rust `annotation::apply_mosaic` 同算法，所以预览等于导出结果。
+ */
+function applyMosaic(ctx: CanvasRenderingContext2D, ann: Ann, source: Source) {
+  const block = Math.max(4, Math.min(96, Number(ann.style.block_size ?? mosaicMetrics(source).block)));
+  const isBrush = ann.style.brush_radius !== undefined;
+  const rects: Array<[number, number, number, number]> = [];
+
+  if (!isBrush && ann.geometry.length === 4) {
+    const [x, y, w, h] = ann.geometry;
+    rects.push([x, y, w, h]);
+  } else if (ann.geometry.length >= 2) {
+    const radius = Math.max(1, Number(ann.style.brush_radius ?? block));
+    const points: Array<[number, number]> = [];
+    for (let i = 0; i + 1 < ann.geometry.length; i += 2) {
+      points.push([ann.geometry[i], ann.geometry[i + 1]]);
+    }
+    if (points.length === 1) {
+      const [cx, cy] = points[0];
+      rects.push([cx - radius, cy - radius, radius * 2, radius * 2]);
+    }
+    for (let i = 0; i + 1 < points.length; i += 1) {
+      const [ax, ay] = points[i];
+      const [bx, by] = points[i + 1];
+      const distance = Math.hypot(bx - ax, by - ay);
+      const steps = Math.max(1, Math.ceil(distance / (block / 2)));
+      for (let step = 0; step <= steps; step += 1) {
+        const t = step / steps;
+        const cx = ax + (bx - ax) * t;
+        const cy = ay + (by - ay) * t;
+        rects.push([cx - radius, cy - radius, radius * 2, radius * 2]);
+      }
+    }
+  }
+  if (rects.length === 0) return;
+
+  const cells = new Set<string>();
+  let minCellX = Infinity;
+  let minCellY = Infinity;
+  let maxCellX = -Infinity;
+  let maxCellY = -Infinity;
+  for (const [x, y, w, h] of rects) {
+    if (w <= 0 || h <= 0) continue;
+    for (let cy = Math.floor(y / block); cy < Math.ceil((y + h) / block); cy += 1) {
+      for (let cx = Math.floor(x / block); cx < Math.ceil((x + w) / block); cx += 1) {
+        cells.add(`${cx},${cy}`);
+        minCellX = Math.min(minCellX, cx);
+        minCellY = Math.min(minCellY, cy);
+        maxCellX = Math.max(maxCellX, cx);
+        maxCellY = Math.max(maxCellY, cy);
+      }
+    }
+  }
+  if (cells.size === 0) return;
+
+  // 只读取覆盖范围内的像素，拖动时不必每帧复制整张画布。
+  const readX = Math.max(0, minCellX * block);
+  const readY = Math.max(0, minCellY * block);
+  const readW = Math.min(source.width, (maxCellX + 1) * block) - readX;
+  const readH = Math.min(source.height, (maxCellY + 1) * block) - readY;
+  if (readW <= 0 || readH <= 0) return;
+  const image = ctx.getImageData(readX, readY, readW, readH);
+
+  for (const key of cells) {
+    const [cx, cy] = key.split(",").map(Number);
+    const x0 = Math.max(0, cx * block);
+    const y0 = Math.max(0, cy * block);
+    const x1 = Math.min(source.width, cx * block + block);
+    const y1 = Math.min(source.height, cy * block + block);
+    if (x0 >= x1 || y0 >= y1) continue;
+
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let count = 0;
+    for (let y = y0; y < y1; y += 1) {
+      for (let x = x0; x < x1; x += 1) {
+        const index = ((y - readY) * readW + (x - readX)) * 4;
+        r += image.data[index];
+        g += image.data[index + 1];
+        b += image.data[index + 2];
+        count += 1;
+      }
+    }
+    if (count === 0) continue;
+    ctx.fillStyle = `rgb(${Math.round(r / count)} ${Math.round(g / count)} ${Math.round(b / count)})`;
+    ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+  }
+}

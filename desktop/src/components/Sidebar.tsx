@@ -8,9 +8,22 @@ import {
   MoonIcon,
 } from "./icons";
 import type { DeviceIdentity } from "../types";
-import { useUiStore } from "../store";
+import { useUiStore, type AppTheme } from "../store";
 
 export type NavTab = "history" | "favorites" | "capture" | "settings";
+
+const TABS: Array<{ key: NavTab; label: string; shortcut: string; icon: (active: boolean) => React.ReactNode }> = [
+  { key: "history", label: "剪贴板历史", shortcut: "⌘1", icon: () => <ClipboardIcon size={15} /> },
+  { key: "favorites", label: "收藏夹", shortcut: "⌘2", icon: (active) => <StarIcon size={15} filled={active} /> },
+  { key: "capture", label: "采集工作台", shortcut: "⌘3", icon: () => <CameraIcon size={15} /> },
+  { key: "settings", label: "设置", shortcut: "⌘4", icon: () => <SettingsIcon size={15} /> },
+];
+
+const THEMES: Array<{ key: AppTheme; label: string; icon?: React.ReactNode }> = [
+  { key: "light", label: "浅色", icon: <SunIcon size={13} /> },
+  { key: "auto", label: "自动" },
+  { key: "dark", label: "深色", icon: <MoonIcon size={13} /> },
+];
 
 interface SidebarProps {
   currentTab: NavTab;
@@ -18,104 +31,61 @@ interface SidebarProps {
   identity?: DeviceIdentity | null;
 }
 
-export function Sidebar({
-  currentTab,
-  onSelectTab,
-  identity,
-}: SidebarProps) {
+export function Sidebar({ currentTab, onSelectTab, identity }: SidebarProps) {
   const { theme, setTheme } = useUiStore();
 
   return (
     <aside className="sidebar">
-      <div>
-        <div className="brand-section">
-          <div className="brand-icon">
-            <img src="/asterism-app-icon.svg" alt="" />
-          </div>
-          <div className="brand-title">
-            <span>Asterism</span>
-            <span className="brand-badge">PRO</span>
-          </div>
+      <div className="brand">
+        <div className="brand-mark">
+          <img src="/asterism-app-icon.svg" alt="" />
         </div>
-
-        <nav className="nav-menu" style={{ marginTop: 14 }}>
-          <button
-            className={`nav-item ${currentTab === "history" ? "active" : ""}`}
-            onClick={() => onSelectTab("history")}
-          >
-            <div className="nav-item-left">
-              <ClipboardIcon size={17} />
-              <span>剪贴板历史</span>
-            </div>
-          </button>
-
-          <button
-            className={`nav-item ${currentTab === "favorites" ? "active" : ""}`}
-            onClick={() => onSelectTab("favorites")}
-          >
-            <div className="nav-item-left">
-              <StarIcon size={17} filled={currentTab === "favorites"} />
-              <span>收藏夹</span>
-            </div>
-          </button>
-
-          <button
-            className={`nav-item ${currentTab === "capture" ? "active" : ""}`}
-            onClick={() => onSelectTab("capture")}
-          >
-            <div className="nav-item-left">
-              <CameraIcon size={17} />
-              <span>采集工作台</span>
-            </div>
-          </button>
-
-          <button
-            className={`nav-item ${currentTab === "settings" ? "active" : ""}`}
-            onClick={() => onSelectTab("settings")}
-          >
-            <div className="nav-item-left">
-              <SettingsIcon size={17} />
-              <span>系统设置</span>
-            </div>
-          </button>
-        </nav>
+        <div>
+          <div className="brand-name">Asterism</div>
+          <div className="brand-sub">剪贴板 · 截图</div>
+        </div>
       </div>
 
-      <div className="sidebar-footer">
-        {/* Theme mode segmented toggle */}
-        <div className="theme-toggle-container">
-          <button
-            className={`theme-toggle-btn ${theme === "light" ? "active" : ""}`}
-            onClick={() => setTheme("light")}
-            title="浅色模式 (默认)"
-          >
-            <SunIcon size={14} />
-            <span>浅色</span>
-          </button>
-          <button
-            className={`theme-toggle-btn ${theme === "auto" ? "active" : ""}`}
-            onClick={() => setTheme("auto")}
-            title="跟随系统"
-          >
-            <span>自动</span>
-          </button>
-          <button
-            className={`theme-toggle-btn ${theme === "dark" ? "active" : ""}`}
-            onClick={() => setTheme("dark")}
-            title="深色模式"
-          >
-            <MoonIcon size={14} />
-            <span>深色</span>
-          </button>
+      <nav className="nav">
+        {TABS.map((tab) => {
+          const active = currentTab === tab.key;
+          return (
+            <button
+              key={tab.key}
+              className={`nav-item ${active ? "active" : ""}`}
+              aria-current={active ? "page" : undefined}
+              onClick={() => onSelectTab(tab.key)}
+            >
+              {tab.icon(active)}
+              <span>{tab.label}</span>
+              <kbd>{tab.shortcut}</kbd>
+            </button>
+          );
+        })}
+      </nav>
+
+      <div className="sidebar-foot">
+        <div className="segmented" role="group" aria-label="外观">
+          {THEMES.map((option) => (
+            <button
+              key={option.key}
+              aria-pressed={theme === option.key}
+              onClick={() => setTheme(option.key)}
+              title={option.key === "auto" ? "跟随系统" : option.label}
+            >
+              {option.icon}
+              <span>{option.label}</span>
+            </button>
+          ))}
         </div>
 
-        <div className="device-status-card">
-          <LaptopIcon size={16} style={{ color: "var(--text-muted)" }} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="device-name">{identity?.deviceName ?? "本机设备"}</div>
-            <div className="device-sub" style={{ display: "flex", alignItems: "center", gap: 5 }}>
+        <div className="device-chip">
+          <LaptopIcon size={15} style={{ color: "var(--text-tertiary)", flex: "0 0 auto" }} />
+          <div style={{ minWidth: 0 }}>
+            <div className="device-chip-name">{identity?.deviceName ?? "本机设备"}</div>
+            <div className="device-chip-sub">
               <span className="status-dot" />
-              <span>本地 E2EE 保险库就绪</span>
+              <span>本地保险库就绪</span>
             </div>
           </div>
         </div>
@@ -123,4 +93,3 @@ export function Sidebar({
     </aside>
   );
 }
-
