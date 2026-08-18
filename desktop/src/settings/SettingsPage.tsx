@@ -12,8 +12,12 @@ import {
   SettingsIcon,
   SunIcon,
   MoonIcon,
+  KeyboardIcon,
+  TrayIcon,
 } from "../components/icons";
 import { useUiStore, type AppTheme } from "../store";
+import { ShortcutInput } from "./ShortcutInput";
+import type { AppSettings, ShortcutSettings } from "../types";
 
 interface WebdavConfig {
   enabled: boolean;
@@ -97,6 +101,29 @@ export function SettingsPage() {
   const settings = useQuery({
     queryKey: ["sync-settings"],
     queryFn: () => invoke<SyncSettings>("get_sync_settings"),
+  });
+
+  const appSettings = useQuery({
+    queryKey: ["app-settings"],
+    queryFn: () => invoke<AppSettings>("get_app_settings"),
+  });
+
+  const saveAppSettingsMutation = useMutation({
+    mutationFn: (s: AppSettings) => invoke("save_app_settings", { settings: s }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["app-settings"] });
+      success("设置已更新并生效");
+    },
+    onError: (e) => showError(`保存设置失败：${e}`),
+  });
+
+  const resetShortcutsMutation = useMutation({
+    mutationFn: () => invoke<ShortcutSettings>("reset_shortcuts"),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["app-settings"] });
+      success("快捷键已恢复默认");
+    },
+    onError: (e) => showError(`恢复快捷键失败：${e}`),
   });
 
   const recovery = useQuery({
@@ -270,6 +297,187 @@ export function SettingsPage() {
             </div>
           </div>
         </section>
+
+        {appSettings.data && (
+          <>
+            <section className="section">
+              <div className="section-head">
+                <h3>
+                  <TrayIcon size={15} />
+                  系统托盘与常规
+                </h3>
+              </div>
+              <div className="section-body">
+                <div className="toggle-group">
+                  <div
+                    className="toggle-item"
+                    onClick={() => {
+                      const updated = {
+                        ...appSettings.data,
+                        close_to_tray: !appSettings.data.close_to_tray,
+                      };
+                      saveAppSettingsMutation.mutate(updated);
+                    }}
+                  >
+                    <div className="toggle-info">
+                      <div className="toggle-title">关闭窗口时最小化到托盘</div>
+                      <div className="toggle-sub">点击关闭按钮 (✕) 时不退出应用，在后台驻留托盘</div>
+                    </div>
+                    <div className={`toggle-switch ${appSettings.data.close_to_tray ? "on" : ""}`}>
+                      <div className="toggle-switch-thumb" />
+                    </div>
+                  </div>
+
+                  <div
+                    className="toggle-item"
+                    onClick={() => {
+                      const updated = {
+                        ...appSettings.data,
+                        minimize_to_tray: !appSettings.data.minimize_to_tray,
+                      };
+                      saveAppSettingsMutation.mutate(updated);
+                    }}
+                  >
+                    <div className="toggle-info">
+                      <div className="toggle-title">最小化时隐藏到托盘</div>
+                      <div className="toggle-sub">点击最小化按钮时隐藏主窗口，不在任务栏占用空间</div>
+                    </div>
+                    <div className={`toggle-switch ${appSettings.data.minimize_to_tray ? "on" : ""}`}>
+                      <div className="toggle-switch-thumb" />
+                    </div>
+                  </div>
+
+                  <div
+                    className="toggle-item"
+                    onClick={() => {
+                      const updated = {
+                        ...appSettings.data,
+                        autostart: !appSettings.data.autostart,
+                      };
+                      saveAppSettingsMutation.mutate(updated);
+                      invoke("enable_autostart", { enable: updated.autostart }).catch((err) =>
+                        showError(`修改开机自启失败: ${err}`)
+                      );
+                    }}
+                  >
+                    <div className="toggle-info">
+                      <div className="toggle-title">开机自启</div>
+                      <div className="toggle-sub">在系统登录时自动在后台启动 Asterism</div>
+                    </div>
+                    <div className={`toggle-switch ${appSettings.data.autostart ? "on" : ""}`}>
+                      <div className="toggle-switch-thumb" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="section">
+              <div className="section-head">
+                <h3>
+                  <KeyboardIcon size={15} />
+                  全局快捷键
+                </h3>
+                <button
+                  className="btn"
+                  style={{ fontSize: 12, padding: "3px 8px" }}
+                  onClick={() => resetShortcutsMutation.mutate()}
+                  disabled={resetShortcutsMutation.isPending}
+                >
+                  恢复默认
+                </button>
+              </div>
+              <div className="section-body">
+                <div className="shortcut-grid">
+                  <div className="shortcut-row">
+                    <div className="shortcut-info">
+                      <span className="shortcut-title">呼出 / 隐藏主窗口</span>
+                      <span className="shortcut-desc">随时在前台唤起或收起 Asterism 历史记录</span>
+                    </div>
+                    <ShortcutInput
+                      value={appSettings.data.shortcuts.toggle_window}
+                      onChange={(toggle_window) => {
+                        const updated = {
+                          ...appSettings.data,
+                          shortcuts: { ...appSettings.data.shortcuts, toggle_window },
+                        };
+                        saveAppSettingsMutation.mutate(updated);
+                      }}
+                    />
+                  </div>
+
+                  <div className="shortcut-row">
+                    <div className="shortcut-info">
+                      <span className="shortcut-title">选区截图</span>
+                      <span className="shortcut-desc">立即唤起 0ms 定格选区与工具栏标注</span>
+                    </div>
+                    <ShortcutInput
+                      value={appSettings.data.shortcuts.capture_region}
+                      onChange={(capture_region) => {
+                        const updated = {
+                          ...appSettings.data,
+                          shortcuts: { ...appSettings.data.shortcuts, capture_region },
+                        };
+                        saveAppSettingsMutation.mutate(updated);
+                      }}
+                    />
+                  </div>
+
+                  <div className="shortcut-row">
+                    <div className="shortcut-info">
+                      <span className="shortcut-title">全屏截图</span>
+                      <span className="shortcut-desc">一键捕获当前显示器全屏并存入剪贴板与历史</span>
+                    </div>
+                    <ShortcutInput
+                      value={appSettings.data.shortcuts.capture_fullscreen}
+                      onChange={(capture_fullscreen) => {
+                        const updated = {
+                          ...appSettings.data,
+                          shortcuts: { ...appSettings.data.shortcuts, capture_fullscreen },
+                        };
+                        saveAppSettingsMutation.mutate(updated);
+                      }}
+                    />
+                  </div>
+
+                  <div className="shortcut-row">
+                    <div className="shortcut-info">
+                      <span className="shortcut-title">GIF 动图录制</span>
+                      <span className="shortcut-desc">框选屏幕区域并即时生成高压缩比动图</span>
+                    </div>
+                    <ShortcutInput
+                      value={appSettings.data.shortcuts.record_gif}
+                      onChange={(record_gif) => {
+                        const updated = {
+                          ...appSettings.data,
+                          shortcuts: { ...appSettings.data.shortcuts, record_gif },
+                        };
+                        saveAppSettingsMutation.mutate(updated);
+                      }}
+                    />
+                  </div>
+
+                  <div className="shortcut-row">
+                    <div className="shortcut-info">
+                      <span className="shortcut-title">高清视频录像</span>
+                      <span className="shortcut-desc">选区录制 MP4 视频并捕获系统扬声器与麦克风</span>
+                    </div>
+                    <ShortcutInput
+                      value={appSettings.data.shortcuts.record_video}
+                      onChange={(record_video) => {
+                        const updated = {
+                          ...appSettings.data,
+                          shortcuts: { ...appSettings.data.shortcuts, record_video },
+                        };
+                        saveAppSettingsMutation.mutate(updated);
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </section>
+          </>
+        )}
 
         <section className="section">
           <div className="section-head">

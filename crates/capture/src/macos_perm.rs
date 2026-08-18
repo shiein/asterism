@@ -28,8 +28,6 @@ pub fn elevate_overlay_ns_view(ns_view: *mut std::ffi::c_void) {
     if ns_view.is_null() {
         return;
     }
-    use objc2::runtime::AnyObject;
-    use objc2::{class, msg_send};
 
     const NS_STATUS_WINDOW_LEVEL: isize = 25;
     const NS_WINDOW_ANIMATION_BEHAVIOR_NONE: isize = 2;
@@ -62,6 +60,9 @@ pub fn elevate_overlay_ns_view(ns_view: *mut std::ffi::c_void) {
 }
 
 pub fn reveal_overlay_ns_view(ns_view: *mut std::ffi::c_void) {
+    if ns_view.is_null() {
+        return;
+    }
     unsafe {
         let view = ns_view.cast::<AnyObject>();
         let window: *mut AnyObject = msg_send![view, window];

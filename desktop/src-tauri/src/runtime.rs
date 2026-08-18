@@ -34,6 +34,7 @@ pub struct DesktopState {
     pub(crate) sync: SyncHandle,
     pub(crate) actions: Arc<ActionRegistry>,
     pub(crate) recording: Arc<RecordingController>,
+    pub(crate) app_settings: parking_lot::RwLock<crate::settings::AppSettings>,
     /// 最后析构：先释放 sender / handler，再撤销 Registry，最后 join 线程。
     _runtime: MountedRuntime,
 }
@@ -110,13 +111,16 @@ impl DesktopState {
             broker: PermissionBroker::host(),
             guard,
             identity,
-            paths,
+            paths: paths.clone(),
             clipboard: NativeClipboard,
             vault: parking_lot::RwLock::new(vault),
             avk,
             sync,
             actions,
             recording: Arc::new(RecordingController::default()),
+            app_settings: parking_lot::RwLock::new(crate::settings::AppSettings::load(
+                &paths.config_dir,
+            )),
             _runtime: runtime,
         })
     }

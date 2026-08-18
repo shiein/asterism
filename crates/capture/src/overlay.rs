@@ -1054,8 +1054,8 @@ impl OverlayApp {
             if let Some(area) = cutout {
                 let x0 = area.x.max(0.0).floor() as u32;
                 let y0 = area.y.max(0.0).floor() as u32;
-                let x1 = area.right().min(f64::from(dw)).ceil() as u32;
-                let y1 = area.bottom().min(f64::from(dh)).ceil() as u32;
+                let x1 = area.right().max(0.0).min(f64::from(dw)).ceil() as u32;
+                let y1 = area.bottom().max(0.0).min(f64::from(dh)).ceil() as u32;
                 for y in y0..y1.min(dh) {
                     let start = (y * dw + x0) as usize;
                     let end = (y * dw + x1.min(dw)) as usize;

@@ -618,3 +618,28 @@ export function RedoIcon(props: IconProps) {
     </Stroked>
   );
 }
+
+export function KeyboardIcon(props: IconProps) {
+  return (
+    <Stroked {...props}>
+      <rect width="20" height="16" x="2" y="4" rx="2" />
+      <path d="M6 8h.001" />
+      <path d="M10 8h.001" />
+      <path d="M14 8h.001" />
+      <path d="M18 8h.001" />
+      <path d="M8 12h.001" />
+      <path d="M12 12h.001" />
+      <path d="M16 12h.001" />
+      <path d="M7 16h10" />
+    </Stroked>
+  );
+}
+
+export function TrayIcon(props: IconProps) {
+  return (
+    <Stroked {...props}>
+      <path d="M3 14h3.5a1.5 1.5 0 0 1 1.5 1.5v0a1.5 1.5 0 0 0 1.5 1.5h5a1.5 1.5 0 0 0 1.5-1.5v0a1.5 1.5 0 0 1 1.5-1.5H21" />
+      <path d="M3 14V6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v8l-2 6H5l-2-6Z" />
+    </Stroked>
+  );
+}

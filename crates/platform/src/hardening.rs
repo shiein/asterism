@@ -69,7 +69,11 @@ pub fn safe_join_relative(base_dir: &Path, relative: &str) -> std::io::Result<st
     Ok(target)
 }
 
-/// 跨平台开机自启配置
+/// 跨平台开机自启配置（启用或禁用）
+pub fn set_autostart_enabled(label: &str, exe: &Path, enable: bool) -> std::io::Result<String> {
+    if enable { configure_autostart(label, exe) } else { remove_autostart(label) }
+}
+
 pub fn configure_autostart(label: &str, exe: &Path) -> std::io::Result<String> {
     #[cfg(target_os = "macos")]
     {
@@ -83,6 +87,31 @@ pub fn configure_autostart(label: &str, exe: &Path) -> std::io::Result<String> {
     #[cfg(not(any(target_os = "macos", windows)))]
     {
         write_linux_autostart_desktop(label, exe)
+    }
+}
+
+pub fn remove_autostart(label: &str) -> std::io::Result<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let path = Path::new(&home).join("Library/LaunchAgents").join(format!("{label}.plist"));
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
+        Ok("disabled".into())
+    }
+    #[cfg(windows)]
+    {
+        remove_windows_autostart_registry(label)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let path = Path::new(&home).join(".config/autostart").join(format!("{label}.desktop"));
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
+        Ok("disabled".into())
     }
 }
 
@@ -150,6 +179,27 @@ fn write_windows_autostart_registry(label: &str, exe: &Path) -> std::io::Result<
         }
     }
     Ok(format!("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run -> {}", label))
+}
+
+#[cfg(windows)]
+fn remove_windows_autostart_registry(label: &str) -> std::io::Result<String> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        HKEY_CURRENT_USER, KEY_SET_VALUE, RegCloseKey, RegDeleteValueW, RegOpenKeyExW,
+    };
+    use windows::core::HSTRING;
+
+    let subkey = HSTRING::from("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    let mut hkey = windows::Win32::System::Registry::HKEY::default();
+    unsafe {
+        let status = RegOpenKeyExW(HKEY_CURRENT_USER, &subkey, None, KEY_SET_VALUE, &mut hkey);
+        if status == ERROR_SUCCESS {
+            let val_name = HSTRING::from(label);
+            let _ = RegDeleteValueW(hkey, &val_name);
+            let _ = RegCloseKey(hkey);
+        }
+    }
+    Ok("disabled".into())
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]

@@ -52,3 +52,15 @@ export function previewImage(id: string): Promise<string> {
 export function recoveryKey(): Promise<string> {
   return invoke("recovery_key");
 }
+
+export function getAppSettings(): Promise<import("./types").AppSettings> {
+  return invoke("get_app_settings");
+}
+
+export function saveAppSettings(settings: import("./types").AppSettings): Promise<void> {
+  return invoke("save_app_settings", { settings });
+}
+
+export function resetShortcuts(): Promise<import("./types").ShortcutSettings> {
+  return invoke("reset_shortcuts");
+}

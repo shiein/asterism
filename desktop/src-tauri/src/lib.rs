@@ -9,7 +9,9 @@ mod overlay_cli;
 mod plugins;
 mod runtime;
 mod settings;
+mod shortcuts;
 mod sync_engine;
+mod tray;
 
 use runtime::DesktopState;
 use tauri::Manager;
@@ -29,13 +31,34 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             if let Some(main_window) = app.get_webview_window("main") {
                 capture_ui::apply_capture_exclusion(&main_window);
             }
             let state = DesktopState::start(app.handle().clone())?;
             app.manage(state);
+
+            if let Err(err) = shortcuts::setup_shortcuts(app.handle()) {
+                tracing::warn!(error = %err, "failed to setup shortcuts");
+            }
+            if let Err(err) = tray::setup_tray(app.handle()) {
+                tracing::warn!(error = %err, "failed to setup system tray");
+            }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+            {
+                let app = window.app_handle();
+                if let Some(state) = app.try_state::<DesktopState>()
+                    && state.app_settings.read().close_to_tray
+                {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_history,
@@ -51,6 +74,9 @@ pub fn run() {
             commands::copy_recovery_key,
             commands::capture_fullscreen,
             commands::capture_region,
+            commands::get_app_settings,
+            commands::save_app_settings,
+            commands::reset_shortcuts,
             commands::get_sync_settings,
             commands::save_sync_settings,
             commands::connect_hub,

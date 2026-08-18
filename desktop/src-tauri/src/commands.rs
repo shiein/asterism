@@ -441,6 +441,36 @@ pub fn save_sync_settings(
 }
 
 #[tauri::command]
+pub fn get_app_settings(state: State<'_, DesktopState>) -> crate::settings::AppSettings {
+    state.app_settings.read().clone()
+}
+
+#[tauri::command]
+pub fn save_app_settings(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    settings: crate::settings::AppSettings,
+) -> Result<(), CmdError> {
+    crate::shortcuts::register_shortcuts(&app, &settings.shortcuts).map_err(CmdError::Any)?;
+    settings.save(&state.paths.config_dir).map_err(|e| CmdError::Any(e.to_string()))?;
+    *state.app_settings.write() = settings;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reset_shortcuts(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<crate::settings::ShortcutSettings, CmdError> {
+    let mut current = state.app_settings.read().clone();
+    current.shortcuts = crate::settings::ShortcutSettings::default();
+    current.save(&state.paths.config_dir).map_err(|e| CmdError::Any(e.to_string()))?;
+    *state.app_settings.write() = current.clone();
+    crate::shortcuts::register_shortcuts(&app, &current.shortcuts).map_err(CmdError::Any)?;
+    Ok(current.shortcuts)
+}
+
+#[tauri::command]
 pub async fn connect_hub(
     state: State<'_, DesktopState>,
     url: String,
@@ -502,10 +532,14 @@ pub fn import_recovery(state: State<'_, DesktopState>, hex_key: String) -> Resul
 }
 
 #[tauri::command]
-pub fn enable_autostart() -> Result<String, CmdError> {
+pub fn enable_autostart(enable: Option<bool>) -> Result<String, CmdError> {
     let exe = std::env::current_exe().map_err(|e| CmdError::Any(e.to_string()))?;
-    let path = asterism_platform::hardening::configure_autostart("Asterism", &exe)
-        .map_err(|e| CmdError::Any(e.to_string()))?;
+    let path = asterism_platform::hardening::set_autostart_enabled(
+        "Asterism",
+        &exe,
+        enable.unwrap_or(true),
+    )
+    .map_err(|e| CmdError::Any(e.to_string()))?;
     Ok(path)
 }
 
@@ -534,8 +568,9 @@ pub async fn publish_pairing_avk(
     let client = asterism_sync::HubClient::with_pin(url, settings.hub_cert_sha256.as_deref())
         .map_err(|e| CmdError::Any(e.to_string()))?
         .with_token(token);
+    let json_bytes = serde_json::to_vec(&wrapped).map_err(|e| CmdError::Any(e.to_string()))?;
     client
-        .deposit_avk(&code, &hex::encode(serde_json::to_vec(&wrapped).unwrap_or_default()))
+        .deposit_avk(&code, &hex::encode(json_bytes))
         .await
         .map_err(|e| CmdError::Any(e.to_string()))?;
     let mut snap = settings;

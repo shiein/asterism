@@ -60,8 +60,9 @@ fn unique_name(used: &mut HashSet<String>, raw: String) -> String {
         if used.insert(candidate.clone()) {
             return candidate;
         }
-        n = n.saturating_add(1);
-        if n == 0 {
+        if let Some(next) = n.checked_add(1) {
+            n = next;
+        } else {
             return format!("{raw}.dup");
         }
     }
