@@ -96,13 +96,21 @@ export function HistoryPage({
   const historyItems = useMemo(() => history.data?.pages.flat() ?? [], [history.data]);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    let cleanupFn: (() => void) | undefined;
     listen("history-changed", () => {
       void queryClient.invalidateQueries({ queryKey: ["history"] });
     }).then((fn) => {
-      unlisten = fn;
+      if (disposed) {
+        fn();
+      } else {
+        cleanupFn = fn;
+      }
     });
-    return () => unlisten?.();
+    return () => {
+      disposed = true;
+      cleanupFn?.();
+    };
   }, [queryClient]);
 
   useEffect(() => {
