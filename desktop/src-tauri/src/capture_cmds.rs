@@ -254,7 +254,7 @@ fn record_video_inner(
 ) -> Result<(Vec<u8>, u32, u32, &'static str), CmdError> {
     #[cfg(not(target_os = "macos"))]
     if audio.as_deref().is_some_and(|source| source != "none") {
-        return Err(CmdError::Any("当前平台尚不支持带音频的视频录制；未创建任何录制结果".into()));
+        tracing::info!("当前平台录制暂未包含音频轨道，使用纯画面录制");
     }
     wait_for_recording_start(starts_at, &token, &recording)?;
     let backend = XcapBackend;

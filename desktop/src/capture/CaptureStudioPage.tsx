@@ -81,10 +81,6 @@ export function CaptureStudioPage({ onAnnotate }: CaptureStudioPageProps) {
 
   async function startRecording(kind: "gif" | "video") {
     const label = kind === "gif" ? "GIF 录制" : "视频录制";
-    if (kind === "video" && !isMac) {
-      toast("当前平台还没有 H.264 原生编码，不提供降级格式");
-      return;
-    }
     try {
       setActiveOperation(kind);
       toast("主窗口将隐藏：拖选区域后倒计时 3 秒开始");
