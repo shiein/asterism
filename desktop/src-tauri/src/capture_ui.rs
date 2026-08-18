@@ -15,7 +15,9 @@ pub fn apply_capture_exclusion(window: &WebviewWindow) {
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+        };
         if let Ok(hwnd) = window.hwnd() {
             unsafe {
                 let _ = SetWindowDisplayAffinity(HWND(hwnd.0 as _), WDA_EXCLUDEFROMCAPTURE);
@@ -31,7 +33,8 @@ pub fn apply_capture_exclusion(window: &WebviewWindow) {
                 let win = ns_window as *mut AnyObject;
                 if !win.is_null() {
                     const NS_WINDOW_ANIMATION_BEHAVIOR_NONE: isize = 2;
-                    let _: () = msg_send![win, setAnimationBehavior: NS_WINDOW_ANIMATION_BEHAVIOR_NONE];
+                    let _: () =
+                        msg_send![win, setAnimationBehavior: NS_WINDOW_ANIMATION_BEHAVIOR_NONE];
                 }
             }
         }
@@ -77,10 +80,8 @@ impl PinWindow {
         y: Option<f64>,
     ) -> Result<(), CmdError> {
         let label = format!("pin-{}", uuid::Uuid::now_v7());
-        let (logical_w, logical_h) = (
-            (width as f64).clamp(120.0, 1600.0),
-            (height as f64).clamp(80.0, 1200.0),
-        );
+        let (logical_w, logical_h) =
+            ((width as f64).clamp(120.0, 1600.0), (height as f64).clamp(80.0, 1200.0));
         let url = format!("index.html?pinWindow=1&id={item_id}");
         let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
             .title("Asterism Pin")
