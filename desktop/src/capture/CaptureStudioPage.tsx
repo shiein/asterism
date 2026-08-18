@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "../components/Toast";
@@ -32,6 +32,15 @@ export function CaptureStudioPage({ onAnnotate }: CaptureStudioPageProps) {
   const { success, error, toast } = useToast();
   const [activeOperation, setActiveOperation] = useState<ActiveOperation>(null);
   const [audioMode, setAudioMode] = useState<AudioMode>("none");
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const isMac = typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
   const permission = useQuery({
     queryKey: ["capture-permission"],
@@ -75,7 +84,9 @@ export function CaptureStudioPage({ onAnnotate }: CaptureStudioPageProps) {
     } catch (cause) {
       reportCaptureError(label, cause);
     } finally {
-      setActiveOperation(null);
+      if (mountedRef.current) {
+        setActiveOperation(null);
+      }
     }
   }
 
@@ -94,7 +105,9 @@ export function CaptureStudioPage({ onAnnotate }: CaptureStudioPageProps) {
     } catch (cause) {
       reportCaptureError(label, cause);
     } finally {
-      setActiveOperation(null);
+      if (mountedRef.current) {
+        setActiveOperation(null);
+      }
     }
   }
 
