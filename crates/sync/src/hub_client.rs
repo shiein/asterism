@@ -66,6 +66,13 @@ pub struct HistoryDto {
     pub blob_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BlobStatusDto {
+    pub blob_id: String,
+    pub chunks_present: Vec<u32>,
+    pub committed: bool,
+}
+
 impl HubClient {
     pub fn new(base: impl Into<String>) -> Result<Self> {
         Self::with_pin(base, None)
@@ -153,6 +160,10 @@ impl HubClient {
         }
         let body: Body = self.json(Method::POST, "/api/v1/blobs", None::<&()>).await?;
         Ok(body.blob_id)
+    }
+
+    pub async fn blob_status(&self, blob_id: &str) -> Result<BlobStatusDto> {
+        self.json(Method::GET, &format!("/api/v1/blobs/{blob_id}/status"), None::<&()>).await
     }
 
     pub async fn put_chunk(&self, blob_id: &str, index: u32, body: Vec<u8>) -> Result<()> {

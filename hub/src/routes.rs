@@ -10,7 +10,7 @@ use crate::state::HubState;
 use crate::{api, auth, blob, device, health, history, relay, web};
 
 const MAX_JSON_BYTES: usize = 1024 * 1024;
-const MAX_CHUNK_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
 pub type HubRouteFn = fn(Router<Arc<HubState>>) -> Router<Arc<HubState>>;
 
@@ -66,6 +66,7 @@ pub fn history_routes(app: Router<Arc<HubState>>) -> Router<Arc<HubState>> {
 
 pub fn blob_routes(app: Router<Arc<HubState>>) -> Router<Arc<HubState>> {
     app.route("/api/v1/blobs", post(blob::begin))
+        .route("/api/v1/blobs/{id}/status", get(blob::status))
         .route("/api/v1/blobs/{id}/chunks/{index}", put(blob::put_chunk).get(blob::get_chunk))
         .route("/api/v1/blobs/{id}/commit", post(blob::commit))
 }

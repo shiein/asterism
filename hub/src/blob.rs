@@ -12,16 +12,23 @@ use crate::auth::auth_token;
 use crate::device::bearer;
 use crate::state::HubState;
 
-const MAX_CHUNK: usize = 2 * 1024 * 1024;
+const MAX_CHUNK: usize = 8 * 1024 * 1024;
 const MAX_CHUNKS: u32 = 50_000;
 
 fn parse_blob_id(id: &str) -> Result<Uuid, StatusCode> {
     Uuid::parse_str(id).map_err(|_| StatusCode::BAD_REQUEST)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct BeginRes {
     pub blob_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct BlobStatusRes {
+    pub blob_id: String,
+    pub chunks_present: Vec<u32>,
+    pub committed: bool,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +45,33 @@ pub async fn begin(
     let dir = state.config.blob_root().join(&id);
     std::fs::create_dir_all(dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(BeginRes { blob_id: id }))
+}
+
+pub async fn status(
+    State(state): State<Arc<HubState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<BlobStatusRes>, StatusCode> {
+    let _ = auth_token(&state, bearer(&headers), None).ok_or(StatusCode::UNAUTHORIZED)?;
+    parse_blob_id(&id)?;
+    let dir = state.config.blob_root().join(&id);
+    if !dir.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let committed = dir.join("committed").exists();
+    let mut chunks_present = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            if let Some(name) = e.file_name().to_str()
+                && let Some(idx_str) = name.strip_prefix("chunk_")
+                && let Ok(idx) = idx_str.parse::<u32>()
+            {
+                chunks_present.push(idx);
+            }
+        }
+    }
+    chunks_present.sort_unstable();
+    Ok(Json(BlobStatusRes { blob_id: id, chunks_present, committed }))
 }
 
 pub async fn put_chunk(
