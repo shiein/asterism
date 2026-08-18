@@ -1,10 +1,6 @@
-use asterism_core::content::{
-    ContentFlags, ContentItem, ContentKind, ContentStatus, ItemMetadata, PayloadRef,
-};
-use asterism_core::id::{ContentId, DeviceId};
+use asterism_core::content::{ContentFlags, ContentKind};
 use asterism_core::policy::{CapturePolicy, RemotePolicy};
 use asterism_crypto::local_dedup_tag;
-use bytes::Bytes;
 
 use crate::capture::CapturedClipboard;
 use crate::error::{ClipboardError, Result};

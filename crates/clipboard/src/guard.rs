@@ -50,7 +50,7 @@ impl Inner {
 
 impl Default for SelfWriteGuard {
     fn default() -> Self {
-        Self::new(Duration::from_millis(1500))
+        Self::new(Duration::from_millis(3500))
     }
 }
 
