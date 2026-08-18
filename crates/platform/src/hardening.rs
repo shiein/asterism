@@ -125,7 +125,7 @@ fn write_windows_autostart_registry(label: &str, exe: &Path) -> std::io::Result<
     let subkey = HSTRING::from("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
     let mut hkey = windows::Win32::System::Registry::HKEY::default();
     unsafe {
-        let status = RegOpenKeyExW(HKEY_CURRENT_USER, &subkey, 0, KEY_SET_VALUE, &mut hkey);
+        let status = RegOpenKeyExW(HKEY_CURRENT_USER, &subkey, None, KEY_SET_VALUE, &mut hkey);
         if status.is_err() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -139,7 +139,7 @@ fn write_windows_autostart_registry(label: &str, exe: &Path) -> std::io::Result<
             val_wide.as_ptr() as *const u8,
             val_wide.len() * std::mem::size_of::<u16>(),
         );
-        let set_status = RegSetValueExW(hkey, &val_name, 0, REG_SZ, Some(bytes));
+        let set_status = RegSetValueExW(hkey, &val_name, None, REG_SZ, Some(bytes));
         let _ = RegCloseKey(hkey);
         if set_status.is_err() {
             return Err(std::io::Error::new(
