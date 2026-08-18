@@ -143,7 +143,11 @@ impl WmfH264Encoder {
             let mut current_len = 0u32;
 
             buffer
-                .Lock(&mut ptr, Some(&mut max_len), Some(&mut current_len))
+                .Lock(
+                    &mut ptr,
+                    Some(std::ptr::addr_of_mut!(max_len)),
+                    Some(std::ptr::addr_of_mut!(current_len)),
+                )
                 .map_err(|e| MediaError::Failed(format!("Buffer Lock: {e}")))?;
 
             if bgra_pixels.len() == expected_len {

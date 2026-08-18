@@ -5,7 +5,7 @@ use asterism_capture::{
 use asterism_core::ContentKind;
 use asterism_media::AudioSource;
 use asterism_media::VideoFrame;
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(target_os = "macos"))]
 use asterism_media::avi::AviMjpeg;
 use asterism_media::gifenc::GifSession;
 #[cfg(target_os = "macos")]
@@ -30,6 +30,12 @@ pub fn preview_image(state: State<'_, DesktopState>, item_id: String) -> Result<
 }
 
 fn encode_preview_data_url(bytes: &[u8]) -> Result<String, CmdError> {
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Ok(format!(
+            "data:image/gif;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ));
+    }
     const MAX_EDGE: u32 = 480;
     let img = image::load_from_memory(bytes).map_err(|e| CmdError::Any(e.to_string()))?;
     let img = if img.width() > MAX_EDGE || img.height() > MAX_EDGE {
@@ -300,40 +306,76 @@ fn record_video_inner(
     #[cfg(windows)]
     {
         let _ = audio;
-        let tmp_mp4 = tempfile::Builder::new()
-            .suffix(".mp4")
-            .tempfile()
-            .map_err(|e| CmdError::Any(e.to_string()))?;
-        let mp4_path = tmp_mp4.path().to_path_buf();
-        let mut encoder = asterism_media::wmf::WmfH264Encoder::create(
+        let mp4_path =
+            std::env::temp_dir().join(format!("asterism_rec_{}.mp4", uuid::Uuid::now_v7()));
+        let encoder_res = asterism_media::wmf::WmfH264Encoder::create(
             &mp4_path,
             target.width,
             target.height,
             fps,
             None,
-        )
-        .map_err(|e| CmdError::Any(e.to_string()))?;
+        );
 
-        let started = std::time::Instant::now();
-        let mut frame_index = 0_u64;
-        loop {
-            if frame_index > 0 && recording.stop_requested() {
-                break;
+        match encoder_res {
+            Ok(mut encoder) => {
+                let started = std::time::Instant::now();
+                let mut frame_index = 0_u64;
+                loop {
+                    if frame_index > 0 && recording.stop_requested() {
+                        break;
+                    }
+                    ensure_recording_alive(&token)?;
+                    wait_until_recording_deadline(
+                        recording_deadline(started, frame_index, fps),
+                        &token,
+                    )?;
+                    let frame = backend
+                        .capture_display(&target.monitor)
+                        .map_err(|e| CmdError::Any(e.to_string()))?;
+                    let sess = OverlaySession { frame, selection: Some(target.selection.clone()) };
+                    if let Some((_, _, bgra)) = sess.crop_bgra() {
+                        encoder.write_frame(&bgra).map_err(|e| CmdError::Any(e.to_string()))?;
+                    }
+                    frame_index = frame_index.saturating_add(1);
+                }
+                encoder.finish().map_err(|e| CmdError::Any(e.to_string()))?;
+                let bytes = std::fs::read(&mp4_path).map_err(|e| CmdError::Any(e.to_string()))?;
+                let _ = std::fs::remove_file(&mp4_path);
+                Ok((bytes, target.width, target.height, "video/mp4"))
             }
-            ensure_recording_alive(&token)?;
-            wait_until_recording_deadline(recording_deadline(started, frame_index, fps), &token)?;
-            let frame = backend
-                .capture_display(&target.monitor)
-                .map_err(|e| CmdError::Any(e.to_string()))?;
-            let sess = OverlaySession { frame, selection: Some(target.selection.clone()) };
-            if let Some((_, _, bgra)) = sess.crop_bgra() {
-                encoder.write_frame(&bgra).map_err(|e| CmdError::Any(e.to_string()))?;
+            Err(wmf_err) => {
+                tracing::warn!(error = %wmf_err, "WMF 硬件编码器不可用，自动降级为通用 MJPEG 视频编码");
+                let mut avi = AviMjpeg::new(target.width, target.height, fps);
+                let started = std::time::Instant::now();
+                let mut frame_index = 0_u64;
+                loop {
+                    if frame_index > 0 && recording.stop_requested() {
+                        break;
+                    }
+                    ensure_recording_alive(&token)?;
+                    wait_until_recording_deadline(
+                        recording_deadline(started, frame_index, fps),
+                        &token,
+                    )?;
+                    let frame = backend
+                        .capture_display(&target.monitor)
+                        .map_err(|e| CmdError::Any(e.to_string()))?;
+                    let sess = OverlaySession { frame, selection: Some(target.selection.clone()) };
+                    if let Some((cw, ch, bgra)) = sess.crop_bgra() {
+                        let vf = VideoFrame {
+                            timestamp_us: recording_timestamp_us(frame_index, fps),
+                            width: cw,
+                            height: ch,
+                            bgra,
+                        };
+                        avi.push(&vf).map_err(|e| CmdError::Any(e.to_string()))?;
+                    }
+                    frame_index = frame_index.saturating_add(1);
+                }
+                let bytes = avi.finish().map_err(|e| CmdError::Any(e.to_string()))?;
+                Ok((bytes, target.width, target.height, "video/x-msvideo"))
             }
-            frame_index = frame_index.saturating_add(1);
         }
-        encoder.finish().map_err(|e| CmdError::Any(e.to_string()))?;
-        let bytes = std::fs::read(&mp4_path).map_err(|e| CmdError::Any(e.to_string()))?;
-        Ok((bytes, target.width, target.height, "video/mp4"))
     }
 
     #[cfg(not(any(target_os = "macos", windows)))]

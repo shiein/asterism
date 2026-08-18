@@ -117,6 +117,7 @@ fn xml_escape(s: &str) -> String {
 
 #[cfg(windows)]
 fn write_windows_autostart_registry(label: &str, exe: &Path) -> std::io::Result<String> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{
         HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegOpenKeyExW, RegSetValueExW,
     };
@@ -126,7 +127,7 @@ fn write_windows_autostart_registry(label: &str, exe: &Path) -> std::io::Result<
     let mut hkey = windows::Win32::System::Registry::HKEY::default();
     unsafe {
         let status = RegOpenKeyExW(HKEY_CURRENT_USER, &subkey, None, KEY_SET_VALUE, &mut hkey);
-        if status.is_err() {
+        if status != ERROR_SUCCESS {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("failed to open registry key: {:?}", status),
@@ -141,7 +142,7 @@ fn write_windows_autostart_registry(label: &str, exe: &Path) -> std::io::Result<
         );
         let set_status = RegSetValueExW(hkey, &val_name, None, REG_SZ, Some(bytes));
         let _ = RegCloseKey(hkey);
-        if set_status.is_err() {
+        if set_status != ERROR_SUCCESS {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("failed to set registry value: {:?}", set_status),

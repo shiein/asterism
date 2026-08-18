@@ -30,7 +30,9 @@ impl HiddenMainWindow {
 
     pub fn wait_until_not_captured(&self) {
         if self.restore {
-            // 窗口隐藏后只需等待合成器刷新（约 30ms），彻底消除 180ms 阻塞延时。
+            #[cfg(target_os = "macos")]
+            std::thread::sleep(Duration::from_millis(120));
+            #[cfg(not(target_os = "macos"))]
             std::thread::sleep(Duration::from_millis(30));
         }
     }
