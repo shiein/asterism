@@ -5,7 +5,7 @@ use asterism_capture::{
 use asterism_core::ContentKind;
 use asterism_media::AudioSource;
 use asterism_media::VideoFrame;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 use asterism_media::avi::AviMjpeg;
 use asterism_media::gifenc::GifSession;
 #[cfg(target_os = "macos")]
