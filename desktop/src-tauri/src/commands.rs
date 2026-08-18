@@ -350,11 +350,57 @@ pub async fn capture_region(
                 Ok::<_, String>((png, w, h))
             }
             asterism_capture::OverlayOutcome::Scroll { selection } => {
-                let overlay = OverlaySession { frame, selection: Some(selection) };
-                let (w, h, bgra) =
-                    overlay.crop_bgra().ok_or_else(|| "empty selection".to_string())?;
-                let png = export_png(w, h, &bgra, &AnnotationScene::default())?;
-                Ok::<_, String>((png, w, h))
+                let mut engine = asterism_capture::ScrollCaptureEngine::default();
+                let sel = Some(selection);
+                let first_sess = OverlaySession { frame: frame.clone(), selection: sel.clone() };
+                if let Some((w, h, bgra)) = first_sess.crop_bgra() {
+                    let first_cropped = asterism_capture::CapturedFrame {
+                        width: w,
+                        height: h,
+                        bgra,
+                        monitor: frame.monitor.clone(),
+                    };
+                    let _ = engine.push(&first_cropped);
+                }
+                let max_frames = 25;
+                for _ in 1..max_frames {
+                    if token.is_cancelled() {
+                        break;
+                    }
+                    asterism_capture::ScrollCaptureEngine::inject_scroll(-80);
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    if let Ok(next_frame) = backend.capture_display(monitor) {
+                        let sess =
+                            OverlaySession { frame: next_frame.clone(), selection: sel.clone() };
+                        if let Some((w, h, bgra)) = sess.crop_bgra() {
+                            let cropped = asterism_capture::CapturedFrame {
+                                width: w,
+                                height: h,
+                                bgra,
+                                monitor: next_frame.monitor,
+                            };
+                            let _ = engine.push(&cropped);
+                            if engine.should_stop_auto() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(stitched) = engine.flatten() {
+                    let png = export_png(
+                        stitched.width,
+                        stitched.height,
+                        &stitched.bgra,
+                        &AnnotationScene::default(),
+                    )?;
+                    Ok::<_, String>((png, stitched.width, stitched.height))
+                } else {
+                    let overlay = OverlaySession { frame, selection: sel };
+                    let (w, h, bgra) =
+                        overlay.crop_bgra().ok_or_else(|| "empty selection".to_string())?;
+                    let png = export_png(w, h, &bgra, &AnnotationScene::default())?;
+                    Ok::<_, String>((png, w, h))
+                }
             }
             asterism_capture::OverlayOutcome::Cancel => Err("cancelled".into()),
         }
