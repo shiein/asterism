@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use asterism_clipboard::{ClipboardBackend, NativeClipboard, SelfWriteGuard};
 use asterism_core::content::{
     ContentFlags, ContentItem, ContentKind, ContentStatus, FileManifest, ItemMetadata, PayloadRef,
@@ -39,10 +41,23 @@ pub enum SyncCmd {
     DrainOutbox,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LanPeerDto {
+    pub device_id: String,
+    pub name: String,
+    pub addresses: Vec<String>,
+    pub port: u16,
+    pub fingerprint: String,
+    pub is_trusted: bool,
+}
+
 #[derive(Clone)]
 pub struct SyncHandle {
     tx: mpsc::UnboundedSender<SyncCmd>,
     pub settings: Arc<Mutex<SyncSettings>>,
+    pub peers: Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
+    pub trust: Arc<Mutex<TrustStore>>,
+    pub local_fingerprint: String,
 }
 
 impl SyncHandle {
@@ -61,6 +76,50 @@ impl SyncHandle {
     pub fn drain_outbox(&self) {
         let _ = self.tx.send(SyncCmd::DrainOutbox);
     }
+
+    pub fn get_lan_peers(&self) -> Vec<LanPeerDto> {
+        let peers = self.peers.lock().clone();
+        let trust = self.trust.lock();
+        peers
+            .into_values()
+            .map(|p| {
+                let is_trusted =
+                    p.fingerprint.map(|fp| trust.is_trusted(p.device_id, fp)).unwrap_or(false);
+                let fp_hex = p.fingerprint.map(hex::encode).unwrap_or_default();
+                let short_id = p.device_id.to_string();
+                let short_name = format!("Peer-{}", &short_id[..8.min(short_id.len())]);
+                LanPeerDto {
+                    device_id: short_id,
+                    name: short_name,
+                    addresses: p.addresses,
+                    port: p.port,
+                    fingerprint: fp_hex,
+                    is_trusted,
+                }
+            })
+            .collect()
+    }
+
+    pub fn trust_peer(
+        &self,
+        device_id_str: &str,
+        fingerprint_hex: &str,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        let device_id: asterism_core::id::DeviceId =
+            device_id_str.parse().map_err(|e: asterism_core::CoreError| anyhow::anyhow!(e))?;
+        self.trust.lock().add(device_id, fingerprint_hex.to_string(), name.to_string())?;
+        self.reload();
+        Ok(())
+    }
+
+    pub fn untrust_peer(&self, device_id_str: &str) -> anyhow::Result<()> {
+        let device_id: asterism_core::id::DeviceId =
+            device_id_str.parse().map_err(|e: asterism_core::CoreError| anyhow::anyhow!(e))?;
+        self.trust.lock().remove(device_id)?;
+        self.reload();
+        Ok(())
+    }
 }
 
 pub fn spawn(
@@ -76,7 +135,21 @@ pub fn spawn(
 ) -> anyhow::Result<(SyncHandle, thread::JoinHandle<()>)> {
     let settings = Arc::new(Mutex::new(settings));
     let (tx, rx) = mpsc::unbounded_channel();
-    let handle = SyncHandle { tx, settings: Arc::clone(&settings) };
+    let cert = DeviceCert::load_or_create(&paths.config_dir, &identity.device_name)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let local_fingerprint = cert.fingerprint_hex();
+    let peers: Arc<Mutex<HashMap<String, DiscoveredPeer>>> = Arc::new(Mutex::new(HashMap::new()));
+    let trust =
+        Arc::new(Mutex::new(TrustStore::load(&paths.config_dir).map_err(|e| anyhow::anyhow!(e))?));
+    let handle = SyncHandle {
+        tx,
+        settings: Arc::clone(&settings),
+        peers: Arc::clone(&peers),
+        trust: Arc::clone(&trust),
+        local_fingerprint,
+    };
+    let peers_loop = Arc::clone(&peers);
+    let trust_loop = Arc::clone(&trust);
     let join = thread::Builder::new().name("asterism-sync".into()).spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
             Ok(rt) => rt,
@@ -86,7 +159,8 @@ pub fn spawn(
             }
         };
         rt.block_on(run_loop(
-            identity, vault, store, ingestion, paths, guard, cache_pin, settings, rx, on_change,
+            identity, vault, store, ingestion, paths, guard, cache_pin, settings, cert, peers_loop,
+            trust_loop, rx, on_change,
         ));
     })?;
     Ok((handle, join))
@@ -101,19 +175,14 @@ async fn run_loop(
     guard: Arc<SelfWriteGuard>,
     cache_pin: Arc<parking_lot::RwLock<Option<String>>>,
     settings: Arc<Mutex<SyncSettings>>,
+    cert: DeviceCert,
+    peers: Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
+    trust: Arc<Mutex<TrustStore>>,
     mut rx: mpsc::UnboundedReceiver<SyncCmd>,
     on_change: impl Fn() + Send + Sync + 'static,
 ) {
     let port = settings.lock().lan_port;
-    let cert = match DeviceCert::load_or_create(&paths.config_dir, &identity.device_name) {
-        Ok(c) => c,
-        Err(err) => {
-            tracing::error!(error = %err, "device cert");
-            return;
-        }
-    };
     let lan = lan::LanEndpoint::announce(identity.device_id, cert.clone(), port).ok();
-    let peers: Arc<Mutex<HashMap<String, DiscoveredPeer>>> = Arc::new(Mutex::new(HashMap::new()));
     if let Some(lan) = &lan {
         if let Ok(rx_mdns) = lan.browse() {
             let peers_b = Arc::clone(&peers);
@@ -131,14 +200,6 @@ async fn run_loop(
             });
         }
     }
-
-    let trust = Arc::new(Mutex::new(match TrustStore::load(&paths.config_dir) {
-        Ok(store) => store,
-        Err(err) => {
-            tracing::error!(error = %err, "trust store");
-            return;
-        }
-    }));
     let listener = lan::listen(cert.clone(), port).await.ok();
     let mut last_cursor = store.hub_cursor().ok().flatten();
     let mut failed_remote = load_failed_remote(&store);

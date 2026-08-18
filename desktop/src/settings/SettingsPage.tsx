@@ -34,6 +34,15 @@ interface DeviceDto {
   revoked: boolean;
 }
 
+interface LanPeerDto {
+  device_id: string;
+  name: string;
+  addresses: string[];
+  port: number;
+  fingerprint: string;
+  is_trusted: boolean;
+}
+
 const THEME_CARDS: Array<{ key: AppTheme; title: string; icon: React.ReactNode; preview: React.ReactNode }> = [
   {
     key: "light",
@@ -122,6 +131,42 @@ export function SettingsPage() {
     mutationFn: (code: string) => invoke("publish_pairing_avk", { code }),
     onSuccess: () => success("已将端到端密钥存入配对通道"),
     onError: (e) => showError(`存入密钥失败：${e}`),
+  });
+
+  const [copiedFp, setCopiedFp] = useState(false);
+  const [manualPeerId, setManualPeerId] = useState("");
+  const [manualPeerFp, setManualPeerFp] = useState("");
+  const [manualPeerName, setManualPeerName] = useState("");
+  const [showManualAdd, setShowManualAdd] = useState(false);
+
+  const localFingerprint = useQuery({
+    queryKey: ["local-cert-fingerprint"],
+    queryFn: () => invoke<string>("get_local_cert_fingerprint"),
+  });
+
+  const lanPeers = useQuery({
+    queryKey: ["lan-peers"],
+    queryFn: () => invoke<LanPeerDto[]>("get_lan_peers"),
+    refetchInterval: 3000,
+  });
+
+  const trustPeer = useMutation({
+    mutationFn: ({ deviceId, fingerprint, name }: { deviceId: string; fingerprint: string; name: string }) =>
+      invoke("trust_lan_peer", { deviceId, fingerprint, name }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["lan-peers"] });
+      success("已信任该设备，现可直接通过局域网互相同步");
+    },
+    onError: (e) => showError(`信任设备失败：${e}`),
+  });
+
+  const untrustPeer = useMutation({
+    mutationFn: (deviceId: string) => invoke("untrust_lan_peer", { deviceId }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["lan-peers"] });
+      success("已解除信任该设备");
+    },
+    onError: (e) => showError(`解除信任失败：${e}`),
   });
 
   const current = settings.data;
@@ -300,6 +345,172 @@ export function SettingsPage() {
                 </div>
               </div>
             )}
+          </div>
+        </section>
+
+        <section className="section">
+          <div className="section-head">
+            <h3>
+              <LaptopIcon size={15} />
+              局域网直连与设备配对（免 Hub）
+            </h3>
+            <span className="badge">
+              {lanPeers.data ? `发现 ${lanPeers.data.length} 台设备` : "搜索中…"}
+            </span>
+          </div>
+          <div className="section-body">
+            <div className="field">
+              <label className="field-label">本机 TLS 证书指纹（用于局域网对端验证）</label>
+              <div className="row">
+                <input
+                  className="input mono"
+                  readOnly
+                  value={localFingerprint.data ?? "加载中…"}
+                />
+                <button
+                  className="btn"
+                  onClick={() => {
+                    if (localFingerprint.data) {
+                      void navigator.clipboard.writeText(localFingerprint.data);
+                      setCopiedFp(true);
+                      success("本机指纹已复制");
+                      setTimeout(() => setCopiedFp(false), 2000);
+                    }
+                  }}
+                >
+                  {copiedFp ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+                  <span>{copiedFp ? "已复制" : "复制指纹"}</span>
+                </button>
+              </div>
+              <p className="field-hint">
+                局域网内两台设备互相添加对方指纹后，无需经过 Hub 即可直接建立 TLS 加密直连并毫秒级同步剪贴板。
+              </p>
+            </div>
+
+            <div className="field">
+              <label className="field-label">局域网内发现的设备 (mDNS)</label>
+              {lanPeers.isLoading && <p className="field-hint">正在搜索局域网对端…</p>}
+              {lanPeers.data && lanPeers.data.length === 0 && (
+                <p className="field-hint">当前局域网暂未发现其他运行 Asterism 的设备。</p>
+              )}
+              {lanPeers.data &&
+                lanPeers.data.map((peer) => (
+                  <div key={peer.device_id} className="list-row" style={{ alignItems: "center" }}>
+                    <div>
+                      <div className="list-row-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span>{peer.name}</span>
+                        <span
+                          className={`badge ${peer.is_trusted ? "badge-success" : ""}`}
+                          style={{
+                            fontSize: 11,
+                            background: peer.is_trusted ? "rgba(16, 185, 129, 0.15)" : "var(--bg-tertiary)",
+                            color: peer.is_trusted ? "var(--accent)" : "var(--text-secondary)",
+                          }}
+                        >
+                          {peer.is_trusted ? "已信任 (直连可用)" : "未信任"}
+                        </span>
+                      </div>
+                      <div className="list-row-sub mono" style={{ fontSize: 11 }}>
+                        {peer.addresses.join(", ")} · 指纹: {peer.fingerprint.slice(0, 16)}…
+                      </div>
+                    </div>
+                    <div>
+                      {peer.is_trusted ? (
+                        <button
+                          className="btn"
+                          style={{ color: "var(--danger)" }}
+                          disabled={untrustPeer.isPending}
+                          onClick={() => untrustPeer.mutate(peer.device_id)}
+                        >
+                          解除信任
+                        </button>
+                      ) : (
+                        <button
+                          className="btn btn-primary"
+                          disabled={trustPeer.isPending}
+                          onClick={() =>
+                            trustPeer.mutate({
+                              deviceId: peer.device_id,
+                              fingerprint: peer.fingerprint,
+                              name: peer.name,
+                            })
+                          }
+                        >
+                          信任并配对
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              {!showManualAdd ? (
+                <button
+                  className="btn"
+                  onClick={() => setShowManualAdd(true)}
+                  style={{ fontSize: 12 }}
+                >
+                  + 手动添加局域网设备指纹
+                </button>
+              ) : (
+                <div
+                  style={{
+                    padding: 12,
+                    background: "var(--bg-secondary)",
+                    borderRadius: "var(--radius-md)",
+                    border: "1px solid var(--border-color)",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                  }}
+                >
+                  <div className="field-label" style={{ fontWeight: 600 }}>
+                    手动添加信任设备
+                  </div>
+                  <input
+                    className="input"
+                    placeholder="设备名称（如 Windows 台式机）"
+                    value={manualPeerName}
+                    onChange={(e) => setManualPeerName(e.target.value)}
+                  />
+                  <input
+                    className="input mono"
+                    placeholder="设备 ID（UUID）"
+                    value={manualPeerId}
+                    onChange={(e) => setManualPeerId(e.target.value)}
+                  />
+                  <input
+                    className="input mono"
+                    placeholder="TLS 证书指纹 (64位 Hex)"
+                    value={manualPeerFp}
+                    onChange={(e) => setManualPeerFp(e.target.value)}
+                  />
+                  <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+                    <button className="btn" onClick={() => setShowManualAdd(false)}>
+                      取消
+                    </button>
+                    <button
+                      className="btn btn-primary"
+                      disabled={!manualPeerId || !manualPeerFp || trustPeer.isPending}
+                      onClick={() => {
+                        trustPeer.mutate({
+                          deviceId: manualPeerId.trim(),
+                          fingerprint: manualPeerFp.trim(),
+                          name: manualPeerName.trim() || "Manual-Peer",
+                        });
+                        setManualPeerId("");
+                        setManualPeerFp("");
+                        setManualPeerName("");
+                        setShowManualAdd(false);
+                      }}
+                    >
+                      保存并信任
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </section>
 

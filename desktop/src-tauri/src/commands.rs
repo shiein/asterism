@@ -496,6 +496,33 @@ pub async fn publish_pairing_avk(
     Ok(())
 }
 
+#[tauri::command]
+pub fn get_lan_peers(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<sync_engine::LanPeerDto>, CmdError> {
+    Ok(state.sync.get_lan_peers())
+}
+
+#[tauri::command]
+pub fn trust_lan_peer(
+    state: State<'_, DesktopState>,
+    device_id: String,
+    fingerprint: String,
+    name: String,
+) -> Result<(), CmdError> {
+    state.sync.trust_peer(&device_id, &fingerprint, &name).map_err(|e| CmdError::Any(e.to_string()))
+}
+
+#[tauri::command]
+pub fn untrust_lan_peer(state: State<'_, DesktopState>, device_id: String) -> Result<(), CmdError> {
+    state.sync.untrust_peer(&device_id).map_err(|e| CmdError::Any(e.to_string()))
+}
+
+#[tauri::command]
+pub fn get_local_cert_fingerprint(state: State<'_, DesktopState>) -> String {
+    state.sync.local_fingerprint.clone()
+}
+
 fn persist_and_activate_vault(
     state: &DesktopState,
     vault: asterism_crypto::AccountVaultKey,
