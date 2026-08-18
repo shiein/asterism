@@ -86,7 +86,12 @@ fn run_loop<B: ClipboardBackend>(
         #[cfg(windows)]
         {
             // 主路径：WM_CLIPBOARDUPDATE。超时仅用于线程退出与漏事件兜底。
-            let _ = win_signal.recv_timeout(config.poll_interval);
+            // 若 channel 意外断开，回退到休眠避免 CPU 忙轮询 100%。
+            if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) =
+                win_signal.recv_timeout(config.poll_interval)
+            {
+                thread::sleep(config.poll_interval);
+            }
         }
         #[cfg(not(windows))]
         thread::sleep(config.poll_interval);

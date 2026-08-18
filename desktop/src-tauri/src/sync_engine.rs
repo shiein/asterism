@@ -1719,7 +1719,8 @@ mod tests {
             )
             .unwrap();
         assert!(load_payload(&item, &domain(&store), &paths).is_err());
+        drop(ingestion);
         drop(store);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

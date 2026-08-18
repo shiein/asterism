@@ -8,7 +8,7 @@ use std::path::Path;
 
 #[cfg(windows)]
 pub struct WmfH264Encoder {
-    writer: windows::Win32::Media::MediaFoundation::IMFSinkWriter,
+    writer: Option<windows::Win32::Media::MediaFoundation::IMFSinkWriter>,
     stream_index: u32,
     width: u32,
     height: u32,
@@ -116,7 +116,7 @@ impl WmfH264Encoder {
         let frame_duration_100ns = 10_000_000i64 / (fps.max(1) as i64);
 
         Ok(Self {
-            writer,
+            writer: Some(writer),
             stream_index,
             width,
             height,
@@ -128,6 +128,11 @@ impl WmfH264Encoder {
 
     pub fn write_frame(&mut self, bgra_pixels: &[u8]) -> Result<(), MediaError> {
         use windows::Win32::Media::MediaFoundation::*;
+
+        let writer = self
+            .writer
+            .as_ref()
+            .ok_or_else(|| MediaError::Failed("encoder already finalized".into()))?;
 
         let expected_len = (self.width as usize) * (self.height as usize) * 4;
         if bgra_pixels.len() < expected_len {
@@ -187,7 +192,7 @@ impl WmfH264Encoder {
                 .SetSampleDuration(self.frame_duration_100ns)
                 .map_err(|e| MediaError::Failed(format!("SetSampleDuration: {e}")))?;
 
-            self.writer
+            writer
                 .WriteSample(self.stream_index, &sample)
                 .map_err(|e| MediaError::Failed(format!("WriteSample: {e}")))?;
 
@@ -206,12 +211,15 @@ impl WmfH264Encoder {
             return Ok(());
         }
         self.finalized = true;
-        unsafe {
-            self.writer
-                .Finalize()
-                .map_err(|e| MediaError::Failed(format!("Finalize sink writer: {e}")))?;
-            let _ = windows::Win32::Media::MediaFoundation::MFShutdown();
-            windows::Win32::System::Com::CoUninitialize();
+        if let Some(writer) = self.writer.take() {
+            unsafe {
+                writer
+                    .Finalize()
+                    .map_err(|e| MediaError::Failed(format!("Finalize sink writer: {e}")))?;
+                drop(writer);
+                let _ = windows::Win32::Media::MediaFoundation::MFShutdown();
+                windows::Win32::System::Com::CoUninitialize();
+            }
         }
         Ok(())
     }
