@@ -133,5 +133,7 @@ fn write_strf(out: &mut Vec<u8>, w: u32, h: u32) {
     b[12..14].copy_from_slice(&1u16.to_le_bytes());
     b[14..16].copy_from_slice(&24u16.to_le_bytes());
     b[16..20].copy_from_slice(b"MJPG");
+    let bi_size_image = w.saturating_mul(h).saturating_mul(3);
+    b[20..24].copy_from_slice(&bi_size_image.to_le_bytes());
     out.extend_from_slice(&b);
 }
