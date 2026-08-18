@@ -484,12 +484,17 @@ impl OverlayApp {
         let phys_x = origin_x + px * fx;
         let phys_y = origin_y + py * fy;
 
+        #[cfg(target_os = "macos")]
+        let scale = frame.monitor.scale_factor.max(1.0);
+        #[cfg(not(target_os = "macos"))]
+        let scale = 1.0;
+
         let mut best: Option<Area> = None;
         for win in self.windows.iter() {
-            let wx = f64::from(win.position.0);
-            let wy = f64::from(win.position.1);
-            let ww = f64::from(win.size.0);
-            let wh = f64::from(win.size.1);
+            let wx = f64::from(win.position.0) * scale;
+            let wy = f64::from(win.position.1) * scale;
+            let ww = f64::from(win.size.0) * scale;
+            let wh = f64::from(win.size.1) * scale;
             if ww <= 30.0
                 || wh <= 30.0
                 || phys_x < wx
