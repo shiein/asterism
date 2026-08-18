@@ -500,9 +500,9 @@ pub fn import_recovery(state: State<'_, DesktopState>, hex_key: String) -> Resul
 #[tauri::command]
 pub fn enable_autostart() -> Result<String, CmdError> {
     let exe = std::env::current_exe().map_err(|e| CmdError::Any(e.to_string()))?;
-    let path = asterism_platform::hardening::write_autostart_plist("dev.asterism.desktop", &exe)
+    let path = asterism_platform::hardening::configure_autostart("Asterism", &exe)
         .map_err(|e| CmdError::Any(e.to_string()))?;
-    Ok(path.display().to_string())
+    Ok(path)
 }
 
 #[tauri::command]

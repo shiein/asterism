@@ -40,6 +40,46 @@ impl Drop for CrashGuard {
     }
 }
 
+/// 防止 Path Traversal 路径穿透漏洞：确保拼接的相对路径不含 `..`、绝对根路径、盘符或非法字符，
+/// 且最终绝对路径必须严格落在 `base_dir` 内部。
+pub fn safe_join_relative(base_dir: &Path, relative: &str) -> std::io::Result<std::path::PathBuf> {
+    let clean_rel = relative.replace('\\', "/");
+    let clean_rel = clean_rel.trim_start_matches('/');
+    if clean_rel.is_empty() || clean_rel.contains('\0') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid or empty relative path",
+        ));
+    }
+    for segment in clean_rel.split('/') {
+        if segment == ".." || segment.contains(':') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "path traversal attempt detected",
+            ));
+        }
+    }
+    let target = base_dir.join(clean_rel);
+    Ok(target)
+}
+
+/// 跨平台开机自启配置
+pub fn configure_autostart(label: &str, exe: &Path) -> std::io::Result<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let path = write_autostart_plist(label, exe)?;
+        Ok(path.display().to_string())
+    }
+    #[cfg(windows)]
+    {
+        write_windows_autostart_registry(label, exe)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        write_linux_autostart_desktop(label, exe)
+    }
+}
+
 pub fn write_autostart_plist(label: &str, exe: &Path) -> std::io::Result<std::path::PathBuf> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let dir = Path::new(&home).join("Library/LaunchAgents");
@@ -60,6 +100,62 @@ pub fn write_autostart_plist(label: &str, exe: &Path) -> std::io::Result<std::pa
     Ok(path)
 }
 
+#[cfg(windows)]
+fn write_windows_autostart_registry(label: &str, exe: &Path) -> std::io::Result<String> {
+    use windows::Win32::System::Registry::{
+        HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegOpenKeyExW, RegSetValueExW,
+    };
+    use windows::core::HSTRING;
+
+    let subkey = HSTRING::from("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    let mut hkey = windows::Win32::System::Registry::HKEY::default();
+    unsafe {
+        let status = RegOpenKeyExW(HKEY_CURRENT_USER, &subkey, 0, KEY_SET_VALUE, &mut hkey);
+        if status.is_err() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("failed to open registry key: {:?}", status),
+            ));
+        }
+        let val_name = HSTRING::from(label);
+        let val_data = format!("\"{}\"", exe.display());
+        let val_wide: Vec<u16> = val_data.encode_utf16().chain(std::iter::once(0)).collect();
+        let bytes = std::slice::from_raw_parts(
+            val_wide.as_ptr() as *const u8,
+            val_wide.len() * std::mem::size_of::<u16>(),
+        );
+        let set_status = RegSetValueExW(
+            hkey,
+            &val_name,
+            0,
+            REG_SZ,
+            Some(bytes),
+        );
+        let _ = RegCloseKey(hkey);
+        if set_status.is_err() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("failed to set registry value: {:?}", set_status),
+            ));
+        }
+    }
+    Ok(format!("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run -> {}", label))
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn write_linux_autostart_desktop(label: &str, exe: &Path) -> std::io::Result<String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let dir = Path::new(&home).join(".config/autostart");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{label}.desktop"));
+    let body = format!(
+        "[Desktop Entry]\nType=Application\nName={label}\nExec=\"{}\"\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n",
+        exe.display()
+    );
+    fs::write(&path, body)?;
+    Ok(path.display().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +172,19 @@ mod tests {
         assert!(!unclean);
         drop(second);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn path_traversal_prevention() {
+        let base = Path::new("/var/app/data");
+        assert!(safe_join_relative(base, "images/pic.png").is_ok());
+        assert_eq!(
+            safe_join_relative(base, "images/pic.png").unwrap(),
+            Path::new("/var/app/data/images/pic.png")
+        );
+        assert!(safe_join_relative(base, "../etc/passwd").is_err());
+        assert!(safe_join_relative(base, "sub/../../secret").is_err());
+        assert!(safe_join_relative(base, "C:\\Windows\\system32").is_err());
+        assert!(safe_join_relative(base, "file\0name").is_err());
     }
 }
