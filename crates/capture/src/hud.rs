@@ -81,7 +81,6 @@ pub enum ToolbarAction {
     Scroll,
     Undo,
     Save,
-    Pin,
     Cancel,
     Done,
 }
@@ -104,7 +103,6 @@ const SLOTS: &[Slot] = &[
     Slot::Button(ToolbarAction::Undo),
     Slot::Divider,
     Slot::Button(ToolbarAction::Save),
-    Slot::Button(ToolbarAction::Pin),
     Slot::Button(ToolbarAction::Cancel),
     Slot::Button(ToolbarAction::Done),
 ];
@@ -636,11 +634,6 @@ fn draw_icon(
             );
             stroke(pixmap, polyline(&[at(-0.34, 0.36), at(0.34, 0.36)]), color, width);
         }
-        ToolbarAction::Pin => {
-            let head = at(0.0, -0.14);
-            stroke(pixmap, circle_path(head.0, head.1, s * 0.17), color, width);
-            stroke(pixmap, polyline(&[at(0.0, 0.04), at(0.0, 0.4)]), color, width);
-        }
         ToolbarAction::Cancel => {
             stroke(pixmap, polyline(&[at(-0.28, -0.28), at(0.28, 0.28)]), color, width);
             stroke(pixmap, polyline(&[at(0.28, -0.28), at(-0.28, 0.28)]), color, width);
@@ -889,7 +882,7 @@ mod tests {
             "Retina 上 HUD 必须按 scale_factor 放大，否则物理像素绘制只有一半大小"
         );
         assert!(one_x.bar.height >= 44.0, "工具栏逻辑高度不能低于可点击阈值");
-        assert!(one_x.bar.width >= 400.0, "12 个按钮 + 分隔线的逻辑宽度下限");
+        assert!(one_x.bar.width >= 350.0, "11 个按钮 + 分隔线的逻辑宽度下限");
     }
 
     #[test]
@@ -903,7 +896,7 @@ mod tests {
                 assert_eq!(hit, Some(*action), "按钮中心必须命中它自己");
             }
         }
-        assert_eq!(buttons, 12, "工具栏按钮数量变化时同步更新交互与文档");
+        assert_eq!(buttons, 11, "工具栏按钮数量变化时同步更新交互与文档");
     }
 
     #[test]

@@ -51,7 +51,6 @@ pub fn run() {
             commands::copy_recovery_key,
             commands::capture_fullscreen,
             commands::capture_region,
-            commands::pin_image,
             commands::get_sync_settings,
             commands::save_sync_settings,
             commands::connect_hub,

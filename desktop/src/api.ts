@@ -49,10 +49,6 @@ export function previewImage(id: string): Promise<string> {
   return invoke("preview_image", { itemId: id });
 }
 
-export function pinImage(id: string): Promise<void> {
-  return invoke("pin_image", { itemId: id });
-}
-
 export function recoveryKey(): Promise<string> {
   return invoke("recovery_key");
 }

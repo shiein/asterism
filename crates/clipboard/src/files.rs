@@ -16,9 +16,20 @@ pub fn preflight_paths(paths: &[PathBuf]) -> Result<FileManifest> {
         paths[0]
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "item".into())
+            .unwrap_or_else(|| "文件".into())
+    } else if paths.len() <= 3 {
+        let names: Vec<String> = paths
+            .iter()
+            .filter_map(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+            .collect();
+        if names.is_empty() { format!("{} 个文件", paths.len()) } else { names.join(", ") }
     } else {
-        format!("{} items", paths.len())
+        let names: Vec<String> = paths
+            .iter()
+            .take(3)
+            .filter_map(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+            .collect();
+        format!("{} 等 {} 个文件", names.join(", "), paths.len())
     };
 
     let mut entries = Vec::new();

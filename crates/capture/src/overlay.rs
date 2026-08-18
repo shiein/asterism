@@ -33,7 +33,6 @@ pub struct Selection {
 pub enum OverlayOutcome {
     Complete { selection: Selection, scene: AnnotationScene },
     Download { selection: Selection, scene: AnnotationScene },
-    Pin { selection: Selection, scene: AnnotationScene },
     Scroll { selection: Selection },
     Cancel,
 }
@@ -121,7 +120,6 @@ pub fn select_region(frame: &CapturedFrame) -> Result<Option<Selection>, Capture
     match select_region_with_windows(frame, &[])? {
         Some(OverlayOutcome::Complete { selection, .. })
         | Some(OverlayOutcome::Download { selection, .. })
-        | Some(OverlayOutcome::Pin { selection, .. })
         | Some(OverlayOutcome::Scroll { selection }) => Ok(Some(selection)),
         _ => Ok(None),
     }
@@ -351,9 +349,16 @@ impl OverlayApp {
         if let Some(window) = self.window.clone() {
             window.set_visible(true);
             window.focus_window();
+            #[cfg(target_os = "macos")]
+            {
+                use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(handle) = window.window_handle()
+                    && let RawWindowHandle::AppKit(appkit) = handle.as_raw()
+                {
+                    crate::macos_perm::reveal_overlay_ns_view(appkit.ns_view.as_ptr());
+                }
+            }
             self.shown = true;
-            // 显示后再提交一帧，规避某些平台上"隐藏窗口的首帧被丢弃"。
-            self.redraw();
         }
     }
 
@@ -416,9 +421,7 @@ impl OverlayApp {
         self.commit_text_draft();
         let translated = self.translate_annotations_to_selection();
         match &mut outcome {
-            OverlayOutcome::Complete { scene, .. }
-            | OverlayOutcome::Download { scene, .. }
-            | OverlayOutcome::Pin { scene, .. } => {
+            OverlayOutcome::Complete { scene, .. } | OverlayOutcome::Download { scene, .. } => {
                 scene.items = translated;
             }
             _ => {}
@@ -580,18 +583,6 @@ impl OverlayApp {
                     self.commit_outcome_and_exit(
                         event_loop,
                         OverlayOutcome::Download {
-                            selection,
-                            scene: AnnotationScene { items: self.annotations.clone() },
-                        },
-                    );
-                }
-            }
-            ToolbarAction::Pin => {
-                self.commit_text_draft();
-                if let Some(selection) = self.current_selection_in_frame() {
-                    self.commit_outcome_and_exit(
-                        event_loop,
-                        OverlayOutcome::Pin {
                             selection,
                             scene: AnnotationScene { items: self.annotations.clone() },
                         },

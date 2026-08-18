@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { pinImage, previewImage } from "../api";
+import { previewImage } from "../api";
 import { Modal } from "../components/Modal";
-import { CopyIcon, StarIcon, TrashIcon, EditIcon, CheckIcon, PinIcon } from "../components/icons";
+import { CopyIcon, StarIcon, TrashIcon, EditIcon, CheckIcon, FolderIcon } from "../components/icons";
 import type { HistoryItem } from "../types";
 
 interface HistoryDetailModalProps {
@@ -85,29 +85,16 @@ export function HistoryDetailModal({
           )}
           <div className="spacer" />
           {isVisual && (
-            <>
-              <button
-                className="btn"
-                onClick={() => {
-                  onClose();
-                  pinImage(item.id).catch((err) => console.error("failed to pin image", err));
-                }}
-                title="贴在屏幕上 (Pin)"
-              >
-                <PinIcon size={14} />
-                <span>贴图</span>
-              </button>
-              <button
-                className="btn"
-                onClick={() => {
-                  onClose();
-                  onAnnotate(item.id);
-                }}
-              >
-                <EditIcon size={14} />
-                <span>标注</span>
-              </button>
-            </>
+            <button
+              className="btn"
+              onClick={() => {
+                onClose();
+                onAnnotate(item.id);
+              }}
+            >
+              <EditIcon size={14} />
+              <span>标注</span>
+            </button>
           )}
           {canFavorite && (
             <button
@@ -198,10 +185,37 @@ export function HistoryDetailModal({
 
         {item.kind === "FILES" && (
           <div className="file-block">
-            <div>
-              <div className="list-row-title">{item.preview || "文件列表"}</div>
-              <div className="list-row-sub">
-                {item.fileCount ?? 1} 个文件 · {formatBytes(item.logicalSize)}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: "var(--r-sm)",
+                  background: "rgba(10, 132, 255, 0.12)",
+                  color: "var(--accent)",
+                  display: "grid",
+                  placeItems: "center",
+                  flexShrink: 0,
+                }}
+              >
+                <FolderIcon size={20} />
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div
+                  className="list-row-title"
+                  style={{
+                    fontSize: 14,
+                    fontWeight: 500,
+                    wordBreak: "break-all",
+                    whiteSpace: "normal",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {item.preview || "文件"}
+                </div>
+                <div className="list-row-sub" style={{ marginTop: 2, fontSize: 12 }}>
+                  {item.fileCount ?? 1} 个文件 · {formatBytes(item.logicalSize)}
+                </div>
               </div>
             </div>
           </div>

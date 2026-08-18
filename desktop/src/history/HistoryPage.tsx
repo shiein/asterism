@@ -8,7 +8,6 @@ import {
   deleteItem,
   listActions,
   listHistory,
-  pinImage,
   previewImage,
   setFavorite,
 } from "../api";
@@ -27,7 +26,6 @@ import {
   FolderIcon,
   EditIcon,
   CheckIcon,
-  PinIcon,
 } from "../components/icons";
 import type { ContentKind, HistoryItem } from "../types";
 
@@ -174,15 +172,6 @@ export function HistoryPage({
     }
   }
 
-  async function handlePin(id: string) {
-    try {
-      await pinImage(id);
-      success("已贴在屏幕最前端");
-    } catch (err) {
-      showError(`贴图失败：${err}`);
-    }
-  }
-
   const isEmpty = historyItems.length === 0 && !history.isLoading && !history.error;
 
   return (
@@ -308,7 +297,6 @@ export function HistoryPage({
               onCopy={() => copy.mutate(item.id)}
               onFavorite={() => fav.mutate({ id: item.id, favorite: !item.favorite })}
               onDelete={() => remove.mutate(item.id)}
-              onPin={() => void handlePin(item.id)}
               onAnnotate={() => onAnnotate(item.id)}
               onOpenDetail={() => setDetailItem(item)}
             />
@@ -351,7 +339,6 @@ interface EntryProps {
   onCopy: () => void;
   onFavorite: () => void;
   onDelete: () => void;
-  onPin: () => void;
   onAnnotate: () => void;
   onOpenDetail: () => void;
 }
@@ -363,7 +350,6 @@ function Entry({
   onCopy,
   onFavorite,
   onDelete,
-  onPin,
   onAnnotate,
   onOpenDetail,
 }: EntryProps) {
@@ -407,11 +393,24 @@ function Entry({
 
         {item.kind === "FILES" && (
           <div className="file-block">
-            <FolderIcon size={18} style={{ color: "var(--warning)" }} />
-            <div>
-              <div className="list-row-title">{item.preview || "文件集合"}</div>
-              <div className="list-row-sub">
-                {item.fileCount ?? 1} 个文件 · {formatBytes(item.logicalSize)}
+            <FolderIcon size={20} style={{ color: "var(--accent)", flexShrink: 0 }} />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div
+                className="list-row-title"
+                style={{
+                  wordBreak: "break-all",
+                  whiteSpace: "normal",
+                  lineHeight: 1.35,
+                  fontSize: 13,
+                  fontWeight: 500,
+                }}
+              >
+                {item.preview || "文件"}
+              </div>
+              <div className="list-row-sub" style={{ marginTop: 2 }}>
+                {item.fileCount && item.fileCount > 1
+                  ? `${item.fileCount} 个文件 · ${formatBytes(item.logicalSize)}`
+                  : formatBytes(item.logicalSize)}
               </div>
             </div>
           </div>
@@ -422,18 +421,9 @@ function Entry({
         <span className="entry-size">{formatBytes(item.logicalSize)}</span>
         <div className="row" style={{ gap: 4 }}>
           {isVisual && (
-            <>
-              <button
-                className="btn btn-plain btn-icon"
-                onClick={onPin}
-                title="贴在屏幕上 (Pin)"
-              >
-                <PinIcon size={14} />
-              </button>
-              <button className="btn btn-plain btn-icon" onClick={onAnnotate} title="标注">
-                <EditIcon size={14} />
-              </button>
-            </>
+            <button className="btn btn-plain btn-icon" onClick={onAnnotate} title="标注">
+              <EditIcon size={14} />
+            </button>
           )}
           {showAction("asterism.history.delete") && (
             <button className="btn btn-plain btn-icon" onClick={onDelete} title="删除">

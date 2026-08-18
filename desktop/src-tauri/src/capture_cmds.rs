@@ -446,7 +446,6 @@ fn selection_of(outcome: asterism_capture::OverlayOutcome) -> Option<Selection> 
     match outcome {
         asterism_capture::OverlayOutcome::Complete { selection, .. }
         | asterism_capture::OverlayOutcome::Download { selection, .. }
-        | asterism_capture::OverlayOutcome::Pin { selection, .. }
         | asterism_capture::OverlayOutcome::Scroll { selection } => Some(selection),
         asterism_capture::OverlayOutcome::Cancel => None,
     }

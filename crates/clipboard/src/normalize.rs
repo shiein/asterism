@@ -132,6 +132,7 @@ impl NormalizedContent {
                     ItemMetadata {
                         source_app,
                         mime_hint: Some("application/x-asterism-files".into()),
+                        text_preview: Some(manifest.root_name.clone()),
                         files: Some(summary),
                         ..ItemMetadata::default()
                     },

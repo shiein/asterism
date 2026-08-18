@@ -1,3 +1,6 @@
+use objc2::runtime::AnyObject;
+use objc2::{class, msg_send};
+
 use crate::backend::CaptureError;
 
 #[repr(C)]
@@ -53,8 +56,20 @@ pub fn elevate_overlay_ns_view(ns_view: *mut std::ffi::c_void) {
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         let _: () = msg_send![window, setHidesOnDeactivate: false];
         let _: () = msg_send![window, setAnimationBehavior: NS_WINDOW_ANIMATION_BEHAVIOR_NONE];
-        let _: () = msg_send![window, orderFrontRegardless];
+        let _: () = msg_send![window, setOpaque: true];
+        let _: () = msg_send![window, setHasShadow: false];
+    }
+}
 
+pub fn reveal_overlay_ns_view(ns_view: *mut std::ffi::c_void) {
+    unsafe {
+        let view = ns_view.cast::<AnyObject>();
+        let window: *mut AnyObject = msg_send![view, window];
+        if window.is_null() {
+            return;
+        }
+        let _: () = msg_send![window, orderFrontRegardless];
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
         if !app.is_null() {
             let _: () = msg_send![app, activateIgnoringOtherApps: true];
         }
