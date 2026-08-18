@@ -12,5 +12,12 @@ gif = "0.13"
 image.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
+
 [build-dependencies]
 cc = "1.2"

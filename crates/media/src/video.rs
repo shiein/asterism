@@ -48,9 +48,9 @@ impl VideoSession {
     }
 }
 
-#[cfg(windows)]
 pub mod windows_mf {
-    //! WGC → D3D11 → Media Foundation H.264
+    //! WGC → D3D11 → Media Foundation H.264 MP4
+    pub use crate::wmf::WmfH264Encoder;
 }
 
 #[cfg(target_os = "macos")]
