@@ -133,11 +133,12 @@ pub async fn record_gif(
     let token = session.cancel_token();
     crate::commands::ensure_capture_permission().await?;
     let recording = state.recording.begin().map_err(CmdError::from)?;
+    let overlay = crate::overlay_cli::spawn_overlay().map_err(CmdError::from)?;
     let main_window = crate::capture_ui::HiddenMainWindow::hide(&app)?;
     main_window.wait_until_not_captured();
     let target = tauri::async_runtime::spawn_blocking({
         let token = token.clone();
-        move || select_recording_target(token)
+        move || select_recording_target(token, overlay)
     })
     .await
     .map_err(|err| CmdError::Any(err.to_string()))??;
@@ -217,11 +218,12 @@ pub async fn record_video(
         ));
     }
     let recording = state.recording.begin().map_err(CmdError::from)?;
+    let overlay = crate::overlay_cli::spawn_overlay().map_err(CmdError::from)?;
     let main_window = crate::capture_ui::HiddenMainWindow::hide(&app)?;
     main_window.wait_until_not_captured();
     let target = tauri::async_runtime::spawn_blocking({
         let token = token.clone();
-        move || select_recording_target(token)
+        move || select_recording_target(token, overlay)
     })
     .await
     .map_err(|err| CmdError::Any(err.to_string()))??;
@@ -337,11 +339,10 @@ struct RecordingTarget {
 
 fn select_recording_target(
     token: asterism_kernel::CancelToken,
+    mut overlay: crate::overlay_cli::OverlayProcess,
 ) -> Result<RecordingTarget, CmdError> {
     ensure_recording_alive(&token)?;
     let backend = XcapBackend;
-    // 与截图同理：先拉起 overlay 进程，再去捕获，掩盖子进程启动时间。
-    let mut overlay = crate::overlay_cli::spawn_overlay().map_err(CmdError::from)?;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitor = asterism_capture::preferred_monitor(&monitors)
         .cloned()
@@ -429,10 +430,11 @@ pub async fn scroll_capture(
     let session = state.begin_capture();
     let token = session.cancel_token();
     crate::commands::ensure_capture_permission().await?;
+    let overlay = crate::overlay_cli::spawn_overlay().map_err(CmdError::from)?;
     let hidden = crate::capture_ui::HiddenMainWindow::hide(&app)?;
     hidden.wait_until_not_captured();
     let (png, w, h) =
-        tauri::async_runtime::spawn_blocking(move || scroll_capture_inner(frames, token))
+        tauri::async_runtime::spawn_blocking(move || scroll_capture_inner(frames, token, overlay))
             .await
             .map_err(|e| CmdError::Any(e.to_string()))??;
     crate::commands::insert_screenshot(&state, png, w, h)
@@ -441,12 +443,12 @@ pub async fn scroll_capture(
 fn scroll_capture_inner(
     frames: u32,
     token: asterism_kernel::CancelToken,
+    mut overlay: crate::overlay_cli::OverlayProcess,
 ) -> Result<(Vec<u8>, u32, u32), CmdError> {
     if token.is_cancelled() {
         return Err(CmdError::Any("cancelled".into()));
     }
     let backend = XcapBackend;
-    let mut overlay = crate::overlay_cli::spawn_overlay().map_err(CmdError::from)?;
     let monitors = backend.list_monitors().map_err(|e| CmdError::Any(e.to_string()))?;
     let monitor = asterism_capture::preferred_monitor(&monitors)
         .ok_or_else(|| CmdError::Any("no monitor".into()))?;

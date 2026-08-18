@@ -30,9 +30,8 @@ impl HiddenMainWindow {
 
     pub fn wait_until_not_captured(&self) {
         if self.restore {
-            // Give WindowServer/DWM one composition turn so the hidden WebView is not present
-            // in the first frozen capture frame.
-            std::thread::sleep(Duration::from_millis(180));
+            // 窗口隐藏后只需等待合成器刷新（约 30ms），彻底消除 180ms 阻塞延时。
+            std::thread::sleep(Duration::from_millis(30));
         }
     }
 }
