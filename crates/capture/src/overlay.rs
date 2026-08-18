@@ -287,6 +287,7 @@ impl OverlayApp {
                 PhysicalSize::new(frame.width.max(1), frame.height.max(1)),
             ),
         };
+        #[allow(unused_mut)]
         let mut attrs = Window::default_attributes()
             .with_title("Asterism")
             .with_decorations(false)

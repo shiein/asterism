@@ -72,9 +72,11 @@ impl WmfH264Encoder {
             out_type
                 .SetUINT32(&MF_MT_AVG_BITRATE, target_bitrate)
                 .map_err(|e| MediaError::Failed(format!("Set bitrate: {e}")))?;
-            MFSetAttributeRatio(&out_type, &MF_MT_FRAME_RATE, fps, 1)
+            out_type
+                .SetUINT64(&MF_MT_FRAME_RATE, ((fps as u64) << 32) | 1)
                 .map_err(|e| MediaError::Failed(format!("Set out framerate: {e}")))?;
-            MFSetAttributeSize(&out_type, &MF_MT_FRAME_SIZE, width, height)
+            out_type
+                .SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | (height as u64))
                 .map_err(|e| MediaError::Failed(format!("Set out size: {e}")))?;
             out_type
                 .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
@@ -93,9 +95,11 @@ impl WmfH264Encoder {
             in_type
                 .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
                 .map_err(|e| MediaError::Failed(format!("Set in subtype RGB32: {e}")))?;
-            MFSetAttributeRatio(&in_type, &MF_MT_FRAME_RATE, fps, 1)
+            in_type
+                .SetUINT64(&MF_MT_FRAME_RATE, ((fps as u64) << 32) | 1)
                 .map_err(|e| MediaError::Failed(format!("Set in framerate: {e}")))?;
-            MFSetAttributeSize(&in_type, &MF_MT_FRAME_SIZE, width, height)
+            in_type
+                .SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | (height as u64))
                 .map_err(|e| MediaError::Failed(format!("Set in size: {e}")))?;
             in_type
                 .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
