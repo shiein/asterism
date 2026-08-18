@@ -189,12 +189,20 @@ async fn run_loop(
             let self_id = identity.device_id;
             thread::spawn(move || {
                 while let Ok(ev) = rx_mdns.recv() {
-                    if let ServiceEvent::ServiceResolved(info) = ev {
-                        if let Some(peer) = lan::parse_mdns_device(&info) {
-                            if peer.device_id != self_id {
-                                peers_b.lock().insert(peer.device_id.to_string(), peer);
+                    match ev {
+                        ServiceEvent::ServiceResolved(info) => {
+                            if let Some(peer) = lan::parse_mdns_device(&info) {
+                                if peer.device_id != self_id {
+                                    peers_b.lock().insert(peer.device_id.to_string(), peer);
+                                }
                             }
                         }
+                        ServiceEvent::ServiceRemoved(_service_type, fullname) => {
+                            peers_b
+                                .lock()
+                                .retain(|id, _| !fullname.contains(&id[..8.min(id.len())]));
+                        }
+                        _ => {}
                     }
                 }
             });
