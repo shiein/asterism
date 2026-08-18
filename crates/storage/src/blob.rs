@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use asterism_core::id::BlobId;
+use asterism_core::id::{BlobId, ContentId};
 use asterism_crypto::hash::blake3_bytes;
 
 use crate::error::{Result, StorageError};
@@ -33,13 +33,14 @@ impl BlobStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("tmp");
+        let tmp = path.with_extension(format!("tmp.{}", ContentId::new()));
         {
             let mut file = fs::File::create(&tmp)?;
             file.write_all(bytes)?;
             file.sync_all()?;
         }
-        fs::rename(tmp, path)?;
+        let _ = fs::rename(&tmp, &path);
+        let _ = fs::remove_file(&tmp);
         Ok(id)
     }
 
@@ -99,7 +100,7 @@ fn visit_blob_files(dir: &Path, on_file: &mut impl FnMut(&Path, &str)) -> Result
         if path.is_dir() {
             visit_blob_files(&path, on_file)?;
         } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && !name.ends_with(".tmp")
+            && !name.contains(".tmp")
         {
             on_file(&path, name);
         }
