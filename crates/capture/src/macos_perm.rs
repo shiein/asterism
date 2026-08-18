@@ -30,12 +30,19 @@ pub fn elevate_overlay_ns_view(ns_view: *mut std::ffi::c_void) {
 
     const NS_STATUS_WINDOW_LEVEL: isize = 25;
     const NS_WINDOW_ANIMATION_BEHAVIOR_NONE: isize = 2;
+    const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: isize = 1;
     const JOIN_ALL_SPACES: usize = 1 << 0;
     const TRANSIENT: usize = 1 << 3;
     const IGNORES_CYCLE: usize = 1 << 6;
     const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
 
     unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        if !app.is_null() {
+            let _: () =
+                msg_send![app, setActivationPolicy: NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY];
+        }
+
         let view = ns_view.cast::<AnyObject>();
         let window: *mut AnyObject = msg_send![view, window];
         if window.is_null() {
@@ -48,7 +55,6 @@ pub fn elevate_overlay_ns_view(ns_view: *mut std::ffi::c_void) {
         let _: () = msg_send![window, setAnimationBehavior: NS_WINDOW_ANIMATION_BEHAVIOR_NONE];
         let _: () = msg_send![window, orderFrontRegardless];
 
-        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
         if !app.is_null() {
             let _: () = msg_send![app, activateIgnoringOtherApps: true];
         }
