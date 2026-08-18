@@ -15,6 +15,13 @@ import {
 } from "../components/icons";
 import { useUiStore, type AppTheme } from "../store";
 
+interface WebdavConfig {
+  enabled: boolean;
+  url: string;
+  username?: string | null;
+  password?: string | null;
+}
+
 interface SyncSettings {
   hub_url: string | null;
   token: string | null;
@@ -24,6 +31,7 @@ interface SyncSettings {
   pending_pair_code?: string | null;
   pending_pair_salt?: string | null;
   hub_cert_sha256?: string | null;
+  webdav?: WebdavConfig | null;
 }
 
 interface DeviceDto {
@@ -131,6 +139,16 @@ export function SettingsPage() {
     mutationFn: (code: string) => invoke("publish_pairing_avk", { code }),
     onSuccess: () => success("已将端到端密钥存入配对通道"),
     onError: (e) => showError(`存入密钥失败：${e}`),
+  });
+
+  const [webdavUrl, setWebdavUrl] = useState("");
+  const [webdavUser, setWebdavUser] = useState("");
+  const [webdavPass, setWebdavPass] = useState("");
+
+  const testWebdav = useMutation({
+    mutationFn: (config: WebdavConfig) => invoke("test_webdav", { config }),
+    onSuccess: () => success("WebDAV 连接测试成功！"),
+    onError: (e) => showError(`WebDAV 连接失败：${e}`),
   });
 
   const [copiedFp, setCopiedFp] = useState(false);
@@ -345,6 +363,108 @@ export function SettingsPage() {
                 </div>
               </div>
             )}
+          </div>
+        </section>
+
+        <section className="section">
+          <div className="section-head">
+            <h3>
+              <SyncIcon size={15} />
+              WebDAV 远端存储与同步（Hub 替代方案）
+            </h3>
+            <span className="row" style={{ gap: 5, fontSize: 12, color: "var(--text-secondary)" }}>
+              <span className={`status-dot ${current.webdav?.enabled ? "" : "idle"}`} />
+              {current.webdav?.enabled ? "已启用" : "未启用"}
+            </span>
+          </div>
+          <div className="section-body">
+            <p className="field-hint" style={{ marginBottom: 12 }}>
+              支持使用自建 NAS（群晖/QNAP）、Nextcloud、坚果云或 InfiniCloud 等标准 WebDAV 网盘作为同步介质。数据同样受端到端加密（E2EE）保护。
+            </p>
+
+            <div className="field">
+              <label className="field-label" htmlFor="settings-webdav-url">
+                WebDAV 服务端完整地址
+              </label>
+              <input
+                id="settings-webdav-url"
+                className="input mono"
+                defaultValue={current.webdav?.url ?? ""}
+                placeholder="https://dav.jianguoyun.com/dav/Asterism"
+                onChange={(e) => setWebdavUrl(e.target.value)}
+              />
+            </div>
+
+            <div className="row" style={{ gap: 12 }}>
+              <div className="field" style={{ flex: 1 }}>
+                <label className="field-label" htmlFor="settings-webdav-user">
+                  用户名 / 账号
+                </label>
+                <input
+                  id="settings-webdav-user"
+                  className="input"
+                  defaultValue={current.webdav?.username ?? ""}
+                  placeholder="username@example.com"
+                  onChange={(e) => setWebdavUser(e.target.value)}
+                />
+              </div>
+
+              <div className="field" style={{ flex: 1 }}>
+                <label className="field-label" htmlFor="settings-webdav-pass">
+                  应用授权密码
+                </label>
+                <input
+                  id="settings-webdav-pass"
+                  type="password"
+                  className="input"
+                  defaultValue={current.webdav?.password ?? ""}
+                  placeholder="••••••••••••"
+                  onChange={(e) => setWebdavPass(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="row wrap" style={{ marginTop: 10 }}>
+              <button
+                className="btn btn-primary"
+                disabled={testWebdav.isPending}
+                onClick={() => {
+                  const url = webdavUrl || current.webdav?.url || "";
+                  if (!url) {
+                    showError("请先填写 WebDAV 地址");
+                    return;
+                  }
+                  testWebdav.mutate({
+                    enabled: true,
+                    url,
+                    username: webdavUser !== "" ? webdavUser : (current.webdav?.username ?? null),
+                    password: webdavPass !== "" ? webdavPass : (current.webdav?.password ?? null),
+                  });
+                }}
+              >
+                <ShieldCheckIcon size={14} />
+                <span>{testWebdav.isPending ? "测试连接中…" : "测试 WebDAV 连接"}</span>
+              </button>
+
+              <button
+                className="btn"
+                onClick={() => {
+                  const url = webdavUrl || current.webdav?.url || "";
+                  const enabled = !current.webdav?.enabled;
+                  save.mutate({
+                    ...current,
+                    webdav: {
+                      enabled,
+                      url,
+                      username: webdavUser !== "" ? webdavUser : (current.webdav?.username ?? null),
+                      password: webdavPass !== "" ? webdavPass : (current.webdav?.password ?? null),
+                    },
+                  });
+                }}
+              >
+                {current.webdav?.enabled ? "停用 WebDAV 同步" : "保存并启用 WebDAV 同步"}
+              </button>
+            </div>
           </div>
         </section>
 

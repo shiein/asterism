@@ -523,6 +523,13 @@ pub fn get_local_cert_fingerprint(state: State<'_, DesktopState>) -> String {
     state.sync.local_fingerprint.clone()
 }
 
+#[tauri::command]
+pub async fn test_webdav(config: asterism_sync::WebdavConfig) -> Result<(), CmdError> {
+    let client =
+        asterism_sync::WebdavClient::new(&config).map_err(|e| CmdError::Any(e.to_string()))?;
+    client.test_connection().await.map_err(|e| CmdError::Any(e.to_string()))
+}
+
 fn persist_and_activate_vault(
     state: &DesktopState,
     vault: asterism_crypto::AccountVaultKey,

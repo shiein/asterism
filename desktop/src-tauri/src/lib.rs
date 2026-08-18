@@ -60,6 +60,7 @@ pub fn run() {
             commands::trust_lan_peer,
             commands::untrust_lan_peer,
             commands::get_local_cert_fingerprint,
+            commands::test_webdav,
             capture_cmds::list_windows,
             capture_cmds::capture_window,
             capture_cmds::preview_image,

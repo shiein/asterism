@@ -16,6 +16,8 @@ pub struct SyncSettings {
     pub pending_pair_salt: Option<String>,
     #[serde(default)]
     pub hub_cert_sha256: Option<String>,
+    #[serde(default)]
+    pub webdav: Option<asterism_sync::WebdavConfig>,
 }
 
 fn default_true() -> bool {
@@ -33,6 +35,7 @@ impl Default for SyncSettings {
             pending_pair_code: None,
             pending_pair_salt: None,
             hub_cert_sha256: None,
+            webdav: None,
         }
     }
 }
@@ -84,5 +87,10 @@ impl SyncSettings {
         self.auto_sync
             && self.hub_url.as_ref().is_some_and(|u| !u.is_empty())
             && self.token.is_some()
+    }
+
+    #[allow(dead_code)]
+    pub fn webdav_ready(&self) -> bool {
+        self.auto_sync && self.webdav.as_ref().is_some_and(|w| w.enabled && !w.url.is_empty())
     }
 }

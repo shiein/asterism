@@ -20,6 +20,7 @@ pub mod protocol;
 pub mod router;
 pub mod session;
 pub mod transport;
+pub mod webdav;
 
 pub use archive::{
     pack_file_bundle, pack_file_bundle_to_writer, pack_tree, pack_tree_to_writer,
@@ -40,3 +41,4 @@ pub use payload::{
 pub use protocol::{Envelope, MessageBody, PROTOCOL_VERSION};
 pub use session::SyncSession;
 pub use transport::{DirectTransport, HubTransport, Route, TransportError};
+pub use webdav::{WebdavClient, WebdavConfig};
