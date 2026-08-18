@@ -56,6 +56,11 @@ pub async fn stream_upload_resumable<R: Read + Seek>(
     let encryptor = BlobChunkEncryptor::new(avk, plaintext_hash)?;
     let mut buf = vec![0u8; CHUNK_SIZE];
 
+    let mut completed = planner.total_chunks - (missing.len() as u32);
+    if completed > 0 {
+        progress_callback(completed, planner.total_chunks);
+    }
+
     for &index in &missing {
         let offset = (index as u64) * (CHUNK_SIZE as u64);
         reader.seek(SeekFrom::Start(offset)).map_err(|e| SyncError::Failed(e.to_string()))?;
@@ -80,7 +85,8 @@ pub async fn stream_upload_resumable<R: Read + Seek>(
 
         let encrypted = encryptor.encrypt(index, &buf[..read_bytes])?;
         client.put_chunk(blob_id, index, encrypted).await?;
-        progress_callback(index + 1, planner.total_chunks);
+        completed += 1;
+        progress_callback(completed, planner.total_chunks);
     }
 
     client.commit_blob(blob_id, planner.total_chunks).await?;

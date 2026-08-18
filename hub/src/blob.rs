@@ -89,8 +89,11 @@ pub async fn put_chunk(
     if !dir.exists() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let path = dir.join(format!("chunk_{index}"));
-    std::fs::write(path, &body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let tmp_path = dir.join(format!("chunk_{index}.tmp.{}", Uuid::now_v7()));
+    std::fs::write(&tmp_path, &body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let target_path = dir.join(format!("chunk_{index}"));
+    let _ = std::fs::rename(&tmp_path, &target_path);
+    let _ = std::fs::remove_file(&tmp_path);
     Ok(StatusCode::NO_CONTENT)
 }
 

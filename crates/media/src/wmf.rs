@@ -46,6 +46,12 @@ impl WmfH264Encoder {
                 .map_err(|e| MediaError::Failed(format!("MFCreateSinkWriterFromURL: {e}")))?
         };
 
+        let width = (width / 2) * 2;
+        let height = (height / 2) * 2;
+        if width < 2 || height < 2 {
+            return Err(MediaError::Failed("recording dimensions must be at least 2x2".into()));
+        }
+
         let target_bitrate = bitrate.unwrap_or_else(|| {
             // 自适应比特率：1080p@30fps ~ 4Mbps, 4K@60fps ~ 20Mbps
             let pixels = (width as u64) * (height as u64);
@@ -138,7 +144,23 @@ impl WmfH264Encoder {
                 .Lock(&mut ptr, Some(&mut max_len), Some(&mut current_len))
                 .map_err(|e| MediaError::Failed(format!("Buffer Lock: {e}")))?;
 
-            std::ptr::copy_nonoverlapping(bgra_pixels.as_ptr(), ptr, expected_len);
+            if bgra_pixels.len() == expected_len {
+                std::ptr::copy_nonoverlapping(bgra_pixels.as_ptr(), ptr, expected_len);
+            } else {
+                let row_bytes = (self.width as usize) * 4;
+                let src_stride = bgra_pixels.len() / (self.height as usize).max(1);
+                for y in 0..self.height as usize {
+                    let src_offset = y * src_stride;
+                    let dst_offset = y * row_bytes;
+                    if src_offset + row_bytes <= bgra_pixels.len() {
+                        std::ptr::copy_nonoverlapping(
+                            bgra_pixels.as_ptr().add(src_offset),
+                            ptr.add(dst_offset),
+                            row_bytes,
+                        );
+                    }
+                }
+            }
 
             buffer.Unlock().map_err(|e| MediaError::Failed(format!("Buffer Unlock: {e}")))?;
 
