@@ -113,7 +113,7 @@ pub fn export_annotated(
     insert_screenshot(&state, out, width, height)
 }
 
-fn load_image_item(
+pub(crate) fn load_image_item(
     state: &DesktopState,
     item_id: &str,
 ) -> Result<(asterism_core::ContentId, Vec<u8>, u32, u32), CmdError> {

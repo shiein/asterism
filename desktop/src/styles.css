@@ -1481,13 +1481,100 @@ kbd.hint {
   .brand-sub,
   .nav-item span,
   .nav-item kbd,
-  .nav-label,
-  .device-chip > div {
+  .network-badge span {
     display: none;
   }
   .nav-item {
     justify-content: center;
   }
+}
+
+/* ——————————————————————————— 贴图悬浮窗 (Pin) ——————————————————————————— */
+
+.pin-container {
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+  position: relative;
+  border-radius: var(--r-md);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+}
+
+.pin-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  pointer-events: auto;
+  cursor: grab;
+  transition: transform 60ms ease-out;
+  border-radius: var(--r-sm);
+}
+
+.pin-image:active {
+  cursor: grabbing;
+}
+
+.pin-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: rgba(28, 28, 30, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--r-sm);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 160ms var(--ease), transform 160ms var(--ease);
+  z-index: 100;
+}
+
+.pin-container:hover .pin-toolbar {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.pin-btn {
+  display: grid;
+  place-items: center;
+  padding: 3px 6px;
+  min-width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+
+.pin-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text-primary);
+}
+
+.pin-btn.pin-close:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+.pin-loading {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+@media (max-width: 860px) {
   .theme-cards {
     grid-template-columns: 1fr;
   }

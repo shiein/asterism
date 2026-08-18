@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { previewImage } from "../api";
+import { pinImage, previewImage } from "../api";
 import { Modal } from "../components/Modal";
-import { CopyIcon, StarIcon, TrashIcon, EditIcon, CheckIcon } from "../components/icons";
+import { CopyIcon, StarIcon, TrashIcon, EditIcon, CheckIcon, PinIcon } from "../components/icons";
 import type { HistoryItem } from "../types";
 
 interface HistoryDetailModalProps {
@@ -85,16 +85,29 @@ export function HistoryDetailModal({
           )}
           <div className="spacer" />
           {isVisual && (
-            <button
-              className="btn"
-              onClick={() => {
-                onClose();
-                onAnnotate(item.id);
-              }}
-            >
-              <EditIcon size={14} />
-              <span>标注</span>
-            </button>
+            <>
+              <button
+                className="btn"
+                onClick={() => {
+                  onClose();
+                  void pinImage(item.id);
+                }}
+                title="贴在屏幕上 (Pin)"
+              >
+                <PinIcon size={14} />
+                <span>贴图</span>
+              </button>
+              <button
+                className="btn"
+                onClick={() => {
+                  onClose();
+                  onAnnotate(item.id);
+                }}
+              >
+                <EditIcon size={14} />
+                <span>标注</span>
+              </button>
+            </>
           )}
           {canFavorite && (
             <button

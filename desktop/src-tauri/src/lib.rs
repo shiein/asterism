@@ -30,6 +30,9 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
+            if let Some(main_window) = app.get_webview_window("main") {
+                capture_ui::apply_capture_exclusion(&main_window);
+            }
             let state = DesktopState::start(app.handle().clone())?;
             app.manage(state);
             Ok(())
@@ -48,6 +51,7 @@ pub fn run() {
             commands::copy_recovery_key,
             commands::capture_fullscreen,
             commands::capture_region,
+            commands::pin_image,
             commands::get_sync_settings,
             commands::save_sync_settings,
             commands::connect_hub,

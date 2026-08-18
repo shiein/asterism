@@ -324,7 +324,7 @@ pub async fn capture_region(
     // 观感就是"先截了一张图，再在这张图上二次截图"。
     let overlay = crate::overlay_cli::spawn_overlay().map_err(CmdError::from)?;
     hidden.wait_until_not_captured();
-    let (png, w, h) = tauri::async_runtime::spawn_blocking(move || {
+    let (png, w, h, is_pin, pin_pos) = tauri::async_runtime::spawn_blocking(move || {
         let mut overlay = overlay;
         if token.is_cancelled() {
             return Err("cancelled".into());
@@ -339,6 +339,16 @@ pub async fn capture_region(
         let Some(outcome) = outcome else {
             return Err("cancelled".into());
         };
+        let is_pin = matches!(outcome, asterism_capture::OverlayOutcome::Pin { .. });
+        let pin_pos = if let asterism_capture::OverlayOutcome::Pin { ref selection, .. } = outcome {
+            let scale = frame.monitor.scale_factor.max(1.0);
+            Some((
+                frame.monitor.origin_logical.0 + selection.x / scale,
+                frame.monitor.origin_logical.1 + selection.y / scale,
+            ))
+        } else {
+            None
+        };
         match outcome {
             asterism_capture::OverlayOutcome::Complete { selection, scene }
             | asterism_capture::OverlayOutcome::Download { selection, scene }
@@ -347,7 +357,7 @@ pub async fn capture_region(
                 let (w, h, bgra) =
                     overlay.crop_bgra().ok_or_else(|| "empty selection".to_string())?;
                 let png = export_png(w, h, &bgra, &scene)?;
-                Ok::<_, String>((png, w, h))
+                Ok::<_, String>((png, w, h, is_pin, pin_pos))
             }
             asterism_capture::OverlayOutcome::Scroll { selection } => {
                 let mut engine = asterism_capture::ScrollCaptureEngine::default();
@@ -398,13 +408,13 @@ pub async fn capture_region(
                         &stitched.bgra,
                         &AnnotationScene::default(),
                     )?;
-                    Ok::<_, String>((png, stitched.width, stitched.height))
+                    Ok::<_, String>((png, stitched.width, stitched.height, false, None))
                 } else {
                     let overlay = OverlaySession { frame, selection: sel };
                     let (w, h, bgra) =
                         overlay.crop_bgra().ok_or_else(|| "empty selection".to_string())?;
                     let png = export_png(w, h, &bgra, &AnnotationScene::default())?;
-                    Ok::<_, String>((png, w, h))
+                    Ok::<_, String>((png, w, h, false, None))
                 }
             }
             asterism_capture::OverlayOutcome::Cancel => Err("cancelled".into()),
@@ -413,7 +423,22 @@ pub async fn capture_region(
     .await
     .map_err(|e| CmdError::Any(e.to_string()))?
     .map_err(CmdError::Any)?;
-    insert_screenshot(&state, png, w, h)
+    let id = insert_screenshot(&state, png, w, h)?;
+    if is_pin {
+        let (px, py) = pin_pos.map(|(x, y)| (Some(x), Some(y))).unwrap_or((None, None));
+        let _ = crate::capture_ui::PinWindow::show(&app, &id, w, h, px, py);
+    }
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn pin_image(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    item_id: String,
+) -> Result<(), CmdError> {
+    let (_, _, w, h) = crate::capture_cmds::load_image_item(&state, &item_id)?;
+    crate::capture_ui::PinWindow::show(&app, &item_id, w, h, None, None)
 }
 
 #[tauri::command]

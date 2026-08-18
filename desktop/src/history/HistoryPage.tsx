@@ -8,6 +8,7 @@ import {
   deleteItem,
   listActions,
   listHistory,
+  pinImage,
   previewImage,
   setFavorite,
 } from "../api";
@@ -23,9 +24,10 @@ import {
   CropIcon,
   MaximizeIcon,
   ClipboardIcon,
-  EditIcon,
   FolderIcon,
+  EditIcon,
   CheckIcon,
+  PinIcon,
 } from "../components/icons";
 import type { ContentKind, HistoryItem } from "../types";
 
@@ -408,9 +410,18 @@ function Entry({
         <span className="entry-size">{formatBytes(item.logicalSize)}</span>
         <div className="row" style={{ gap: 4 }}>
           {isVisual && (
-            <button className="btn btn-plain btn-icon" onClick={onAnnotate} title="标注">
-              <EditIcon size={14} />
-            </button>
+            <>
+              <button
+                className="btn btn-plain btn-icon"
+                onClick={() => void pinImage(item.id)}
+                title="贴在屏幕上 (Pin)"
+              >
+                <PinIcon size={14} />
+              </button>
+              <button className="btn btn-plain btn-icon" onClick={onAnnotate} title="标注">
+                <EditIcon size={14} />
+              </button>
+            </>
           )}
           {showAction("asterism.history.delete") && (
             <button className="btn btn-plain btn-icon" onClick={onDelete} title="删除">

@@ -11,6 +11,33 @@ const TOOLBAR_WIDTH: f64 = 300.0;
 const TOOLBAR_HEIGHT: f64 = 52.0;
 const TOOLBAR_GAP: f64 = 12.0;
 
+pub fn apply_capture_exclusion(window: &WebviewWindow) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE};
+        if let Ok(hwnd) = window.hwnd() {
+            unsafe {
+                let _ = SetWindowDisplayAffinity(HWND(hwnd.0 as _), WDA_EXCLUDEFROMCAPTURE);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        if let Ok(ns_window) = window.ns_window() {
+            unsafe {
+                let win = ns_window as *mut AnyObject;
+                if !win.is_null() {
+                    const NS_WINDOW_ANIMATION_BEHAVIOR_NONE: isize = 2;
+                    let _: () = msg_send![win, setAnimationBehavior: NS_WINDOW_ANIMATION_BEHAVIOR_NONE];
+                }
+            }
+        }
+    }
+}
+
 pub struct HiddenMainWindow {
     window: WebviewWindow,
     restore: bool,
@@ -21,6 +48,7 @@ impl HiddenMainWindow {
         let window = app
             .get_webview_window(MAIN_WINDOW_LABEL)
             .ok_or_else(|| CmdError::Any("main window unavailable".into()))?;
+        apply_capture_exclusion(&window);
         let restore = window.is_visible().map_err(|err| CmdError::Any(err.to_string()))?;
         if restore {
             window.hide().map_err(|err| CmdError::Any(err.to_string()))?;
@@ -30,11 +58,48 @@ impl HiddenMainWindow {
 
     pub fn wait_until_not_captured(&self) {
         if self.restore {
-            #[cfg(target_os = "macos")]
-            std::thread::sleep(Duration::from_millis(120));
-            #[cfg(not(target_os = "macos"))]
-            std::thread::sleep(Duration::from_millis(30));
+            // macOS 禁用过渡动画，Windows 启用 WDA_EXCLUDEFROMCAPTURE，
+            // 仅需等待合成器单帧缓冲区刷洗（~15ms）即可完全消除残影与延迟。
+            std::thread::sleep(Duration::from_millis(15));
         }
+    }
+}
+
+pub struct PinWindow;
+
+impl PinWindow {
+    pub fn show(
+        app: &AppHandle,
+        item_id: &str,
+        width: u32,
+        height: u32,
+        x: Option<f64>,
+        y: Option<f64>,
+    ) -> Result<(), CmdError> {
+        let label = format!("pin-{}", uuid::Uuid::now_v7());
+        let (logical_w, logical_h) = (
+            (width as f64).clamp(120.0, 1600.0),
+            (height as f64).clamp(80.0, 1200.0),
+        );
+        let url = format!("index.html?pinWindow=1&id={item_id}");
+        let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+            .title("Asterism Pin")
+            .inner_size(logical_w, logical_h)
+            .decorations(false)
+            .always_on_top(true)
+            .resizable(true)
+            .skip_taskbar(true)
+            .shadow(true)
+            .accept_first_mouse(true)
+            .background_color(tauri::utils::config::Color(0, 0, 0, 0));
+
+        if let (Some(x), Some(y)) = (x, y) {
+            builder = builder.position(x, y);
+        }
+
+        let window = builder.build().map_err(|err| CmdError::Any(err.to_string()))?;
+        apply_capture_exclusion(&window);
+        Ok(())
     }
 }
 
