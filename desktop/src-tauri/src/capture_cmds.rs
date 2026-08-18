@@ -327,9 +327,7 @@ fn record_video_inner(
                 .map_err(|e| CmdError::Any(e.to_string()))?;
             let sess = OverlaySession { frame, selection: Some(target.selection.clone()) };
             if let Some((_, _, bgra)) = sess.crop_bgra() {
-                encoder
-                    .write_frame(&bgra)
-                    .map_err(|e| CmdError::Any(e.to_string()))?;
+                encoder.write_frame(&bgra).map_err(|e| CmdError::Any(e.to_string()))?;
             }
             frame_index = frame_index.saturating_add(1);
         }

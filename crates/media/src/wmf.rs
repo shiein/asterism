@@ -3,8 +3,8 @@
 //! 利用 IMFSinkWriter 自动调用 GPU 硬件 MFT（Intel QuickSync / NVIDIA NVENC / AMD VCE）
 //! 进行高性能、低 CPU 开销的 H.264 编码并直接封装为标准 MP4 容器。
 
-use std::path::Path;
 use crate::MediaError;
+use std::path::Path;
 
 #[cfg(windows)]
 pub struct WmfH264Encoder {
@@ -28,9 +28,9 @@ impl WmfH264Encoder {
         bitrate: Option<u32>,
     ) -> Result<Self, MediaError> {
         use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
         use windows::Win32::Media::MediaFoundation::*;
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+        use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+        use windows::core::PCWSTR;
 
         let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         unsafe {
@@ -99,9 +99,7 @@ impl WmfH264Encoder {
                 .SetInputMediaType(stream_idx, &in_type, None)
                 .map_err(|e| MediaError::Failed(format!("SetInputMediaType: {e}")))?;
 
-            writer
-                .BeginWriting()
-                .map_err(|e| MediaError::Failed(format!("BeginWriting: {e}")))?;
+            writer.BeginWriting().map_err(|e| MediaError::Failed(format!("BeginWriting: {e}")))?;
 
             stream_idx
         };
@@ -142,20 +140,16 @@ impl WmfH264Encoder {
 
             std::ptr::copy_nonoverlapping(bgra_pixels.as_ptr(), ptr, expected_len);
 
-            buffer
-                .Unlock()
-                .map_err(|e| MediaError::Failed(format!("Buffer Unlock: {e}")))?;
+            buffer.Unlock().map_err(|e| MediaError::Failed(format!("Buffer Unlock: {e}")))?;
 
             buffer
                 .SetCurrentLength(expected_len as u32)
                 .map_err(|e| MediaError::Failed(format!("SetCurrentLength: {e}")))?;
 
-            let sample = MFCreateSample()
-                .map_err(|e| MediaError::Failed(format!("MFCreateSample: {e}")))?;
+            let sample =
+                MFCreateSample().map_err(|e| MediaError::Failed(format!("MFCreateSample: {e}")))?;
 
-            sample
-                .AddBuffer(&buffer)
-                .map_err(|e| MediaError::Failed(format!("AddBuffer: {e}")))?;
+            sample.AddBuffer(&buffer).map_err(|e| MediaError::Failed(format!("AddBuffer: {e}")))?;
 
             sample
                 .SetSampleTime(self.timestamp_100ns)

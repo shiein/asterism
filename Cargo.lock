@@ -389,6 +389,7 @@ dependencies = [
  "gif 0.13.3",
  "image",
  "thiserror 2.0.20",
+ "windows",
 ]
 
 [[package]]
