@@ -466,7 +466,12 @@ fn scroll_capture_inner(
         }
         if i > 0 {
             asterism_capture::ScrollCaptureEngine::inject_scroll(-80);
-            std::thread::sleep(std::time::Duration::from_millis(120));
+            for _ in 0..12 {
+                if token.is_cancelled() {
+                    return Err(CmdError::Any("cancelled".into()));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
         let frame = backend.capture_display(monitor).map_err(|e| CmdError::Any(e.to_string()))?;
         let sess = OverlaySession { frame: frame.clone(), selection: sel.clone() };

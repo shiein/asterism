@@ -368,7 +368,12 @@ pub async fn capture_region(
                         break;
                     }
                     asterism_capture::ScrollCaptureEngine::inject_scroll(-80);
-                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    for _ in 0..15 {
+                        if token.is_cancelled() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
                     if let Ok(next_frame) = backend.capture_display(monitor) {
                         let sess =
                             OverlaySession { frame: next_frame.clone(), selection: sel.clone() };

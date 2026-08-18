@@ -113,7 +113,7 @@ export function SettingsPage() {
   const save = useMutation({
     mutationFn: (s: SyncSettings) => invoke("save_sync_settings", { settings: s }),
     onSuccess: () => {
-      void qc.invalidateQueries();
+      void qc.invalidateQueries({ queryKey: ["sync-settings"] });
       success("同步设置已保存");
     },
     onError: (e) => showError(`保存失败：${e}`),
@@ -123,7 +123,8 @@ export function SettingsPage() {
     mutationFn: ({ url, pairingCode }: { url: string; pairingCode: string | null }) =>
       invoke<string>("connect_hub", { url, pairingCode }),
     onSuccess: (code) => {
-      void qc.invalidateQueries();
+      void qc.invalidateQueries({ queryKey: ["sync-settings"] });
+      void qc.invalidateQueries({ queryKey: ["hub-devices"] });
       success(`已连接 Hub，首次配对码：${code}`);
     },
     onError: (e) => showError(`连接 Hub 失败：${e}`),
@@ -426,10 +427,10 @@ export function SettingsPage() {
 
             <div className="row wrap" style={{ marginTop: 10 }}>
               <button
-                className="btn btn-primary"
+                className="btn"
                 disabled={testWebdav.isPending}
                 onClick={() => {
-                  const url = webdavUrl || current.webdav?.url || "";
+                  const url = (webdavUrl !== "" ? webdavUrl : (current.webdav?.url ?? "")).trim();
                   if (!url) {
                     showError("请先填写 WebDAV 地址");
                     return;
@@ -437,33 +438,50 @@ export function SettingsPage() {
                   testWebdav.mutate({
                     enabled: true,
                     url,
-                    username: webdavUser !== "" ? webdavUser : (current.webdav?.username ?? null),
+                    username: webdavUser !== "" ? webdavUser.trim() : (current.webdav?.username ?? null),
                     password: webdavPass !== "" ? webdavPass : (current.webdav?.password ?? null),
                   });
                 }}
               >
                 <ShieldCheckIcon size={14} />
-                <span>{testWebdav.isPending ? "测试连接中…" : "测试 WebDAV 连接"}</span>
+                <span>{testWebdav.isPending ? "测试连接中…" : "测试连接"}</span>
               </button>
 
               <button
-                className="btn"
+                className="btn btn-primary"
                 onClick={() => {
-                  const url = webdavUrl || current.webdav?.url || "";
-                  const enabled = !current.webdav?.enabled;
+                  const url = (webdavUrl !== "" ? webdavUrl : (current.webdav?.url ?? "")).trim();
+                  if (!url) {
+                    showError("请先填写 WebDAV 地址");
+                    return;
+                  }
                   save.mutate({
                     ...current,
                     webdav: {
-                      enabled,
+                      enabled: true,
                       url,
-                      username: webdavUser !== "" ? webdavUser : (current.webdav?.username ?? null),
+                      username: webdavUser !== "" ? webdavUser.trim() : (current.webdav?.username ?? null),
                       password: webdavPass !== "" ? webdavPass : (current.webdav?.password ?? null),
                     },
                   });
                 }}
               >
-                {current.webdav?.enabled ? "停用 WebDAV 同步" : "保存并启用 WebDAV 同步"}
+                保存并启用 WebDAV
               </button>
+
+              {current.webdav?.enabled && (
+                <button
+                  className="btn"
+                  onClick={() => {
+                    save.mutate({
+                      ...current,
+                      webdav: current.webdav ? { ...current.webdav, enabled: false } : null,
+                    });
+                  }}
+                >
+                  停用 WebDAV
+                </button>
+              )}
             </div>
           </div>
         </section>
@@ -614,9 +632,19 @@ export function SettingsPage() {
                       className="btn btn-primary"
                       disabled={!manualPeerId || !manualPeerFp || trustPeer.isPending}
                       onClick={() => {
+                        const fp = manualPeerFp.trim();
+                        const id = manualPeerId.trim();
+                        if (!/^[a-fA-F0-9]{64}$/.test(fp)) {
+                          showError("证书指纹必须为 64 位十六进制字符 (SHA-256)");
+                          return;
+                        }
+                        if (!id) {
+                          showError("请输入有效的设备 ID");
+                          return;
+                        }
                         trustPeer.mutate({
-                          deviceId: manualPeerId.trim(),
-                          fingerprint: manualPeerFp.trim(),
+                          deviceId: id,
+                          fingerprint: fp.toLowerCase(),
                           name: manualPeerName.trim() || "Manual-Peer",
                         });
                         setManualPeerId("");

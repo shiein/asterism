@@ -52,7 +52,7 @@ pub fn safe_join_relative(base_dir: &Path, relative: &str) -> std::io::Result<st
         ));
     }
     for segment in clean_rel.split('/') {
-        if segment == ".." || segment.contains(':') {
+        if segment == ".." || segment == "." || segment.contains(':') {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "path traversal attempt detected",
@@ -60,6 +60,12 @@ pub fn safe_join_relative(base_dir: &Path, relative: &str) -> std::io::Result<st
         }
     }
     let target = base_dir.join(clean_rel);
+    if !target.starts_with(base_dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "path escapes base directory",
+        ));
+    }
     Ok(target)
 }
 
@@ -85,19 +91,28 @@ pub fn write_autostart_plist(label: &str, exe: &Path) -> std::io::Result<std::pa
     let dir = Path::new(&home).join("Library/LaunchAgents");
     fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{label}.plist"));
+    let escaped_label = xml_escape(label);
+    let escaped_exe = xml_escape(&exe.display().to_string());
     let body = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>{label}</string>
-  <key>ProgramArguments</key><array><string>{}</string></array>
+  <key>Label</key><string>{escaped_label}</string>
+  <key>ProgramArguments</key><array><string>{escaped_exe}</string></array>
   <key>RunAtLoad</key><true/>
 </dict></plist>
-"#,
-        exe.display()
+"#
     );
     fs::write(&path, body)?;
     Ok(path)
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[cfg(windows)]

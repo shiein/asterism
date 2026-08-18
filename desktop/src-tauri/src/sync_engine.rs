@@ -217,6 +217,8 @@ async fn run_loop(
         })
         .ok();
 
+    let mut net_rx_active = true;
+
     loop {
         tokio::select! {
             accepted = accept_opt(listener.as_ref(), &cert, &trust) => {
@@ -278,9 +280,13 @@ async fn run_loop(
                     }
                 }
             }
-            _ = net_rx.recv() => {
-                tracing::info!("network change; refreshing candidates");
-                exchange_candidates(&identity, &cert, &settings, &peers, &paths).await;
+            net_change = net_rx.recv(), if net_rx_active => {
+                if net_change.is_some() {
+                    tracing::info!("network change; refreshing candidates");
+                    exchange_candidates(&identity, &cert, &settings, &peers, &paths).await;
+                } else {
+                    net_rx_active = false;
+                }
             }
             _ = tokio::time::sleep(Duration::from_secs(8)) => {
                 consume_committed_outbox(
