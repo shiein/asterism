@@ -257,7 +257,7 @@ pub async fn capture_fullscreen(
     let token = session.cancel_token();
     ensure_capture_permission().await?;
     let hidden = crate::capture_ui::HiddenMainWindow::hide(&app)?;
-    hidden.wait_until_not_captured();
+    hidden.wait_until_not_captured().await;
     let (png, width, height) = tauri::async_runtime::spawn_blocking(move || {
         if token.is_cancelled() {
             return Err("cancelled".into());
@@ -323,7 +323,7 @@ pub async fn capture_region(
     // 以及随后的屏幕捕获重叠；否则用户会先看到原始桌面、过一会儿才盖上冻结层，
     // 观感就是"先截了一张图，再在这张图上二次截图"。
     let overlay = crate::overlay_cli::spawn_overlay().map_err(CmdError::from)?;
-    hidden.wait_until_not_captured();
+    hidden.wait_until_not_captured().await;
     let (png, w, h, is_pin, pin_pos) = tauri::async_runtime::spawn_blocking(move || {
         let mut overlay = overlay;
         if token.is_cancelled() {

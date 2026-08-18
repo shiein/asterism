@@ -39,7 +39,7 @@ pub fn elevate_overlay_ns_view(ns_view: *mut std::ffi::c_void) {
     unsafe {
         let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
         if !app.is_null() {
-            let _: () =
+            let _: bool =
                 msg_send![app, setActivationPolicy: NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY];
         }
 

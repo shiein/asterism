@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { copyItem, previewImage } from "../api";
 import { CheckIcon, CopyIcon, XIcon } from "../components/icons";
@@ -6,16 +6,32 @@ import { CheckIcon, CopyIcon, XIcon } from "../components/icons";
 export function PinWindowView() {
   const params = new URLSearchParams(window.location.search);
   const id = params.get("id");
+  const containerRef = useRef<HTMLDivElement>(null);
   const [dataUrl, setDataUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [scale, setScale] = useState(1);
   const [opacity, setOpacity] = useState(1);
 
   useEffect(() => {
-    if (!id) return;
+    if (!id) {
+      setLoadError("未指定图片 ID");
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setLoadError(null);
     previewImage(id)
-      .then(setDataUrl)
-      .catch((err) => console.error("failed to load pin image", err));
+      .then((url) => {
+        setDataUrl(url);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error("failed to load pin image", err);
+        setLoadError(String(err));
+        setLoading(false);
+      });
   }, [id]);
 
   useEffect(() => {
@@ -28,17 +44,22 @@ export function PinWindowView() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  function handleWheel(e: React.WheelEvent) {
-    if (e.ctrlKey || e.metaKey) {
-      // 调节透明度
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    function handleWheel(e: WheelEvent) {
       e.preventDefault();
-      setOpacity((prev) => Math.min(1, Math.max(0.2, prev - e.deltaY * 0.001)));
-    } else {
-      // 缩放
-      e.preventDefault();
-      setScale((prev) => Math.min(3, Math.max(0.3, prev - e.deltaY * 0.0015)));
+      if (e.ctrlKey || e.metaKey) {
+        setOpacity((prev) => Math.min(1, Math.max(0.2, prev - e.deltaY * 0.001)));
+      } else {
+        setScale((prev) => Math.min(3, Math.max(0.3, prev - e.deltaY * 0.0015)));
+      }
     }
-  }
+
+    el.addEventListener("wheel", handleWheel, { passive: false });
+    return () => el.removeEventListener("wheel", handleWheel);
+  }, []);
 
   async function handleCopy() {
     if (!id) return;
@@ -57,13 +78,18 @@ export function PinWindowView() {
 
   return (
     <div
+      ref={containerRef}
       className="pin-container"
       data-tauri-drag-region
-      onWheel={handleWheel}
       onDoubleClick={handleClose}
       style={{ opacity }}
     >
-      <div className="pin-toolbar" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="pin-toolbar"
+        data-tauri-drag-region="false"
+        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <button
           className="pin-btn"
           onClick={handleCopy}
@@ -95,9 +121,17 @@ export function PinWindowView() {
           style={{ transform: `scale(${scale})` }}
           draggable={false}
         />
-      ) : (
+      ) : loading ? (
         <div className="pin-loading" data-tauri-drag-region>
           载入贴图…
+        </div>
+      ) : (
+        <div className="pin-error" data-tauri-drag-region>
+          <span>贴图载入失败</span>
+          <small>{loadError}</small>
+          <button className="btn btn-plain" onClick={handleClose} style={{ marginTop: 8 }}>
+            关闭
+          </button>
         </div>
       )}
     </div>

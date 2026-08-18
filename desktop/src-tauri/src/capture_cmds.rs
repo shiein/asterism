@@ -83,7 +83,7 @@ pub async fn capture_window(
     }
     crate::commands::ensure_capture_permission().await?;
     let hidden = crate::capture_ui::HiddenMainWindow::hide(&app)?;
-    hidden.wait_until_not_captured();
+    hidden.wait_until_not_captured().await;
     let frame = tauri::async_runtime::spawn_blocking(move || XcapBackend.capture_window(id))
         .await
         .map_err(|err| CmdError::Any(err.to_string()))?
@@ -141,7 +141,7 @@ pub async fn record_gif(
     let recording = state.recording.begin().map_err(CmdError::from)?;
     let overlay = crate::overlay_cli::spawn_overlay().map_err(CmdError::from)?;
     let main_window = crate::capture_ui::HiddenMainWindow::hide(&app)?;
-    main_window.wait_until_not_captured();
+    main_window.wait_until_not_captured().await;
     let target = tauri::async_runtime::spawn_blocking({
         let token = token.clone();
         move || select_recording_target(token, overlay)
@@ -226,7 +226,7 @@ pub async fn record_video(
     let recording = state.recording.begin().map_err(CmdError::from)?;
     let overlay = crate::overlay_cli::spawn_overlay().map_err(CmdError::from)?;
     let main_window = crate::capture_ui::HiddenMainWindow::hide(&app)?;
-    main_window.wait_until_not_captured();
+    main_window.wait_until_not_captured().await;
     let target = tauri::async_runtime::spawn_blocking({
         let token = token.clone();
         move || select_recording_target(token, overlay)
@@ -513,7 +513,7 @@ pub async fn scroll_capture(
     crate::commands::ensure_capture_permission().await?;
     let overlay = crate::overlay_cli::spawn_overlay().map_err(CmdError::from)?;
     let hidden = crate::capture_ui::HiddenMainWindow::hide(&app)?;
-    hidden.wait_until_not_captured();
+    hidden.wait_until_not_captured().await;
     let (png, w, h) =
         tauri::async_runtime::spawn_blocking(move || scroll_capture_inner(frames, token, overlay))
             .await

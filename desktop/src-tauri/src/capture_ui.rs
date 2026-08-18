@@ -59,11 +59,11 @@ impl HiddenMainWindow {
         Ok(Self { window, restore })
     }
 
-    pub fn wait_until_not_captured(&self) {
+    pub async fn wait_until_not_captured(&self) {
         if self.restore {
             // macOS 禁用过渡动画，Windows 启用 WDA_EXCLUDEFROMCAPTURE，
             // 仅需等待合成器单帧缓冲区刷洗（~15ms）即可完全消除残影与延迟。
-            std::thread::sleep(Duration::from_millis(15));
+            tokio::time::sleep(Duration::from_millis(15)).await;
         }
     }
 }

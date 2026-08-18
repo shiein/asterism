@@ -90,7 +90,7 @@ export function HistoryDetailModal({
                 className="btn"
                 onClick={() => {
                   onClose();
-                  void pinImage(item.id);
+                  pinImage(item.id).catch((err) => console.error("failed to pin image", err));
                 }}
                 title="贴在屏幕上 (Pin)"
               >

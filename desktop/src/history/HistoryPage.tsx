@@ -174,6 +174,15 @@ export function HistoryPage({
     }
   }
 
+  async function handlePin(id: string) {
+    try {
+      await pinImage(id);
+      success("已贴在屏幕最前端");
+    } catch (err) {
+      showError(`贴图失败：${err}`);
+    }
+  }
+
   const isEmpty = historyItems.length === 0 && !history.isLoading && !history.error;
 
   return (
@@ -299,6 +308,7 @@ export function HistoryPage({
               onCopy={() => copy.mutate(item.id)}
               onFavorite={() => fav.mutate({ id: item.id, favorite: !item.favorite })}
               onDelete={() => remove.mutate(item.id)}
+              onPin={() => void handlePin(item.id)}
               onAnnotate={() => onAnnotate(item.id)}
               onOpenDetail={() => setDetailItem(item)}
             />
@@ -341,6 +351,7 @@ interface EntryProps {
   onCopy: () => void;
   onFavorite: () => void;
   onDelete: () => void;
+  onPin: () => void;
   onAnnotate: () => void;
   onOpenDetail: () => void;
 }
@@ -352,6 +363,7 @@ function Entry({
   onCopy,
   onFavorite,
   onDelete,
+  onPin,
   onAnnotate,
   onOpenDetail,
 }: EntryProps) {
@@ -413,7 +425,7 @@ function Entry({
             <>
               <button
                 className="btn btn-plain btn-icon"
-                onClick={() => void pinImage(item.id)}
+                onClick={onPin}
                 title="贴在屏幕上 (Pin)"
               >
                 <PinIcon size={14} />
